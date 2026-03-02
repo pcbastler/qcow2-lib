@@ -63,7 +63,11 @@ impl SnapshotHeader {
 
         // Read extra data fields
         let extra_start = SNAPSHOT_FIXED_SIZE;
-        let extra_end = extra_start + extra_data_size as usize;
+        let extra_end = extra_start
+            .checked_add(extra_data_size as usize)
+            .ok_or(Error::ArithmeticOverflow {
+                context: "snapshot extra_data_size",
+            })?;
 
         if bytes.len() < extra_end {
             return Err(Error::SnapshotTruncated {
@@ -89,8 +93,16 @@ impl SnapshotHeader {
 
         // Variable-length strings follow extra data
         let strings_start = extra_end;
-        let id_end = strings_start + id_str_size;
-        let name_end = id_end + name_size;
+        let id_end = strings_start
+            .checked_add(id_str_size)
+            .ok_or(Error::ArithmeticOverflow {
+                context: "snapshot id_str_size",
+            })?;
+        let name_end = id_end
+            .checked_add(name_size)
+            .ok_or(Error::ArithmeticOverflow {
+                context: "snapshot name_size",
+            })?;
 
         if bytes.len() < name_end {
             return Err(Error::SnapshotTruncated {
@@ -105,7 +117,10 @@ impl SnapshotHeader {
         let name = String::from_utf8_lossy(&bytes[id_end..name_end]).into_owned();
 
         // Total consumed = name_end padded to 8-byte boundary
-        let consumed = (name_end + 7) & !7;
+        let padded = name_end.checked_add(7).ok_or(Error::ArithmeticOverflow {
+            context: "snapshot padding",
+        })?;
+        let consumed = padded & !7;
 
         Ok((
             Self {
@@ -133,7 +148,11 @@ impl SnapshotHeader {
             let (snapshot, consumed) =
                 Self::read_from(&bytes[pos..], base_offset + pos as u64)?;
             snapshots.push(snapshot);
-            pos += consumed;
+            pos = pos
+                .checked_add(consumed)
+                .ok_or(Error::ArithmeticOverflow {
+                    context: "snapshot table position",
+                })?;
         }
 
         Ok(snapshots)
@@ -392,6 +411,38 @@ mod tests {
             assert_eq!(parsed.vm_state_size, 42, "vm_state for extra_data_size={extra_size}");
             assert_eq!(parsed.extra_data_size, extra_size);
         }
+    }
+
+    #[test]
+    fn reject_overflow_extra_data_size() {
+        // extra_data_size set to u32::MAX → SNAPSHOT_FIXED_SIZE + u32::MAX overflows on 32-bit
+        // and causes a huge allocation on 64-bit. The checked_add catches it
+        // via the truncation check (extra_end > bytes.len()).
+        let mut buf = vec![0u8; 256];
+        BigEndian::write_u64(&mut buf[0..], 0x5_0000); // l1_table_offset
+        BigEndian::write_u32(&mut buf[8..], 8); // l1_table_entries
+        BigEndian::write_u16(&mut buf[12..], 1); // id_str_size
+        BigEndian::write_u16(&mut buf[14..], 1); // name_size
+        BigEndian::write_u32(&mut buf[36..], u32::MAX); // extra_data_size
+
+        let result = SnapshotHeader::read_from(&buf, 0);
+        assert!(result.is_err(), "should reject overflowing extra_data_size");
+    }
+
+    #[test]
+    fn reject_overflow_string_sizes() {
+        // Set id_str_size to u16::MAX and name_size to u16::MAX.
+        // strings_start + id_str_size + name_size should still be caught
+        // by the truncation check even on 64-bit.
+        let mut buf = vec![0u8; 256];
+        BigEndian::write_u64(&mut buf[0..], 0x5_0000);
+        BigEndian::write_u32(&mut buf[8..], 8);
+        BigEndian::write_u16(&mut buf[12..], u16::MAX); // id_str_size
+        BigEndian::write_u16(&mut buf[14..], u16::MAX); // name_size
+        BigEndian::write_u32(&mut buf[36..], 0); // extra_data_size
+
+        let result = SnapshotHeader::read_from(&buf, 0);
+        assert!(result.is_err(), "should reject overflowing string sizes");
     }
 
     #[test]

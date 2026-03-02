@@ -47,6 +47,16 @@ impl RefcountTableEntry {
     pub fn is_unallocated(self) -> bool {
         self.0 & REFCOUNT_TABLE_OFFSET_MASK == 0
     }
+
+    /// Create an entry pointing to a refcount block at the given offset.
+    pub fn with_block_offset(offset: ClusterOffset) -> Self {
+        Self(offset.0 & REFCOUNT_TABLE_OFFSET_MASK)
+    }
+
+    /// Create an unallocated refcount table entry.
+    pub fn unallocated() -> Self {
+        Self(0)
+    }
 }
 
 /// A refcount block: one cluster of refcount entries.
@@ -220,6 +230,52 @@ impl RefcountBlock {
     pub fn refcount_order(&self) -> u32 {
         self.refcount_order
     }
+
+    /// Set the refcount for a given index within this block.
+    pub fn set(&mut self, index: u32, value: u64) -> Result<()> {
+        let block_size = self.refcounts.len() as u32;
+        let slot = self
+            .refcounts
+            .get_mut(index as usize)
+            .ok_or(Error::RefcountIndexOutOfBounds {
+                index,
+                block_size,
+            })?;
+        *slot = value;
+        Ok(())
+    }
+
+    /// Create a new refcount block with all entries set to zero.
+    ///
+    /// The block will have `cluster_size * 8 / (1 << refcount_order)` entries,
+    /// matching the number of clusters covered by one block.
+    pub fn new_empty(cluster_size: usize, refcount_order: u32) -> Self {
+        let refcount_bits = 1u32 << refcount_order;
+        let entry_count = cluster_size * 8 / refcount_bits as usize;
+        Self {
+            refcounts: vec![0; entry_count],
+            refcount_order,
+        }
+    }
+}
+
+/// Serialize a refcount table to bytes.
+///
+/// Each entry is written as an 8-byte big-endian value.
+pub fn write_refcount_table(entries: &[RefcountTableEntry], buf: &mut [u8]) -> Result<()> {
+    let needed = entries.len() * REFCOUNT_TABLE_ENTRY_SIZE;
+    if buf.len() < needed {
+        return Err(Error::BufferTooSmall {
+            expected: needed,
+            actual: buf.len(),
+        });
+    }
+
+    for (i, entry) in entries.iter().enumerate() {
+        BigEndian::write_u64(&mut buf[i * REFCOUNT_TABLE_ENTRY_SIZE..], entry.raw());
+    }
+
+    Ok(())
 }
 
 /// Parse a refcount table from raw bytes.
@@ -548,5 +604,112 @@ mod tests {
         let block = RefcountBlock::read_from(&data, 4).unwrap(); // 16-bit
         assert_eq!(block.len(), 0);
         assert!(block.is_empty());
+    }
+
+    // ---- Mutation methods ----
+
+    #[test]
+    fn refcount_block_set_valid() {
+        let mut block = RefcountBlock::new_empty(64, 4); // 16-bit, 32 entries
+        assert_eq!(block.get(5).unwrap(), 0);
+        block.set(5, 42).unwrap();
+        assert_eq!(block.get(5).unwrap(), 42);
+    }
+
+    #[test]
+    fn refcount_block_set_out_of_bounds() {
+        let mut block = RefcountBlock::new_empty(64, 4); // 32 entries
+        match block.set(100, 1) {
+            Err(Error::RefcountIndexOutOfBounds { index: 100, .. }) => {}
+            other => panic!("expected RefcountIndexOutOfBounds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refcount_block_new_empty_correct_size() {
+        // 65536-byte cluster, 16-bit refcounts = 32768 entries
+        let block = RefcountBlock::new_empty(65536, 4);
+        assert_eq!(block.len(), 32768);
+        assert_eq!(block.refcount_order(), 4);
+        for i in 0..10 {
+            assert_eq!(block.get(i).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn refcount_block_set_then_write_round_trip() {
+        let mut block = RefcountBlock::new_empty(64, 4); // 32 entries, 16-bit
+        block.set(0, 1).unwrap();
+        block.set(10, 99).unwrap();
+        block.set(31, 65535).unwrap();
+
+        let mut buf = vec![0u8; 64];
+        block.write_to(&mut buf).unwrap();
+
+        let parsed = RefcountBlock::read_from(&buf, 4).unwrap();
+        assert_eq!(parsed.get(0).unwrap(), 1);
+        assert_eq!(parsed.get(10).unwrap(), 99);
+        assert_eq!(parsed.get(31).unwrap(), 65535);
+    }
+
+    #[test]
+    fn refcount_table_entry_constructors() {
+        let unalloc = RefcountTableEntry::unallocated();
+        assert!(unalloc.is_unallocated());
+        assert_eq!(unalloc.block_offset(), None);
+
+        let with_offset = RefcountTableEntry::with_block_offset(ClusterOffset(0x20000));
+        assert!(!with_offset.is_unallocated());
+        assert_eq!(with_offset.block_offset(), Some(ClusterOffset(0x20000)));
+    }
+
+    #[test]
+    fn write_refcount_table_round_trip() {
+        let entries = vec![
+            RefcountTableEntry::with_block_offset(ClusterOffset(0x10000)),
+            RefcountTableEntry::unallocated(),
+            RefcountTableEntry::with_block_offset(ClusterOffset(0x30000)),
+        ];
+
+        let mut buf = vec![0u8; 3 * REFCOUNT_TABLE_ENTRY_SIZE];
+        write_refcount_table(&entries, &mut buf).unwrap();
+
+        let parsed = read_refcount_table(&buf, 3).unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].block_offset(), Some(ClusterOffset(0x10000)));
+        assert!(parsed[1].is_unallocated());
+        assert_eq!(parsed[2].block_offset(), Some(ClusterOffset(0x30000)));
+    }
+
+    #[test]
+    fn write_refcount_table_buffer_too_small() {
+        let entries = vec![
+            RefcountTableEntry::unallocated(),
+            RefcountTableEntry::unallocated(),
+        ];
+        let mut buf = vec![0u8; 8]; // needs 16
+        match write_refcount_table(&entries, &mut buf) {
+            Err(Error::BufferTooSmall {
+                expected: 16,
+                actual: 8,
+            }) => {}
+            other => panic!("expected BufferTooSmall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refcount_block_new_empty_1bit() {
+        // 1-bit refcounts in 4-byte block = 32 entries
+        let block = RefcountBlock::new_empty(4, 0);
+        assert_eq!(block.len(), 32);
+        assert_eq!(block.refcount_order(), 0);
+    }
+
+    #[test]
+    fn refcount_block_new_empty_64bit() {
+        // 64-bit refcounts in 64-byte block = 8 entries
+        let block = RefcountBlock::new_empty(64, 6);
+        assert_eq!(block.len(), 8);
+        assert_eq!(block.refcount_order(), 6);
     }
 }

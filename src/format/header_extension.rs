@@ -82,7 +82,11 @@ impl HeaderExtension {
             }
 
             let data_start = pos + TLV_HEADER_SIZE;
-            let data_end = data_start + ext_len;
+            let data_end = data_start
+                .checked_add(ext_len)
+                .ok_or(Error::ArithmeticOverflow {
+                    context: "header extension data length",
+                })?;
 
             if data_end > bytes.len() {
                 return Err(Error::ExtensionTruncated {
@@ -97,7 +101,12 @@ impl HeaderExtension {
             extensions.push(extension);
 
             // Advance past data + padding to next 8-byte boundary
-            let padded_len = (ext_len + 7) & !7;
+            let padded_len = ext_len
+                .checked_add(7)
+                .ok_or(Error::ArithmeticOverflow {
+                    context: "header extension padding",
+                })?
+                & !7;
             pos = data_start + padded_len;
         }
 
@@ -443,6 +452,20 @@ mod tests {
         let parsed = HeaderExtension::read_all(&serialized).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], ext);
+    }
+
+    #[test]
+    fn reject_overflow_extension_length() {
+        // Extension claims u32::MAX length. On 64-bit, data_start + u32::MAX
+        // won't overflow usize but will exceed bytes.len() → ExtensionTruncated.
+        // On 32-bit, the checked_add catches the arithmetic overflow.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // some type
+        buf.extend_from_slice(&u32::MAX.to_be_bytes()); // huge length
+        buf.extend_from_slice(&[0u8; 16]); // a bit of data
+
+        let result = HeaderExtension::read_all(&buf);
+        assert!(result.is_err(), "should reject overflowing extension length");
     }
 
     #[test]

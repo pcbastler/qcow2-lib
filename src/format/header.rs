@@ -203,7 +203,7 @@ impl Header {
             compression_type,
         };
 
-        header.validate()?;
+        header.validate_structural()?;
         Ok(header)
     }
 
@@ -303,8 +303,10 @@ impl Header {
         self.backing_file_offset != 0 && self.backing_file_size > 0
     }
 
-    /// Validate header invariants after parsing.
-    fn validate(&self) -> Result<()> {
+    /// Validate structural header invariants that don't require file size.
+    ///
+    /// Called automatically by [`read_from`](Self::read_from).
+    fn validate_structural(&self) -> Result<()> {
         // Cluster bits range
         if self.cluster_bits < MIN_CLUSTER_BITS || self.cluster_bits > MAX_CLUSTER_BITS {
             return Err(Error::InvalidClusterBits {
@@ -336,6 +338,133 @@ impl Header {
         {
             return Err(Error::L2TableMisaligned {
                 offset: self.l1_table_offset.0,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate header offsets and sizes against the physical file size.
+    ///
+    /// Must be called after [`read_from`](Self::read_from) when the file
+    /// size is known. Catches malicious or corrupted images with offsets
+    /// that point beyond EOF, oversized allocations, or inconsistent fields.
+    pub fn validate_against_file(&self, file_size: u64) -> Result<()> {
+        let cluster_size = self.cluster_size();
+
+        // virtual_size must be non-zero
+        if self.virtual_size == 0 {
+            return Err(Error::AllocationTooLarge {
+                requested: 0,
+                max: 0,
+                context: "virtual_size is zero",
+            });
+        }
+
+        // L1 table: offset + entries*8 must fit in file
+        if self.l1_table_entries > 0 {
+            let l1_byte_size = (self.l1_table_entries as u64)
+                .checked_mul(L1_ENTRY_SIZE as u64)
+                .ok_or(Error::ArithmeticOverflow {
+                    context: "l1_table_entries * L1_ENTRY_SIZE",
+                })?;
+            let l1_end = self
+                .l1_table_offset
+                .0
+                .checked_add(l1_byte_size)
+                .ok_or(Error::ArithmeticOverflow {
+                    context: "l1_table_offset + l1_byte_size",
+                })?;
+            if l1_end > file_size {
+                return Err(Error::MetadataOffsetBeyondEof {
+                    offset: self.l1_table_offset.0,
+                    size: l1_byte_size,
+                    file_size,
+                    context: "L1 table",
+                });
+            }
+        }
+
+        // Refcount table: must be cluster-aligned and fit in file
+        if self.refcount_table_clusters > 0 {
+            if !self
+                .refcount_table_offset
+                .is_cluster_aligned(self.cluster_bits)
+            {
+                return Err(Error::RefcountBlockMisaligned {
+                    offset: self.refcount_table_offset.0,
+                });
+            }
+            let rt_byte_size = (self.refcount_table_clusters as u64)
+                .checked_mul(cluster_size)
+                .ok_or(Error::ArithmeticOverflow {
+                    context: "refcount_table_clusters * cluster_size",
+                })?;
+            let rt_end = self
+                .refcount_table_offset
+                .0
+                .checked_add(rt_byte_size)
+                .ok_or(Error::ArithmeticOverflow {
+                    context: "refcount_table_offset + rt_byte_size",
+                })?;
+            if rt_end > file_size {
+                return Err(Error::MetadataOffsetBeyondEof {
+                    offset: self.refcount_table_offset.0,
+                    size: rt_byte_size,
+                    file_size,
+                    context: "refcount table",
+                });
+            }
+        }
+
+        // Backing file name: must respect MAX_BACKING_FILE_NAME and fit in file
+        if self.has_backing_file() {
+            if self.backing_file_size > MAX_BACKING_FILE_NAME {
+                return Err(Error::AllocationTooLarge {
+                    requested: self.backing_file_size as u64,
+                    max: MAX_BACKING_FILE_NAME as u64,
+                    context: "backing file name",
+                });
+            }
+            let bf_end = self
+                .backing_file_offset
+                .checked_add(self.backing_file_size as u64)
+                .ok_or(Error::ArithmeticOverflow {
+                    context: "backing_file_offset + backing_file_size",
+                })?;
+            if bf_end > file_size {
+                return Err(Error::MetadataOffsetBeyondEof {
+                    offset: self.backing_file_offset,
+                    size: self.backing_file_size as u64,
+                    file_size,
+                    context: "backing file name",
+                });
+            }
+        }
+
+        // Snapshot table: offset must be within file
+        if self.snapshot_count > 0 && self.snapshots_offset.0 >= file_size {
+            return Err(Error::MetadataOffsetBeyondEof {
+                offset: self.snapshots_offset.0,
+                size: 0,
+                file_size,
+                context: "snapshot table",
+            });
+        }
+
+        // header_length must not exceed cluster_size (header lives in first cluster)
+        if (self.header_length as u64) > cluster_size {
+            return Err(Error::AllocationTooLarge {
+                requested: self.header_length as u64,
+                max: cluster_size,
+                context: "header_length exceeds cluster size",
+            });
+        }
+
+        // Only deflate compression is supported
+        if self.compression_type != COMPRESSION_DEFLATE {
+            return Err(Error::UnsupportedIncompatibleFeatures {
+                features: self.compression_type as u64,
             });
         }
 
@@ -715,5 +844,179 @@ mod tests {
         h.write_to(&mut buf).unwrap();
         let parsed = Header::read_from(&buf).unwrap();
         assert_eq!(parsed.compression_type, 0);
+    }
+
+    #[test]
+    fn reject_misaligned_l1_table_offset() {
+        // L1 table offset must be cluster-aligned when l1_table_entries > 0.
+        let mut h = make_test_header_v3();
+        h.l1_table_offset = ClusterOffset(0x3_0001); // off by 1 byte
+        let mut buf = vec![0u8; h.serialized_length()];
+        h.write_to(&mut buf).unwrap();
+
+        match Header::read_from(&buf) {
+            Err(Error::L2TableMisaligned { offset: 0x3_0001 }) => {}
+            other => panic!("expected L2TableMisaligned, got {other:?}"),
+        }
+    }
+
+    // ---- validate_against_file tests ----
+
+    #[test]
+    fn validate_valid_header_passes() {
+        let h = make_test_header_v3();
+        h.validate_against_file(0x100_0000).unwrap();
+    }
+
+    #[test]
+    fn validate_virtual_size_zero() {
+        let mut h = make_test_header_v3();
+        h.virtual_size = 0;
+        match h.validate_against_file(0x100_0000) {
+            Err(Error::AllocationTooLarge { context, .. }) if context.contains("virtual_size") => {}
+            other => panic!("expected AllocationTooLarge for zero virtual_size, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_l1_table_beyond_eof() {
+        let h = make_test_header_v3();
+        // File is too small for L1 table (offset 0x3_0000 + 16*8 = 0x3_0080)
+        let file_size = h.l1_table_offset.0 + 10;
+        match h.validate_against_file(file_size) {
+            Err(Error::MetadataOffsetBeyondEof {
+                context: "L1 table",
+                ..
+            }) => {}
+            other => panic!("expected MetadataOffsetBeyondEof for L1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_l1_entries_overflow() {
+        let mut h = make_test_header_v3();
+        h.l1_table_entries = u32::MAX;
+        match h.validate_against_file(0x100_0000) {
+            Err(Error::MetadataOffsetBeyondEof { .. }) | Err(Error::ArithmeticOverflow { .. }) => {}
+            other => panic!("expected overflow or EOF error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_l1_offset_plus_size_overflow() {
+        let mut h = make_test_header_v3();
+        h.l1_table_offset = ClusterOffset(u64::MAX - 10);
+        h.l1_table_entries = 16;
+        // offset + 16*8 = u64::MAX - 10 + 128 → overflow
+        match h.validate_against_file(u64::MAX) {
+            Err(Error::ArithmeticOverflow { .. }) => {}
+            other => panic!("expected ArithmeticOverflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_refcount_table_misaligned() {
+        let mut h = make_test_header_v3();
+        h.refcount_table_offset = ClusterOffset(0x1_0001); // not aligned
+        h.refcount_table_clusters = 1;
+        match h.validate_against_file(0x100_0000) {
+            Err(Error::RefcountBlockMisaligned { .. }) => {}
+            other => panic!("expected RefcountBlockMisaligned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_refcount_table_beyond_eof() {
+        let mut h = make_test_header_v3();
+        h.refcount_table_offset = ClusterOffset(0x100_0000);
+        h.refcount_table_clusters = 1;
+        let file_size = 0x80_0000;
+        match h.validate_against_file(file_size) {
+            Err(Error::MetadataOffsetBeyondEof {
+                context: "refcount table",
+                ..
+            }) => {}
+            other => panic!("expected MetadataOffsetBeyondEof for refcount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_refcount_clusters_overflow() {
+        let mut h = make_test_header_v3();
+        h.refcount_table_clusters = u32::MAX;
+        // Even with u32::MAX clusters, the total size overflows u64 when
+        // combined with the offset, or at least exceeds any real file.
+        match h.validate_against_file(0x100_0000) {
+            Err(Error::MetadataOffsetBeyondEof {
+                context: "refcount table",
+                ..
+            }) => {}
+            other => panic!("expected MetadataOffsetBeyondEof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_backing_file_name_too_long() {
+        let mut h = make_test_header_v3();
+        h.backing_file_offset = 100;
+        h.backing_file_size = MAX_BACKING_FILE_NAME + 1;
+        match h.validate_against_file(0x100_0000) {
+            Err(Error::AllocationTooLarge {
+                context: "backing file name",
+                ..
+            }) => {}
+            other => panic!("expected AllocationTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_backing_file_beyond_eof() {
+        let mut h = make_test_header_v3();
+        // Use a file_size large enough that L1 + refcount pass, but
+        // the backing file name extends past EOF.
+        h.backing_file_offset = 0x200_0000 - 10;
+        h.backing_file_size = 100;
+        let file_size = 0x200_0000;
+        match h.validate_against_file(file_size) {
+            Err(Error::MetadataOffsetBeyondEof {
+                context: "backing file name",
+                ..
+            }) => {}
+            other => panic!("expected MetadataOffsetBeyondEof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_offset_beyond_eof() {
+        let mut h = make_test_header_v3();
+        h.snapshot_count = 1;
+        h.snapshots_offset = ClusterOffset(0x200_0000);
+        match h.validate_against_file(0x100_0000) {
+            Err(Error::MetadataOffsetBeyondEof {
+                context: "snapshot table",
+                ..
+            }) => {}
+            other => panic!("expected MetadataOffsetBeyondEof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_header_length_exceeds_cluster() {
+        let mut h = make_test_header_v3();
+        h.header_length = 0x2_0000; // 128KB, larger than 64KB cluster
+        match h.validate_against_file(0x100_0000) {
+            Err(Error::AllocationTooLarge { .. }) => {}
+            other => panic!("expected AllocationTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_unsupported_compression_type() {
+        let mut h = make_test_header_v3();
+        h.compression_type = 99;
+        match h.validate_against_file(0x100_0000) {
+            Err(Error::UnsupportedIncompatibleFeatures { .. }) => {}
+            other => panic!("expected UnsupportedIncompatibleFeatures, got {other:?}"),
+        }
     }
 }

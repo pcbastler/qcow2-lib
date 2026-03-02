@@ -181,6 +181,39 @@ impl L2Table {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Set an entry at the given index, with bounds checking.
+    pub fn set(&mut self, index: L2Index, entry: L2Entry) -> Result<()> {
+        let table_size = self.entries.len() as u32;
+        let slot = self
+            .entries
+            .get_mut(index.0 as usize)
+            .ok_or(Error::L2IndexOutOfBounds {
+                index: index.0,
+                table_size,
+            })?;
+        *slot = entry;
+        Ok(())
+    }
+
+    /// Create a new L2 table with all entries unallocated.
+    pub fn new_empty(cluster_bits: u32) -> Self {
+        let entry_count = (1usize << cluster_bits) / L2_ENTRY_SIZE;
+        Self {
+            entries: vec![L2Entry::Unallocated; entry_count],
+            cluster_bits,
+        }
+    }
+
+    /// The cluster_bits used by this table.
+    pub fn cluster_bits(&self) -> u32 {
+        self.cluster_bits
+    }
+
+    /// Iterate over all entries in the table.
+    pub fn iter(&self) -> impl Iterator<Item = L2Entry> + '_ {
+        self.entries.iter().copied()
+    }
 }
 
 #[cfg(test)]
@@ -438,5 +471,95 @@ mod tests {
         let raw = L2_COMPRESSED_FLAG | desc.encode(cluster_bits);
         let entry = L2Entry::decode(raw, cluster_bits);
         assert_eq!(entry, L2Entry::Compressed(desc));
+    }
+
+    // ---- Mutation methods ----
+
+    #[test]
+    fn set_valid_index() {
+        let mut table = L2Table::new_empty(CLUSTER_BITS);
+        let entry = L2Entry::Standard {
+            host_offset: ClusterOffset(0x40000),
+            copied: true,
+        };
+        table.set(L2Index(10), entry).unwrap();
+        assert_eq!(table.get(L2Index(10)).unwrap(), entry);
+    }
+
+    #[test]
+    fn set_out_of_bounds() {
+        let mut table = L2Table::new_empty(CLUSTER_BITS);
+        let entry = L2Entry::Standard {
+            host_offset: ClusterOffset(0x10000),
+            copied: false,
+        };
+        let bad_index = table.len();
+        match table.set(L2Index(bad_index), entry) {
+            Err(Error::L2IndexOutOfBounds { .. }) => {}
+            other => panic!("expected L2IndexOutOfBounds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_empty_correct_size() {
+        let table = L2Table::new_empty(CLUSTER_BITS);
+        let expected = (1usize << CLUSTER_BITS) / L2_ENTRY_SIZE;
+        assert_eq!(table.len(), expected as u32);
+        assert_eq!(table.cluster_bits(), CLUSTER_BITS);
+        for i in 0..table.len() {
+            assert_eq!(table.get(L2Index(i)).unwrap(), L2Entry::Unallocated);
+        }
+    }
+
+    #[test]
+    fn set_then_write_round_trip() {
+        let mut table = L2Table::new_empty(CLUSTER_BITS);
+        table
+            .set(
+                L2Index(0),
+                L2Entry::Standard {
+                    host_offset: ClusterOffset(0x10000),
+                    copied: true,
+                },
+            )
+            .unwrap();
+        table
+            .set(
+                L2Index(5),
+                L2Entry::Zero {
+                    preallocated_offset: None,
+                },
+            )
+            .unwrap();
+
+        let cluster_size = 1usize << CLUSTER_BITS;
+        let mut buf = vec![0u8; cluster_size];
+        table.write_to(&mut buf).unwrap();
+
+        let parsed = L2Table::read_from(&buf, CLUSTER_BITS).unwrap();
+        assert_eq!(table, parsed);
+    }
+
+    #[test]
+    fn cluster_bits_accessor() {
+        let table = L2Table::new_empty(12);
+        assert_eq!(table.cluster_bits(), 12);
+    }
+
+    // ---- Iterator tests ----
+
+    #[test]
+    fn iter_matches_get() {
+        let mut table = L2Table::new_empty(CLUSTER_BITS);
+        let entry = L2Entry::Standard {
+            host_offset: ClusterOffset(0x20000),
+            copied: true,
+        };
+        table.set(L2Index(5), entry).unwrap();
+
+        let entries: Vec<L2Entry> = table.iter().collect();
+        assert_eq!(entries.len(), table.len() as usize);
+        assert_eq!(entries[0], L2Entry::Unallocated);
+        assert_eq!(entries[5], entry);
     }
 }

@@ -136,6 +136,37 @@ impl L1Table {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Set an entry at the given index, with bounds checking.
+    pub fn set(&mut self, index: L1Index, entry: L1Entry) -> Result<()> {
+        let table_size = self.entries.len() as u32;
+        let slot = self
+            .entries
+            .get_mut(index.0 as usize)
+            .ok_or(Error::L1IndexOutOfBounds {
+                index: index.0,
+                table_size,
+            })?;
+        *slot = entry;
+        Ok(())
+    }
+
+    /// Create a new L1 table with all entries unallocated.
+    pub fn new_empty(entry_count: u32) -> Self {
+        Self {
+            entries: vec![L1Entry::unallocated(); entry_count as usize],
+        }
+    }
+
+    /// Iterate over all entries in the table.
+    pub fn iter(&self) -> impl Iterator<Item = L1Entry> + '_ {
+        self.entries.iter().copied()
+    }
+
+    /// Number of entries as usize (convenience for iteration bounds).
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 #[cfg(test)]
@@ -292,5 +323,85 @@ mod tests {
 
         let mut buf = vec![];
         table.write_to(&mut buf).unwrap();
+    }
+
+    // ---- Mutation methods ----
+
+    #[test]
+    fn set_valid_index() {
+        let mut table = L1Table::new_empty(4);
+        assert!(table.get(L1Index(2)).unwrap().is_unallocated());
+
+        let entry = L1Entry::with_l2_offset(ClusterOffset(0x30000), true);
+        table.set(L1Index(2), entry).unwrap();
+        assert_eq!(table.get(L1Index(2)).unwrap(), entry);
+    }
+
+    #[test]
+    fn set_out_of_bounds() {
+        let mut table = L1Table::new_empty(2);
+        let entry = L1Entry::with_l2_offset(ClusterOffset(0x10000), false);
+        match table.set(L1Index(5), entry) {
+            Err(Error::L1IndexOutOfBounds {
+                index: 5,
+                table_size: 2,
+            }) => {}
+            other => panic!("expected L1IndexOutOfBounds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_empty_correct_size() {
+        let table = L1Table::new_empty(16);
+        assert_eq!(table.len(), 16);
+        for i in 0..16 {
+            assert!(table.get(L1Index(i)).unwrap().is_unallocated());
+        }
+    }
+
+    #[test]
+    fn set_then_write_round_trip() {
+        let mut table = L1Table::new_empty(3);
+        table
+            .set(L1Index(0), L1Entry::with_l2_offset(ClusterOffset(0x10000), true))
+            .unwrap();
+        table
+            .set(L1Index(2), L1Entry::with_l2_offset(ClusterOffset(0x20000), false))
+            .unwrap();
+
+        let mut buf = vec![0u8; 3 * L1_ENTRY_SIZE];
+        table.write_to(&mut buf).unwrap();
+
+        let parsed = L1Table::read_from(&buf, 3).unwrap();
+        assert_eq!(table, parsed);
+    }
+
+    // ---- Iterator tests ----
+
+    #[test]
+    fn iter_matches_get() {
+        let mut table = L1Table::new_empty(3);
+        let e1 = L1Entry::with_l2_offset(ClusterOffset(0x10000), true);
+        table.set(L1Index(1), e1).unwrap();
+
+        let entries: Vec<L1Entry> = table.iter().collect();
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].is_unallocated());
+        assert_eq!(entries[1], e1);
+        assert!(entries[2].is_unallocated());
+    }
+
+    #[test]
+    fn iter_empty_table() {
+        let table = L1Table::new_empty(0);
+        assert_eq!(table.iter().count(), 0);
+        assert_eq!(table.entry_count(), 0);
+    }
+
+    #[test]
+    fn entry_count_matches_len() {
+        let table = L1Table::new_empty(7);
+        assert_eq!(table.entry_count(), 7);
+        assert_eq!(table.entry_count(), table.len() as usize);
     }
 }
