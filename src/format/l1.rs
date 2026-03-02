@@ -243,4 +243,54 @@ mod tests {
         assert_eq!(table.len(), 10);
         assert!(!table.is_empty());
     }
+
+    // ---- Edge cases: reserved bits and extreme values ----
+
+    #[test]
+    fn reserved_bits_preserved_in_raw() {
+        // Set bits that are neither OFFSET_MASK nor COPIED_FLAG
+        // Bit 0-8 are reserved in L1 entries (below offset range)
+        let raw = 0x0000_0000_0001_01FF; // offset + reserved bits 0-8
+        let entry = L1Entry::from_raw(raw);
+        // Offset should be masked correctly
+        let expected_offset = raw & L1_OFFSET_MASK;
+        assert_eq!(
+            entry.l2_table_offset(),
+            Some(ClusterOffset(expected_offset))
+        );
+        // Raw value should preserve everything
+        assert_eq!(entry.raw(), raw);
+    }
+
+    #[test]
+    fn maximum_offset_value() {
+        // All bits in L1_OFFSET_MASK set
+        let raw = L1_OFFSET_MASK;
+        let entry = L1Entry::from_raw(raw);
+        assert_eq!(
+            entry.l2_table_offset(),
+            Some(ClusterOffset(L1_OFFSET_MASK))
+        );
+        assert!(!entry.is_copied());
+    }
+
+    #[test]
+    fn copied_with_zero_offset() {
+        // COPIED=1 but offset=0 — contradictory but L1Entry doesn't validate
+        let raw = L1_COPIED_FLAG;
+        let entry = L1Entry::from_raw(raw);
+        assert!(entry.is_copied());
+        // Offset after masking should be 0 → unallocated
+        assert_eq!(entry.l2_table_offset(), None);
+    }
+
+    #[test]
+    fn empty_table_read_write() {
+        let table = L1Table::read_from(&[], 0).unwrap();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+
+        let mut buf = vec![];
+        table.write_to(&mut buf).unwrap();
+    }
 }

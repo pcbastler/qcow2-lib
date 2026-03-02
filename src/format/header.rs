@@ -594,4 +594,126 @@ mod tests {
             other => panic!("expected BufferTooSmall, got {other:?}"),
         }
     }
+
+    // ---- Edge cases: extreme but valid configurations ----
+
+    #[test]
+    fn accept_min_cluster_bits() {
+        let mut h = make_test_header_v3();
+        h.cluster_bits = MIN_CLUSTER_BITS; // 9
+        h.l1_table_offset = ClusterOffset(1u64 << MIN_CLUSTER_BITS); // cluster-aligned
+        let mut buf = vec![0u8; h.serialized_length()];
+        h.write_to(&mut buf).unwrap();
+        let parsed = Header::read_from(&buf).unwrap();
+        assert_eq!(parsed.cluster_bits, MIN_CLUSTER_BITS);
+        assert_eq!(parsed.cluster_size(), 512);
+    }
+
+    #[test]
+    fn accept_max_cluster_bits() {
+        let mut h = make_test_header_v3();
+        h.cluster_bits = MAX_CLUSTER_BITS; // 21
+        h.l1_table_offset = ClusterOffset(1u64 << MAX_CLUSTER_BITS); // cluster-aligned
+        let mut buf = vec![0u8; h.serialized_length()];
+        h.write_to(&mut buf).unwrap();
+        let parsed = Header::read_from(&buf).unwrap();
+        assert_eq!(parsed.cluster_bits, MAX_CLUSTER_BITS);
+        assert_eq!(parsed.cluster_size(), 1 << 21);
+    }
+
+    #[test]
+    fn accept_refcount_order_zero() {
+        // refcount_order=0 means 1-bit refcounts (valid)
+        let mut h = make_test_header_v3();
+        h.refcount_order = 0;
+        let mut buf = vec![0u8; h.serialized_length()];
+        h.write_to(&mut buf).unwrap();
+        let parsed = Header::read_from(&buf).unwrap();
+        assert_eq!(parsed.refcount_order, 0);
+        assert_eq!(parsed.refcount_bits(), 1);
+    }
+
+    #[test]
+    fn l1_table_entries_zero_is_valid() {
+        let mut h = make_test_header_v3();
+        h.l1_table_entries = 0;
+        h.l1_table_offset = ClusterOffset(0);
+        let mut buf = vec![0u8; h.serialized_length()];
+        h.write_to(&mut buf).unwrap();
+        let parsed = Header::read_from(&buf).unwrap();
+        assert_eq!(parsed.l1_table_entries, 0);
+    }
+
+    #[test]
+    fn v2_defaults_for_v3_fields() {
+        let h = make_test_header_v2();
+        let mut buf = vec![0u8; h.serialized_length()];
+        h.write_to(&mut buf).unwrap();
+        let parsed = Header::read_from(&buf).unwrap();
+
+        // v2 should get defaults for v3-only fields
+        assert_eq!(parsed.incompatible_features, IncompatibleFeatures::empty());
+        assert_eq!(parsed.compatible_features, CompatibleFeatures::empty());
+        assert_eq!(parsed.autoclear_features, AutoclearFeatures::empty());
+        assert_eq!(parsed.refcount_order, DEFAULT_REFCOUNT_ORDER_V2); // 4 (16-bit)
+        assert_eq!(parsed.header_length, HEADER_V2_LENGTH as u32);
+    }
+
+    #[test]
+    fn has_backing_file_requires_both_offset_and_size() {
+        let mut h = make_test_header_v3();
+
+        // offset but no size
+        h.backing_file_offset = 100;
+        h.backing_file_size = 0;
+        assert!(!h.has_backing_file());
+
+        // size but no offset
+        h.backing_file_offset = 0;
+        h.backing_file_size = 10;
+        assert!(!h.has_backing_file());
+
+        // both set
+        h.backing_file_offset = 100;
+        h.backing_file_size = 10;
+        assert!(h.has_backing_file());
+    }
+
+    #[test]
+    fn reject_cluster_bits_just_above_max() {
+        let good = make_test_header_v3();
+        let mut buf = vec![0u8; good.serialized_length()];
+        good.write_to(&mut buf).unwrap();
+        BigEndian::write_u32(&mut buf[OFF_CLUSTER_BITS..], MAX_CLUSTER_BITS + 1);
+
+        assert!(matches!(
+            Header::read_from(&buf),
+            Err(Error::InvalidClusterBits { .. })
+        ));
+    }
+
+    #[test]
+    fn reject_cluster_bits_just_below_min() {
+        let good = make_test_header_v3();
+        let mut buf = vec![0u8; good.serialized_length()];
+        good.write_to(&mut buf).unwrap();
+        BigEndian::write_u32(&mut buf[OFF_CLUSTER_BITS..], MIN_CLUSTER_BITS - 1);
+
+        assert!(matches!(
+            Header::read_from(&buf),
+            Err(Error::InvalidClusterBits { .. })
+        ));
+    }
+
+    #[test]
+    fn v3_header_with_compression_type_field() {
+        let mut h = make_test_header_v3();
+        h.header_length = 105; // Just enough for compression_type byte
+        h.compression_type = 0; // deflate
+
+        let mut buf = vec![0u8; 105];
+        h.write_to(&mut buf).unwrap();
+        let parsed = Header::read_from(&buf).unwrap();
+        assert_eq!(parsed.compression_type, 0);
+    }
 }

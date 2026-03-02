@@ -331,4 +331,112 @@ mod tests {
             other => panic!("expected L2IndexOutOfBounds, got {other:?}"),
         }
     }
+
+    // ---- Edge cases: extreme values and flag combinations ----
+
+    #[test]
+    fn zero_with_maximum_preallocated_offset() {
+        let max_offset = L2_STANDARD_OFFSET_MASK;
+        let raw = L2_ZERO_FLAG | max_offset;
+        let entry = L2Entry::decode(raw, CLUSTER_BITS);
+        assert_eq!(
+            entry,
+            L2Entry::Zero {
+                preallocated_offset: Some(ClusterOffset(max_offset))
+            }
+        );
+    }
+
+    #[test]
+    fn standard_with_maximum_offset() {
+        let max_offset = L2_STANDARD_OFFSET_MASK;
+        let raw = L2_COPIED_FLAG | max_offset;
+        let entry = L2Entry::decode(raw, CLUSTER_BITS);
+        assert_eq!(
+            entry,
+            L2Entry::Standard {
+                host_offset: ClusterOffset(max_offset),
+                copied: true,
+            }
+        );
+    }
+
+    #[test]
+    fn l2_table_round_trip_min_cluster_bits() {
+        let cluster_bits = 9u32; // 512 byte clusters, 64 entries
+        let cluster_size = 1usize << cluster_bits;
+        let entry_count = cluster_size / L2_ENTRY_SIZE;
+
+        let mut entries = vec![L2Entry::Unallocated; entry_count];
+        entries[0] = L2Entry::Standard {
+            host_offset: ClusterOffset(0x200), // cluster-aligned for 512
+            copied: true,
+        };
+        entries[1] = L2Entry::Zero {
+            preallocated_offset: None,
+        };
+
+        let table = L2Table {
+            entries,
+            cluster_bits,
+        };
+
+        let mut buf = vec![0u8; cluster_size];
+        table.write_to(&mut buf).unwrap();
+        let parsed = L2Table::read_from(&buf, cluster_bits).unwrap();
+        assert_eq!(table, parsed);
+    }
+
+    #[test]
+    fn l2_table_round_trip_max_cluster_bits() {
+        // cluster_bits=21 would need a 2MB buffer. Use a smaller subset.
+        let cluster_bits = 21u32;
+        let entry_count = 4; // Just test a few entries
+        let buf_size = entry_count * L2_ENTRY_SIZE;
+
+        let entries = vec![
+            L2Entry::Standard {
+                host_offset: ClusterOffset(1u64 << 21),
+                copied: false,
+            },
+            L2Entry::Zero {
+                preallocated_offset: None,
+            },
+            L2Entry::Compressed(CompressedClusterDescriptor {
+                host_offset: 0x1000,
+                compressed_size: 512,
+            }),
+            L2Entry::Unallocated,
+        ];
+
+        let table = L2Table {
+            entries: entries.clone(),
+            cluster_bits,
+        };
+
+        let mut buf = vec![0u8; buf_size];
+        table.write_to(&mut buf).unwrap();
+
+        // Read back (need to use the exact buffer size)
+        let parsed_entries: Vec<L2Entry> = (0..entry_count)
+            .map(|i| {
+                let raw = BigEndian::read_u64(&buf[i * L2_ENTRY_SIZE..]);
+                L2Entry::decode(raw, cluster_bits)
+            })
+            .collect();
+
+        assert_eq!(entries, parsed_entries);
+    }
+
+    #[test]
+    fn compressed_entry_at_min_cluster_bits() {
+        let cluster_bits = 9u32;
+        let desc = CompressedClusterDescriptor {
+            host_offset: 0x100,
+            compressed_size: 512, // minimum
+        };
+        let raw = L2_COMPRESSED_FLAG | desc.encode(cluster_bits);
+        let entry = L2Entry::decode(raw, cluster_bits);
+        assert_eq!(entry, L2Entry::Compressed(desc));
+    }
 }

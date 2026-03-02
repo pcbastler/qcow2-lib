@@ -280,4 +280,136 @@ mod tests {
         let (_, consumed) = SnapshotHeader::read_from(&buf, 0).unwrap();
         assert_eq!(consumed % 8, 0, "consumed ({consumed}) should be 8-byte aligned");
     }
+
+    // ---- Edge cases ----
+
+    #[test]
+    fn empty_id_string() {
+        let snap = SnapshotHeader {
+            unique_id: String::new(),
+            ..make_test_snapshot()
+        };
+
+        let mut buf = Vec::new();
+        snap.write_to(&mut buf);
+
+        let (parsed, consumed) = SnapshotHeader::read_from(&buf, 0).unwrap();
+        assert_eq!(parsed.unique_id, "");
+        assert_eq!(consumed % 8, 0);
+    }
+
+    #[test]
+    fn empty_name_string() {
+        let snap = SnapshotHeader {
+            name: String::new(),
+            ..make_test_snapshot()
+        };
+
+        let mut buf = Vec::new();
+        snap.write_to(&mut buf);
+
+        let (parsed, consumed) = SnapshotHeader::read_from(&buf, 0).unwrap();
+        assert_eq!(parsed.name, "");
+        assert_eq!(consumed % 8, 0);
+    }
+
+    #[test]
+    fn both_strings_empty() {
+        let snap = SnapshotHeader {
+            unique_id: String::new(),
+            name: String::new(),
+            ..make_test_snapshot()
+        };
+
+        let mut buf = Vec::new();
+        snap.write_to(&mut buf);
+
+        let (parsed, consumed) = SnapshotHeader::read_from(&buf, 0).unwrap();
+        assert_eq!(parsed, snap);
+        // Fixed 40 + 0 strings = 40 → padded to 40 (already 8-aligned)
+        assert_eq!(consumed, 40);
+    }
+
+    #[test]
+    fn long_name_255_chars() {
+        let long_name = "x".repeat(255);
+        let snap = SnapshotHeader {
+            name: long_name.clone(),
+            ..make_test_snapshot()
+        };
+
+        let mut buf = Vec::new();
+        snap.write_to(&mut buf);
+
+        let (parsed, consumed) = SnapshotHeader::read_from(&buf, 0).unwrap();
+        assert_eq!(parsed.name, long_name);
+        assert_eq!(consumed % 8, 0);
+    }
+
+    #[test]
+    fn extra_data_size_8_gives_64bit_vm_state() {
+        let snap = SnapshotHeader {
+            vm_state_size: 0x1_0000_0000, // > u32::MAX, needs 64-bit
+            extra_data_size: 8,
+            virtual_disk_size: None,
+            ..make_test_snapshot()
+        };
+
+        let mut buf = Vec::new();
+        snap.write_to(&mut buf);
+
+        let (parsed, _) = SnapshotHeader::read_from(&buf, 0).unwrap();
+        assert_eq!(parsed.vm_state_size, 0x1_0000_0000);
+        assert_eq!(parsed.virtual_disk_size, None);
+    }
+
+    #[test]
+    fn extra_data_small_odd_sizes() {
+        // extra_data_size < 8 means no 64-bit vm_state_size field.
+        // The parser falls back to the 32-bit field at offset 32.
+        // Build buffers manually since write_to only writes extra data for size >= 8.
+        for extra_size in 0..8u32 {
+            let mut buf = vec![0u8; 256]; // Plenty of room
+
+            // Fixed fields: l1_table_offset=0x50000, l1_entries=8
+            BigEndian::write_u64(&mut buf[0..], 0x5_0000);
+            BigEndian::write_u32(&mut buf[8..], 8);
+            // id_str_size=1, name_size=1
+            BigEndian::write_u16(&mut buf[12..], 1);
+            BigEndian::write_u16(&mut buf[14..], 1);
+            // vm_state_size (32-bit at offset 32)
+            BigEndian::write_u32(&mut buf[32..], 42);
+            // extra_data_size
+            BigEndian::write_u32(&mut buf[36..], extra_size);
+            // extra data bytes (all zeros, which is fine)
+            // strings start at 40 + extra_size
+            let strings_start = 40 + extra_size as usize;
+            buf[strings_start] = b'1';     // id
+            buf[strings_start + 1] = b'T'; // name
+
+            let (parsed, consumed) = SnapshotHeader::read_from(&buf, 0).unwrap();
+            assert_eq!(consumed % 8, 0, "alignment for extra_data_size={extra_size}");
+            assert_eq!(parsed.vm_state_size, 42, "vm_state for extra_data_size={extra_size}");
+            assert_eq!(parsed.extra_data_size, extra_size);
+        }
+    }
+
+    #[test]
+    fn truncated_at_extra_data() {
+        // Build a snapshot claiming extra_data_size=16 but truncate before extra data
+        let snap = SnapshotHeader {
+            extra_data_size: 16,
+            virtual_disk_size: Some(1 << 30),
+            ..make_test_snapshot()
+        };
+        let mut buf = Vec::new();
+        snap.write_to(&mut buf);
+
+        // Truncate to just past the fixed header but before extra data ends
+        let truncated = &buf[..SNAPSHOT_FIXED_SIZE + 4];
+        match SnapshotHeader::read_from(truncated, 0x2000) {
+            Err(Error::SnapshotTruncated { offset: 0x2000, .. }) => {}
+            other => panic!("expected SnapshotTruncated, got {other:?}"),
+        }
+    }
 }

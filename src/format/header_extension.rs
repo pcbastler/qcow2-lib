@@ -338,9 +338,118 @@ mod tests {
             offset: 0x1_0000,
             length: 4096,
         };
-        let serialized = HeaderExtension::write_all(&[ext.clone()]);
+        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
         let parsed = HeaderExtension::read_all(&serialized).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], ext);
+    }
+
+    // ---- Edge cases ----
+
+    #[test]
+    fn extension_data_exactly_8_byte_aligned() {
+        // Data length 8 → no padding needed (8 % 8 == 0).
+        let ext = HeaderExtension::BackingFileFormat("raw12345".to_string()); // 8 bytes
+        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+        let parsed = HeaderExtension::read_all(&serialized).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], ext);
+    }
+
+    #[test]
+    fn extension_data_length_1_needs_7_padding() {
+        // Data length 1 → 7 bytes of padding to reach 8-byte boundary.
+        let ext = HeaderExtension::BackingFileFormat("r".to_string());
+        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+
+        // TLV header (8) + data (1) + padding (7) + end marker (8) = 24
+        assert_eq!(serialized.len(), 24);
+
+        let parsed = HeaderExtension::read_all(&serialized).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], ext);
+    }
+
+    #[test]
+    fn end_marker_only_empty_list() {
+        // An end marker alone produces an empty extension list.
+        let serialized = HeaderExtension::write_all(&[]);
+        assert_eq!(serialized.len(), TLV_HEADER_SIZE); // Just the end marker
+        let parsed = HeaderExtension::read_all(&serialized).unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn unknown_extension_round_trip() {
+        let ext = HeaderExtension::Unknown {
+            extension_type: 0xCAFE_BABE,
+            data: vec![10, 20, 30, 40, 50],
+        };
+        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+        let parsed = HeaderExtension::read_all(&serialized).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], ext);
+    }
+
+    #[test]
+    fn feature_name_max_length_46_bytes() {
+        // Feature names are stored in a 46-byte field (zero-padded).
+        let long_name = "a".repeat(46);
+        let entry = FeatureNameEntry {
+            feature_type: 2, // autoclear
+            bit_number: 3,
+            name: long_name.clone(),
+        };
+        let ext = HeaderExtension::FeatureNameTable(vec![entry]);
+
+        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+        let parsed = HeaderExtension::read_all(&serialized).unwrap();
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0] {
+            HeaderExtension::FeatureNameTable(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].name, long_name);
+            }
+            other => panic!("expected FeatureNameTable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn feature_name_truncated_at_46_bytes() {
+        // A name longer than 46 bytes should be truncated on encode.
+        let too_long = "b".repeat(50);
+        let entry = FeatureNameEntry {
+            feature_type: 0,
+            bit_number: 0,
+            name: too_long,
+        };
+        let ext = HeaderExtension::FeatureNameTable(vec![entry]);
+
+        let serialized = HeaderExtension::write_all(&[ext]);
+        let parsed = HeaderExtension::read_all(&serialized).unwrap();
+        match &parsed[0] {
+            HeaderExtension::FeatureNameTable(entries) => {
+                assert_eq!(entries[0].name.len(), 46);
+                assert_eq!(entries[0].name, "b".repeat(46));
+            }
+            other => panic!("expected FeatureNameTable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_data_file_round_trip() {
+        let ext = HeaderExtension::ExternalDataFile("/path/to/data.raw".to_string());
+        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+        let parsed = HeaderExtension::read_all(&serialized).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], ext);
+    }
+
+    #[test]
+    fn not_enough_data_for_header() {
+        // Less than 8 bytes: should just stop (no error, empty list).
+        let buf = [0u8; 4];
+        let exts = HeaderExtension::read_all(&buf).unwrap();
+        assert!(exts.is_empty());
     }
 }

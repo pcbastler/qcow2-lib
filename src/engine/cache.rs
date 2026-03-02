@@ -184,4 +184,109 @@ mod tests {
         cache.clear();
         assert!(cache.get_l2_table(ClusterOffset(0x10000)).is_none());
     }
+
+    // ---- Edge cases ----
+
+    #[test]
+    fn capacity_one_evicts_on_every_insert() {
+        let config = CacheConfig {
+            l2_table_capacity: 1,
+            refcount_block_capacity: 1,
+        };
+        let mut cache = MetadataCache::new(config);
+
+        cache.insert_l2_table(ClusterOffset(0x10000), make_l2_table(16));
+        assert!(cache.get_l2_table(ClusterOffset(0x10000)).is_some());
+
+        // Second insert evicts the first
+        cache.insert_l2_table(ClusterOffset(0x20000), make_l2_table(16));
+        assert!(cache.get_l2_table(ClusterOffset(0x10000)).is_none());
+        assert!(cache.get_l2_table(ClusterOffset(0x20000)).is_some());
+    }
+
+    #[test]
+    fn refcount_block_cache() {
+        use crate::format::refcount::RefcountBlock;
+
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        let data = vec![0u8; 64];
+        let block = RefcountBlock::read_from(&data, 4).unwrap(); // 16-bit
+
+        cache.insert_refcount_block(ClusterOffset(0x30000), block.clone());
+        let cached = cache.get_refcount_block(ClusterOffset(0x30000));
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().len(), block.len());
+
+        assert_eq!(cache.stats().refcount_hits, 1);
+        assert_eq!(cache.stats().refcount_misses, 0);
+
+        // Miss
+        cache.get_refcount_block(ClusterOffset(0x99999));
+        assert_eq!(cache.stats().refcount_misses, 1);
+    }
+
+    #[test]
+    fn refcount_block_eviction() {
+        use crate::format::refcount::RefcountBlock;
+
+        let config = CacheConfig {
+            l2_table_capacity: 8,
+            refcount_block_capacity: 2,
+        };
+        let mut cache = MetadataCache::new(config);
+
+        let make_block = || {
+            let data = vec![0u8; 32];
+            RefcountBlock::read_from(&data, 4).unwrap()
+        };
+
+        cache.insert_refcount_block(ClusterOffset(0x10000), make_block());
+        cache.insert_refcount_block(ClusterOffset(0x20000), make_block());
+        cache.insert_refcount_block(ClusterOffset(0x30000), make_block());
+
+        // First entry evicted
+        assert!(cache.get_refcount_block(ClusterOffset(0x10000)).is_none());
+        assert!(cache.get_refcount_block(ClusterOffset(0x20000)).is_some());
+        assert!(cache.get_refcount_block(ClusterOffset(0x30000)).is_some());
+    }
+
+    #[test]
+    fn mixed_l2_and_refcount_stats() {
+        use crate::format::refcount::RefcountBlock;
+
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        cache.insert_l2_table(ClusterOffset(0x10000), make_l2_table(16));
+        let block_data = vec![0u8; 32];
+        let block = RefcountBlock::read_from(&block_data, 4).unwrap();
+        cache.insert_refcount_block(ClusterOffset(0x20000), block);
+
+        cache.get_l2_table(ClusterOffset(0x10000));     // L2 hit
+        cache.get_l2_table(ClusterOffset(0x99999));     // L2 miss
+        cache.get_refcount_block(ClusterOffset(0x20000)); // refcount hit
+        cache.get_refcount_block(ClusterOffset(0x88888)); // refcount miss
+
+        assert_eq!(cache.stats().l2_hits, 1);
+        assert_eq!(cache.stats().l2_misses, 1);
+        assert_eq!(cache.stats().refcount_hits, 1);
+        assert_eq!(cache.stats().refcount_misses, 1);
+    }
+
+    #[test]
+    fn clear_does_not_reset_stats() {
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        cache.insert_l2_table(ClusterOffset(0x10000), make_l2_table(16));
+        cache.get_l2_table(ClusterOffset(0x10000)); // hit
+        cache.get_l2_table(ClusterOffset(0x99999)); // miss
+
+        cache.clear();
+
+        // Stats should persist after clear
+        assert_eq!(cache.stats().l2_hits, 1);
+        assert_eq!(cache.stats().l2_misses, 1);
+
+        // But entries are gone
+        assert!(cache.get_l2_table(ClusterOffset(0x10000)).is_none());
+    }
 }

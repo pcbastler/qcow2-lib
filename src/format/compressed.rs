@@ -119,4 +119,74 @@ mod tests {
         let desc = CompressedClusterDescriptor::decode(raw, cluster_bits);
         assert_eq!(desc.compressed_size, 512);
     }
+
+    // ---- Edge cases ----
+
+    #[test]
+    fn round_trip_cluster_bits_9_min() {
+        // cluster_bits=9: sector_bits=1, x=61
+        // Only 1 sector bit — nb_sectors can be 0 or 1, meaning 1 or 2 sectors.
+        let original = CompressedClusterDescriptor {
+            host_offset: 0x1234,
+            compressed_size: 2 * 512, // 2 sectors (nb_sectors=1)
+        };
+        let encoded = original.encode(9);
+        let decoded = CompressedClusterDescriptor::decode(encoded, 9);
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn round_trip_cluster_bits_21_near_max_offset() {
+        // cluster_bits=21: sector_bits=13, x=49
+        // Offset field is 49 bits wide → max offset is (1<<49)-1.
+        let max_offset = (1u64 << 49) - 1;
+        let original = CompressedClusterDescriptor {
+            host_offset: max_offset,
+            compressed_size: 16 * 512, // 16 sectors
+        };
+        let encoded = original.encode(21);
+        let decoded = CompressedClusterDescriptor::decode(encoded, 21);
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn large_compressed_size_cluster_bits_21() {
+        // cluster_bits=21: sector_bits=13, max nb_sectors = (1<<13)-1 = 8191
+        // Max compressed_size = (8191 + 1) * 512 = 4194304 = 4 MB (= 2 clusters)
+        let max_sectors = (1u64 << 13) - 1;
+        let original = CompressedClusterDescriptor {
+            host_offset: 0x1000,
+            compressed_size: (max_sectors + 1) * 512,
+        };
+        let encoded = original.encode(21);
+        let decoded = CompressedClusterDescriptor::decode(encoded, 21);
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn offset_at_zero() {
+        // Offset 0 is a valid host offset (beginning of file).
+        let original = CompressedClusterDescriptor {
+            host_offset: 0,
+            compressed_size: 512, // minimum: 1 sector
+        };
+        let encoded = original.encode(16);
+        let decoded = CompressedClusterDescriptor::decode(encoded, 16);
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn single_sector_round_trip_all_cluster_bits() {
+        // The minimum compressed size (1 sector) should round-trip for every
+        // valid cluster_bits value.
+        for cluster_bits in 9..=21 {
+            let original = CompressedClusterDescriptor {
+                host_offset: 0x400,
+                compressed_size: 512,
+            };
+            let encoded = original.encode(cluster_bits);
+            let decoded = CompressedClusterDescriptor::decode(encoded, cluster_bits);
+            assert_eq!(original, decoded, "failed at cluster_bits={cluster_bits}");
+        }
+    }
 }

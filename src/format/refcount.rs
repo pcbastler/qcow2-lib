@@ -438,4 +438,115 @@ mod tests {
         assert!(entries[1].is_unallocated());
         assert_eq!(entries[2].block_offset(), Some(ClusterOffset(0x20000)));
     }
+
+    // ---- Edge cases ----
+
+    #[test]
+    fn max_refcount_per_width() {
+        // Each width has a different maximum value. Verify round-trip at max.
+        let cases: &[(u32, u64)] = &[
+            (0, 1),          // 1-bit: max = 1
+            (1, 3),          // 2-bit: max = 3
+            (2, 15),         // 4-bit: max = 15
+            (3, 255),        // 8-bit: max = 255
+            (4, 65535),      // 16-bit: max = 65535
+            (5, u32::MAX as u64), // 32-bit: max = 4294967295
+            (6, u64::MAX),   // 64-bit: max = u64::MAX
+        ];
+
+        for &(order, max_value) in cases {
+            let refcount_bits = 1u32 << order;
+            let byte_size = (refcount_bits as usize + 7) / 8;
+            // At least one entry
+            let buf_size = byte_size.max(1);
+            let mut data = vec![0u8; buf_size];
+
+            // Write the maximum value into the first entry
+            match refcount_bits {
+                1 => data[0] = 0x80, // MSB set
+                2 => data[0] = 0xC0, // top 2 bits set
+                4 => data[0] = 0xF0, // top nibble all 1s
+                8 => data[0] = 0xFF,
+                16 => BigEndian::write_u16(&mut data, 0xFFFF),
+                32 => BigEndian::write_u32(&mut data, u32::MAX),
+                64 => BigEndian::write_u64(&mut data, u64::MAX),
+                _ => unreachable!(),
+            }
+
+            let block = RefcountBlock::read_from(&data, order).unwrap();
+            assert_eq!(
+                block.get(0).unwrap(),
+                max_value,
+                "order={order}, bits={refcount_bits}"
+            );
+
+            // Round-trip
+            let mut out = vec![0u8; buf_size];
+            block.write_to(&mut out).unwrap();
+            assert_eq!(out, data, "round-trip failed for order={order}");
+        }
+    }
+
+    #[test]
+    fn table_entry_reserved_bits_in_low_9() {
+        // Bits 0-8 are reserved in RefcountTableEntry. The offset mask
+        // strips them, so only bits 9+ matter for the offset.
+        let raw = 0x10000u64 | 0x1FF; // offset=0x10000 with low 9 bits set
+        let entry = RefcountTableEntry::from_raw(raw);
+        // block_offset should mask out the low bits
+        assert_eq!(entry.block_offset(), Some(ClusterOffset(0x10000)));
+        // raw() preserves the original value
+        assert_eq!(entry.raw(), raw);
+    }
+
+    #[test]
+    fn refcount_block_1bit_all_ones() {
+        // All clusters referenced (every bit = 1)
+        let data = vec![0xFF; 4]; // 32 entries, all 1
+        let block = RefcountBlock::read_from(&data, 0).unwrap();
+        assert_eq!(block.len(), 32);
+        for i in 0..32 {
+            assert_eq!(block.get(i).unwrap(), 1, "entry {i} should be 1");
+        }
+
+        let mut out = vec![0u8; 4];
+        block.write_to(&mut out).unwrap();
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn write_to_buffer_too_small() {
+        let data = vec![0u8; 4];
+        let block = RefcountBlock::read_from(&data, 4).unwrap(); // 2 entries (16-bit)
+        let mut small_buf = vec![0u8; 2]; // needs 4 bytes
+        match block.write_to(&mut small_buf) {
+            Err(Error::BufferTooSmall {
+                expected: 4,
+                actual: 2,
+            }) => {}
+            other => panic!("expected BufferTooSmall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_refcount_table_buffer_too_small() {
+        let buf = vec![0u8; 8]; // only 1 entry worth of data
+        match read_refcount_table(&buf, 2) {
+            // asking for 2 entries = 16 bytes
+            Err(Error::BufferTooSmall {
+                expected: 16,
+                actual: 8,
+            }) => {}
+            other => panic!("expected BufferTooSmall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refcount_block_empty_buffer() {
+        // A zero-length buffer should produce a block with 0 entries.
+        let data: Vec<u8> = vec![];
+        let block = RefcountBlock::read_from(&data, 4).unwrap(); // 16-bit
+        assert_eq!(block.len(), 0);
+        assert!(block.is_empty());
+    }
 }

@@ -314,4 +314,94 @@ mod tests {
             other => panic!("expected OffsetBeyondDiskSize, got {other:?}"),
         }
     }
+
+    // ---- Edge cases ----
+
+    #[test]
+    fn read_zero_length_buffer() {
+        let (backend, mapper) = build_test_setup(&[], &[]);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+
+        // A zero-length read should succeed immediately.
+        let mut buf = vec![];
+        reader.read_at(&mut buf, 0).unwrap();
+    }
+
+    #[test]
+    fn read_at_exact_virtual_size_fails() {
+        let (backend, mapper) = build_test_setup(&[], &[]);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let virtual_size = 65536u64; // exactly 1 cluster
+
+        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, virtual_size);
+
+        // offset = virtual_size → reading even 1 byte should fail
+        let mut buf = vec![0u8; 1];
+        let result = reader.read_at(&mut buf, virtual_size);
+        assert!(matches!(result, Err(Error::OffsetBeyondDiskSize { .. })));
+    }
+
+    #[test]
+    fn read_u64_overflow_is_caught() {
+        let (backend, mapper) = build_test_setup(&[], &[]);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, u64::MAX);
+
+        // offset near u64::MAX + buf.len() would overflow
+        let mut buf = vec![0u8; 1024];
+        let result = reader.read_at(&mut buf, u64::MAX - 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_single_byte_at_cluster_boundary() {
+        // Read exactly 1 byte at the last position of a cluster.
+        let data = vec![0xEEu8; CLUSTER_SIZE];
+        let host_offset = 3 * CLUSTER_SIZE as u64;
+        let l2_raw = host_offset | L2_COPIED_FLAG;
+
+        let (backend, mapper) = build_test_setup(&[(0, l2_raw)], &[(3, &data)]);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+
+        let mut buf = vec![0u8; 1];
+        reader.read_at(&mut buf, CLUSTER_SIZE as u64 - 1).unwrap();
+        assert_eq!(buf[0], 0xEE);
+    }
+
+    #[test]
+    fn read_spanning_three_clusters() {
+        let data1 = vec![0x11u8; CLUSTER_SIZE];
+        let data2 = vec![0x22u8; CLUSTER_SIZE];
+        let data3 = vec![0x33u8; CLUSTER_SIZE];
+        let host1 = 3 * CLUSTER_SIZE as u64;
+        let host2 = 4 * CLUSTER_SIZE as u64;
+        let host3 = 5 * CLUSTER_SIZE as u64;
+
+        let (backend, mapper) = build_test_setup(
+            &[
+                (0, host1 | L2_COPIED_FLAG),
+                (1, host2 | L2_COPIED_FLAG),
+                (2, host3 | L2_COPIED_FLAG),
+            ],
+            &[(3, &data1), (4, &data2), (5, &data3)],
+        );
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+
+        // Read from middle of cluster 0 through all of cluster 1 into cluster 2
+        let start = CLUSTER_SIZE as u64 - 256;
+        let read_len = 256 + CLUSTER_SIZE + 256;
+        let mut buf = vec![0u8; read_len];
+        reader.read_at(&mut buf, start).unwrap();
+
+        assert!(buf[..256].iter().all(|&b| b == 0x11), "tail of cluster 0");
+        assert!(buf[256..256 + CLUSTER_SIZE].iter().all(|&b| b == 0x22), "all of cluster 1");
+        assert!(buf[256 + CLUSTER_SIZE..].iter().all(|&b| b == 0x33), "start of cluster 2");
+    }
 }

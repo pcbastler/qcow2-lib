@@ -296,4 +296,90 @@ mod tests {
     fn l1_index_display_is_decimal() {
         assert_eq!(format!("{}", L1Index(42)), "42");
     }
+
+    // ---- Edge cases: split at MIN/MAX cluster_bits ----
+
+    #[test]
+    fn split_with_min_cluster_bits() {
+        // cluster_bits=9 => cluster_size=512, l2_bits=6, l2_entries=64
+        let cluster_size = 1u64 << 9; // 512
+        let l2_entries = 64u64;
+
+        // Second cluster
+        let (l1, l2, intra) = GuestOffset(cluster_size).split(9);
+        assert_eq!(l1, L1Index(0));
+        assert_eq!(l2, L2Index(1));
+        assert_eq!(intra, IntraClusterOffset(0));
+
+        // L1 boundary at l2_entries * cluster_size = 64 * 512 = 32768
+        let boundary = l2_entries * cluster_size;
+        let (l1, l2, intra) = GuestOffset(boundary).split(9);
+        assert_eq!(l1, L1Index(1));
+        assert_eq!(l2, L2Index(0));
+        assert_eq!(intra, IntraClusterOffset(0));
+
+        // Last byte before L1 boundary
+        let (l1, l2, intra) = GuestOffset(boundary - 1).split(9);
+        assert_eq!(l1, L1Index(0));
+        assert_eq!(l2, L2Index(63));
+        assert_eq!(intra, IntraClusterOffset(511));
+    }
+
+    #[test]
+    fn split_with_max_cluster_bits() {
+        // cluster_bits=21 => cluster_size=2MB, l2_bits=18, l2_entries=262144
+        let cluster_size = 1u64 << 21; // 2097152
+        let l2_entries = 1u64 << 18; // 262144
+
+        // Second cluster
+        let (l1, l2, intra) = GuestOffset(cluster_size).split(21);
+        assert_eq!(l1, L1Index(0));
+        assert_eq!(l2, L2Index(1));
+        assert_eq!(intra, IntraClusterOffset(0));
+
+        // L1 boundary
+        let boundary = l2_entries * cluster_size;
+        let (l1, l2, _) = GuestOffset(boundary).split(21);
+        assert_eq!(l1, L1Index(1));
+        assert_eq!(l2, L2Index(0));
+    }
+
+    #[test]
+    fn split_u64_max_offset() {
+        // Should not panic — the offset is absurd but split() does pure arithmetic
+        let (l1, l2, intra) = GuestOffset(u64::MAX).split(16);
+        // u64::MAX = 0xFFFF_FFFF_FFFF_FFFF
+        // intra = 0xFFFF (65535), cluster_number = 0xFFFF_FFFF_FFFF
+        // l2_index = cluster_number & 0x1FFF = 0x1FFF (8191)
+        // l1_index = cluster_number >> 13
+        assert_eq!(intra, IntraClusterOffset(65535));
+        assert_eq!(l2, L2Index(8191));
+        assert!(l1.0 > 0); // Very large L1 index
+    }
+
+    #[test]
+    fn intra_cluster_offset_at_maximum() {
+        // Last byte of a 64KB cluster
+        let offset = (1u64 << 16) - 1; // 65535
+        let (_, _, intra) = GuestOffset(offset).split(16);
+        assert_eq!(intra, IntraClusterOffset(65535));
+
+        // Last byte of a 2MB cluster
+        let offset = (1u64 << 21) - 1;
+        let (_, _, intra) = GuestOffset(offset).split(21);
+        assert_eq!(intra, IntraClusterOffset((1u32 << 21) - 1));
+    }
+
+    #[test]
+    fn cluster_alignment_various_bits() {
+        // cluster_bits=9 (512 bytes)
+        assert!(ClusterOffset(0).is_cluster_aligned(9));
+        assert!(ClusterOffset(512).is_cluster_aligned(9));
+        assert!(!ClusterOffset(511).is_cluster_aligned(9));
+
+        // cluster_bits=21 (2 MB)
+        assert!(ClusterOffset(0).is_cluster_aligned(21));
+        assert!(ClusterOffset(1 << 21).is_cluster_aligned(21));
+        assert!(!ClusterOffset((1 << 21) - 1).is_cluster_aligned(21));
+    }
 }

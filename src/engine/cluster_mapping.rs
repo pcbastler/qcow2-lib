@@ -281,4 +281,64 @@ mod tests {
             .unwrap();
         assert_eq!(cache.stats().l2_hits, 1);
     }
+
+    // ---- Edge cases ----
+
+    #[test]
+    fn l1_index_out_of_bounds() {
+        // L1 table has only 1 entry. A guest offset that maps to L1 index >= 1
+        // should fail.
+        let l1_buf = vec![0u8; L1_ENTRY_SIZE];
+        let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let backend = MemoryBackend::zeroed(10 * CLUSTER_SIZE);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // cluster_bits=16 → l2_entries=8192 → L1 boundary at 8192 * 65536 = 0x2000_0000
+        let beyond_l1 = 8192u64 * 65536;
+        let result = mapper.resolve(GuestOffset(beyond_l1), &backend, &mut cache);
+        assert!(result.is_err(), "should fail for L1 index out of bounds");
+    }
+
+    #[test]
+    fn same_offset_resolves_identically_twice() {
+        // Verify that resolving the same offset twice (cache hit path)
+        // returns the same result.
+        let data_offset = 3 * CLUSTER_SIZE as u64;
+        let l2_raw = data_offset | L2_COPIED_FLAG;
+        let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        let result1 = mapper
+            .resolve(GuestOffset(42), &backend, &mut cache)
+            .unwrap();
+        let result2 = mapper
+            .resolve(GuestOffset(42), &backend, &mut cache)
+            .unwrap();
+        assert_eq!(result1, result2);
+        assert_eq!(cache.stats().l2_misses, 1);
+        assert_eq!(cache.stats().l2_hits, 1);
+    }
+
+    #[test]
+    fn intra_cluster_offset_propagated_correctly() {
+        let data_offset = 3 * CLUSTER_SIZE as u64;
+        let l2_raw = data_offset | L2_COPIED_FLAG;
+        let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // Guest offset 12345 → intra = 12345 (within first cluster)
+        let result = mapper
+            .resolve(GuestOffset(12345), &backend, &mut cache)
+            .unwrap();
+        assert_eq!(
+            result,
+            ClusterResolution::Allocated {
+                host_offset: ClusterOffset(data_offset),
+                intra_cluster_offset: IntraClusterOffset(12345),
+            }
+        );
+    }
 }

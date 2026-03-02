@@ -156,3 +156,109 @@ fn read_multiple_scattered_regions() {
     image.read_at(&mut buf, 3 * cluster_size).unwrap();
     assert!(buf.iter().all(|&b| b == 0));
 }
+
+// ---- Extended integration tests ----
+
+#[test]
+fn sparse_image_reads_zeros() {
+    // 1 GB virtual image with only 1 cluster written.
+    // All other regions should read as zeros.
+    if !common::has_qemu_io() {
+        eprintln!("skipping: qemu-io not available");
+        return;
+    }
+
+    let img = common::TestImage::create("1G");
+    // Write just one cluster
+    img.write_pattern(0x42, 0, 65536);
+
+    let mut image = Qcow2Image::open(&img.path).unwrap();
+
+    // The written cluster reads correctly
+    let mut buf = vec![0u8; 4096];
+    image.read_at(&mut buf, 0).unwrap();
+    assert!(buf.iter().all(|&b| b == 0x42));
+
+    // Far-away unwritten region reads zeros
+    let far_offset = 512 * 1024 * 1024; // 512 MB
+    image.read_at(&mut buf, far_offset).unwrap();
+    assert!(buf.iter().all(|&b| b == 0), "sparse region should be zeros");
+}
+
+#[test]
+fn read_last_byte_of_virtual_disk() {
+    if !common::has_qemu_io() {
+        eprintln!("skipping: qemu-io not available");
+        return;
+    }
+
+    let img = common::TestImage::create("1M");
+    let mut image = Qcow2Image::open(&img.path).unwrap();
+    let vs = image.virtual_size();
+
+    // Read 1 byte at the very last position
+    let mut buf = vec![0xFFu8; 1];
+    image.read_at(&mut buf, vs - 1).unwrap();
+    assert_eq!(buf[0], 0, "last byte of unwritten image should be zero");
+}
+
+#[test]
+fn cross_validate_with_qemu_io() {
+    if !common::has_qemu_io() {
+        eprintln!("skipping: qemu-io not available");
+        return;
+    }
+
+    let img = common::TestImage::create("10M");
+    let cluster_size = 65536u64;
+
+    // Write various patterns
+    img.write_pattern(0xDE, 0, 512);
+    img.write_pattern(0xAD, cluster_size, 512);
+    img.write_pattern(0xBE, 5 * cluster_size + 100, 512);
+
+    let mut image = Qcow2Image::open(&img.path).unwrap();
+
+    // Read with our library and with qemu-io, then compare byte-for-byte
+    let offsets: &[(u64, usize)] = &[
+        (0, 512),
+        (cluster_size, 512),
+        (5 * cluster_size + 100, 512),
+    ];
+
+    for &(offset, len) in offsets {
+        let mut our_buf = vec![0u8; len];
+        image.read_at(&mut our_buf, offset).unwrap();
+
+        let qemu_buf = img.read_via_qemu(offset, len);
+
+        assert_eq!(
+            our_buf, qemu_buf,
+            "mismatch at offset 0x{offset:x}, length {len}"
+        );
+    }
+}
+
+#[test]
+fn image_with_cluster_size_2m() {
+    // cluster_bits=21 → 2 MB clusters
+    let img = common::TestImage::create_with_cluster_size("4M", 2 * 1024 * 1024);
+    let image = Qcow2Image::open(&img.path).unwrap();
+
+    assert_eq!(image.cluster_size(), 2 * 1024 * 1024);
+    assert_eq!(image.cluster_bits(), 21);
+}
+
+#[test]
+fn read_beyond_virtual_size_fails() {
+    let img = common::TestImage::create("1M");
+    let mut image = Qcow2Image::open(&img.path).unwrap();
+    let vs = image.virtual_size();
+
+    let mut buf = vec![0u8; 512];
+    let result = image.read_at(&mut buf, vs);
+    assert!(result.is_err(), "reading at virtual_size should fail");
+
+    let result = image.read_at(&mut buf, vs - 256);
+    assert!(result.is_err(), "reading past virtual_size should fail");
+}

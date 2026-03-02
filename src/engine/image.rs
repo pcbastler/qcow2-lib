@@ -331,4 +331,52 @@ mod tests {
         image.read_at(&mut buf, 0).unwrap();
         assert_eq!(image.cache_stats().l2_hits, 1);
     }
+
+    // ---- Edge cases: opening invalid files ----
+
+    #[test]
+    fn reject_non_qcow2_data() {
+        // A file filled with zeros: magic number won't match.
+        let backend = MemoryBackend::zeroed(4096);
+        let result = Qcow2Image::from_backend(Box::new(backend));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_too_short_for_header() {
+        // Less than the minimum header size (72 bytes for v2).
+        let backend = MemoryBackend::new(vec![0u8; 40]);
+        let result = Qcow2Image::from_backend(Box::new(backend));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_empty_file() {
+        let backend = MemoryBackend::new(vec![]);
+        let result = Qcow2Image::from_backend(Box::new(backend));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_garbage_data() {
+        let backend = MemoryBackend::new(b"hello world, this is not a qcow2 image!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!".to_vec());
+        let result = Qcow2Image::from_backend(Box::new(backend));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extensions_accessor_works() {
+        let backend = build_test_image(&[], &[]);
+        let image = Qcow2Image::from_backend(Box::new(backend)).unwrap();
+        // The test image has no extensions, but the accessor should work.
+        let _exts = image.extensions();
+    }
+
+    #[test]
+    fn backend_accessor_works() {
+        let backend = build_test_image(&[], &[]);
+        let image = Qcow2Image::from_backend(Box::new(backend)).unwrap();
+        let b = image.backend();
+        assert!(b.file_size().unwrap() > 0);
+    }
 }
