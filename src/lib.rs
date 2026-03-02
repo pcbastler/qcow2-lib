@@ -11,5 +11,6 @@
 
 pub mod error;
 pub mod format;
+pub mod io;
 
 pub use error::{Error, Result};
