@@ -6,6 +6,7 @@
 use crate::engine::cache::MetadataCache;
 use crate::engine::cluster_mapping::{ClusterMapper, ClusterResolution};
 use crate::engine::compression;
+use crate::engine::read_mode::{ReadMode, ReadWarning};
 use crate::error::{Error, Result};
 use crate::format::types::GuestOffset;
 use crate::io::IoBackend;
@@ -15,22 +16,32 @@ use crate::io::IoBackend;
 /// The reader does not own the backend or cache — it borrows them for
 /// the duration of a read operation. This allows `Qcow2Image` to
 /// maintain ownership and create readers on demand.
+///
+/// When a backing image is provided, unallocated clusters are read from
+/// it instead of returning zeros.
 pub struct Qcow2Reader<'a> {
     mapper: &'a ClusterMapper,
     backend: &'a dyn IoBackend,
     cache: &'a mut MetadataCache,
     cluster_bits: u32,
     virtual_size: u64,
+    read_mode: ReadMode,
+    warnings: &'a mut Vec<ReadWarning>,
+    backing_image: Option<&'a mut crate::engine::image::Qcow2Image>,
 }
 
 impl<'a> Qcow2Reader<'a> {
     /// Create a new reader.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mapper: &'a ClusterMapper,
         backend: &'a dyn IoBackend,
         cache: &'a mut MetadataCache,
         cluster_bits: u32,
         virtual_size: u64,
+        read_mode: ReadMode,
+        warnings: &'a mut Vec<ReadWarning>,
+        backing_image: Option<&'a mut crate::engine::image::Qcow2Image>,
     ) -> Self {
         Self {
             mapper,
@@ -38,6 +49,9 @@ impl<'a> Qcow2Reader<'a> {
             cache,
             cluster_bits,
             virtual_size,
+            read_mode,
+            warnings,
+            backing_image,
         }
     }
 
@@ -82,9 +96,13 @@ impl<'a> Qcow2Reader<'a> {
 
     /// Read a chunk of data from a single cluster.
     fn read_cluster_chunk(&mut self, buf: &mut [u8], guest_offset: u64) -> Result<()> {
-        let resolution =
-            self.mapper
-                .resolve(GuestOffset(guest_offset), self.backend, self.cache)?;
+        let resolution = match self
+            .mapper
+            .resolve(GuestOffset(guest_offset), self.backend, self.cache)
+        {
+            Ok(r) => r,
+            Err(e) => return self.handle_read_error(buf, guest_offset, e),
+        };
 
         match resolution {
             ClusterResolution::Allocated {
@@ -92,36 +110,91 @@ impl<'a> Qcow2Reader<'a> {
                 intra_cluster_offset,
             } => {
                 let read_offset = host_offset.0 + intra_cluster_offset.0 as u64;
-                self.backend.read_exact_at(buf, read_offset)
+                match self.backend.read_exact_at(buf, read_offset) {
+                    Ok(()) => Ok(()),
+                    Err(e) => self.handle_read_error(buf, guest_offset, e),
+                }
             }
             ClusterResolution::Zero => {
                 buf.fill(0);
                 Ok(())
             }
             ClusterResolution::Unallocated => {
-                // No backing file support yet in Phase 1
-                // Unallocated without backing = zeros
-                buf.fill(0);
-                Ok(())
+                if let Some(ref mut backing) = self.backing_image {
+                    backing.read_at(buf, guest_offset)
+                } else {
+                    buf.fill(0);
+                    Ok(())
+                }
             }
             ClusterResolution::Compressed {
                 descriptor,
                 intra_cluster_offset,
             } => {
                 let cluster_size = 1usize << self.cluster_bits;
+                let file_size = self.backend.file_size()?;
+
+                // Validate compressed data offset is within file
+                if descriptor.host_offset >= file_size {
+                    return self.handle_read_error(
+                        buf,
+                        guest_offset,
+                        Error::MetadataOffsetBeyondEof {
+                            offset: descriptor.host_offset,
+                            size: descriptor.compressed_size,
+                            file_size,
+                            context: "compressed cluster data",
+                        },
+                    );
+                }
+
                 // The compressed_size from the descriptor is the maximum number
                 // of sectors the data can span, but may extend past EOF for the
                 // last compressed cluster in the file. Clamp to available data.
-                let file_size = self.backend.file_size()?;
                 let available = file_size.saturating_sub(descriptor.host_offset);
                 let read_size = (descriptor.compressed_size as usize).min(available as usize);
                 let mut compressed_data = vec![0u8; read_size];
-                self.backend
-                    .read_exact_at(&mut compressed_data, descriptor.host_offset)?;
-                let decompressed =
-                    compression::decompress_cluster(&compressed_data, cluster_size, guest_offset)?;
-                let intra = intra_cluster_offset.0 as usize;
-                buf.copy_from_slice(&decompressed[intra..intra + buf.len()]);
+                if let Err(e) = self
+                    .backend
+                    .read_exact_at(&mut compressed_data, descriptor.host_offset)
+                {
+                    return self.handle_read_error(buf, guest_offset, e);
+                }
+                match compression::decompress_cluster(
+                    &compressed_data,
+                    cluster_size,
+                    guest_offset,
+                ) {
+                    Ok(decompressed) => {
+                        let intra = intra_cluster_offset.0 as usize;
+                        buf.copy_from_slice(&decompressed[intra..intra + buf.len()]);
+                        Ok(())
+                    }
+                    Err(e) => self.handle_read_error(buf, guest_offset, e),
+                }
+            }
+        }
+    }
+
+    /// Handle a read error according to the current read mode.
+    ///
+    /// In strict mode, propagates the error. In lenient mode, fills the
+    /// buffer with zeros and records a warning.
+    fn handle_read_error<E: Into<Error>>(
+        &mut self,
+        buf: &mut [u8],
+        guest_offset: u64,
+        error: E,
+    ) -> Result<()> {
+        let error = error.into();
+        match self.read_mode {
+            ReadMode::Strict => Err(error),
+            ReadMode::Lenient => {
+                self.warnings.push(ReadWarning {
+                    guest_offset,
+                    message: error.to_string(),
+                });
+                buf.fill(0);
                 Ok(())
             }
         }
@@ -144,6 +217,26 @@ mod tests {
 
     const CLUSTER_BITS: u32 = 16;
     const CLUSTER_SIZE: usize = 1 << 16;
+
+    /// Create a strict-mode reader for testing (most common case).
+    fn make_strict_reader<'a>(
+        mapper: &'a ClusterMapper,
+        backend: &'a MemoryBackend,
+        cache: &'a mut MetadataCache,
+        virtual_size: u64,
+        warnings: &'a mut Vec<ReadWarning>,
+    ) -> Qcow2Reader<'a> {
+        Qcow2Reader::new(
+            mapper,
+            backend,
+            cache,
+            CLUSTER_BITS,
+            virtual_size,
+            ReadMode::Strict,
+            warnings,
+            None,
+        )
+    }
 
     /// Build a test image with one L1 entry and specific L2 entries.
     /// Returns (backend, mapper) ready for reading.
@@ -178,7 +271,7 @@ mod tests {
         }
 
         let backend = MemoryBackend::new(image_data);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64);
         (backend, mapper)
     }
 
@@ -193,7 +286,8 @@ mod tests {
             build_test_setup(&[(0, l2_raw)], &[(data_cluster as usize, test_data)]);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
 
         let mut buf = vec![0u8; test_data.len()];
         reader.read_at(&mut buf, 0).unwrap();
@@ -206,7 +300,8 @@ mod tests {
         let (backend, mapper) = build_test_setup(&[(0, l2_raw)], &[]);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
 
         let mut buf = vec![0xFFu8; 512];
         reader.read_at(&mut buf, 0).unwrap();
@@ -218,7 +313,8 @@ mod tests {
         let (backend, mapper) = build_test_setup(&[], &[]); // All L2 entries zero
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
 
         let mut buf = vec![0xFFu8; 256];
         reader.read_at(&mut buf, 0).unwrap();
@@ -241,7 +337,8 @@ mod tests {
         );
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
 
         // Read 512 bytes spanning the boundary: last 256 of cluster 0 + first 256 of cluster 1
         let read_offset = CLUSTER_SIZE as u64 - 256;
@@ -287,10 +384,11 @@ mod tests {
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
 
         let backend = MemoryBackend::new(image_data);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
 
         // Read first 100 bytes
         let mut buf = vec![0u8; 100];
@@ -304,7 +402,8 @@ mod tests {
         let mut cache = MetadataCache::new(CacheConfig::default());
         let virtual_size = 1024u64;
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, virtual_size);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, virtual_size, &mut warnings);
 
         let mut buf = vec![0u8; 100];
         let result = reader.read_at(&mut buf, 1000);
@@ -322,7 +421,8 @@ mod tests {
         let (backend, mapper) = build_test_setup(&[], &[]);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
 
         // A zero-length read should succeed immediately.
         let mut buf = vec![];
@@ -335,7 +435,8 @@ mod tests {
         let mut cache = MetadataCache::new(CacheConfig::default());
         let virtual_size = 65536u64; // exactly 1 cluster
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, virtual_size);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, virtual_size, &mut warnings);
 
         // offset = virtual_size → reading even 1 byte should fail
         let mut buf = vec![0u8; 1];
@@ -348,7 +449,8 @@ mod tests {
         let (backend, mapper) = build_test_setup(&[], &[]);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, u64::MAX);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, u64::MAX, &mut warnings);
 
         // offset near u64::MAX + buf.len() would overflow
         let mut buf = vec![0u8; 1024];
@@ -366,7 +468,8 @@ mod tests {
         let (backend, mapper) = build_test_setup(&[(0, l2_raw)], &[(3, &data)]);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
 
         let mut buf = vec![0u8; 1];
         reader.read_at(&mut buf, CLUSTER_SIZE as u64 - 1).unwrap();
@@ -392,7 +495,8 @@ mod tests {
         );
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let mut reader = Qcow2Reader::new(&mapper, &backend, &mut cache, CLUSTER_BITS, 1 << 30);
+        let mut warnings = vec![];
+        let mut reader = make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
 
         // Read from middle of cluster 0 through all of cluster 1 into cluster 2
         let start = CLUSTER_SIZE as u64 - 256;
@@ -403,5 +507,323 @@ mod tests {
         assert!(buf[..256].iter().all(|&b| b == 0x11), "tail of cluster 0");
         assert!(buf[256..256 + CLUSTER_SIZE].iter().all(|&b| b == 0x22), "all of cluster 1");
         assert!(buf[256 + CLUSTER_SIZE..].iter().all(|&b| b == 0x33), "start of cluster 2");
+    }
+
+    // ---- Lenient mode helpers ----
+
+    /// Create a lenient-mode reader for testing.
+    fn make_lenient_reader<'a>(
+        mapper: &'a ClusterMapper,
+        backend: &'a MemoryBackend,
+        cache: &'a mut MetadataCache,
+        virtual_size: u64,
+        warnings: &'a mut Vec<ReadWarning>,
+    ) -> Qcow2Reader<'a> {
+        Qcow2Reader::new(
+            mapper,
+            backend,
+            cache,
+            CLUSTER_BITS,
+            virtual_size,
+            ReadMode::Lenient,
+            warnings,
+            None,
+        )
+    }
+
+    /// Build an image where L1 has only 1 entry but virtual_size implies
+    /// more L1 entries are needed. Accessing guest offset beyond L1 triggers
+    /// an L1 out-of-bounds error.
+    fn build_small_l1_setup() -> (MemoryBackend, ClusterMapper) {
+        let l1_buf = vec![0u8; L1_ENTRY_SIZE]; // 1 entry, all zeros
+        let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
+        let image_size = 10 * CLUSTER_SIZE;
+        let backend = MemoryBackend::zeroed(image_size);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64);
+        (backend, mapper)
+    }
+
+    /// Build an image where L1 points to an L2 table beyond the file.
+    fn build_l2_beyond_eof_setup() -> (MemoryBackend, ClusterMapper) {
+        let fake_l2_offset = 20 * CLUSTER_SIZE as u64; // beyond the file
+        let l1_entry = L1Entry::with_l2_offset(ClusterOffset(fake_l2_offset), true);
+        let mut l1_buf = vec![0u8; L1_ENTRY_SIZE];
+        BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
+        let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
+
+        let image_size = 10 * CLUSTER_SIZE;
+        let backend = MemoryBackend::zeroed(image_size);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64);
+        (backend, mapper)
+    }
+
+    /// Build an image where an L2 entry points to a host offset beyond the file.
+    /// This passes ClusterMapper (which only validates L2 TABLE offsets) but
+    /// causes an I/O error when the reader tries to read the actual data.
+    fn build_allocated_io_error_setup() -> (MemoryBackend, ClusterMapper) {
+        let bad_host_offset = 20 * CLUSTER_SIZE as u64; // beyond file
+        let l2_raw = bad_host_offset | L2_COPIED_FLAG;
+        build_test_setup(&[(0, l2_raw)], &[])
+    }
+
+    /// Build an image with a compressed cluster pointing to garbage data
+    /// (valid offset, but not valid deflate).
+    fn build_bad_compressed_setup() -> (MemoryBackend, ClusterMapper, u64) {
+        let compressed_host_offset = 5 * CLUSTER_SIZE as u64;
+        let desc = CompressedClusterDescriptor {
+            host_offset: compressed_host_offset,
+            compressed_size: 512,
+        };
+        let l2_raw = L2_COMPRESSED_FLAG | desc.encode(CLUSTER_BITS);
+
+        // Use build_test_setup — cluster 5 will contain zeros (invalid deflate)
+        let (backend, mapper) = build_test_setup(&[(0, l2_raw)], &[]);
+        (backend, mapper, compressed_host_offset)
+    }
+
+    /// Build an image with a compressed cluster descriptor pointing beyond EOF.
+    fn build_compressed_beyond_eof_setup() -> (MemoryBackend, ClusterMapper) {
+        let desc = CompressedClusterDescriptor {
+            host_offset: 20 * CLUSTER_SIZE as u64, // beyond file
+            compressed_size: 512,
+        };
+        let l2_raw = L2_COMPRESSED_FLAG | desc.encode(CLUSTER_BITS);
+        build_test_setup(&[(0, l2_raw)], &[])
+    }
+
+    // ---- Strict mode error propagation ----
+
+    #[test]
+    fn strict_mode_propagates_l1_out_of_bounds() {
+        let (backend, mapper) = build_small_l1_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        // virtual_size large enough to imply L1 index > 0
+        let virtual_size = 2 * 8192 * CLUSTER_SIZE as u64;
+        let mut reader =
+            make_strict_reader(&mapper, &backend, &mut cache, virtual_size, &mut warnings);
+
+        // L1 has 1 entry → guest offset at L1 index 1 fails
+        let beyond_l1 = 8192u64 * CLUSTER_SIZE as u64;
+        let mut buf = vec![0u8; 512];
+        let result = reader.read_at(&mut buf, beyond_l1);
+        assert!(result.is_err());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn strict_mode_propagates_decompression_error() {
+        let (backend, mapper, _) = build_bad_compressed_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let mut reader =
+            make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
+
+        let mut buf = vec![0u8; 512];
+        let result = reader.read_at(&mut buf, 0);
+        assert!(result.is_err());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn strict_mode_propagates_io_error() {
+        let (backend, mapper) = build_allocated_io_error_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let mut reader =
+            make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
+
+        let mut buf = vec![0u8; 512];
+        let result = reader.read_at(&mut buf, 0);
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(Error::Io { .. })),
+            "expected Io error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn strict_mode_rejects_compressed_beyond_eof() {
+        let (backend, mapper) = build_compressed_beyond_eof_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let mut reader =
+            make_strict_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
+
+        let mut buf = vec![0u8; 512];
+        let result = reader.read_at(&mut buf, 0);
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(Error::MetadataOffsetBeyondEof { .. })),
+            "expected MetadataOffsetBeyondEof, got {result:?}"
+        );
+    }
+
+    // ---- Lenient mode: zeros on error ----
+
+    #[test]
+    fn lenient_returns_zeros_on_l1_out_of_bounds() {
+        let (backend, mapper) = build_small_l1_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let virtual_size = 2 * 8192 * CLUSTER_SIZE as u64;
+        let mut reader =
+            make_lenient_reader(&mapper, &backend, &mut cache, virtual_size, &mut warnings);
+
+        let beyond_l1 = 8192u64 * CLUSTER_SIZE as u64;
+        let mut buf = vec![0xFFu8; 512];
+        reader.read_at(&mut buf, beyond_l1).unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "lenient should fill zeros");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn lenient_returns_zeros_on_l2_load_failure() {
+        let (backend, mapper) = build_l2_beyond_eof_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let mut reader =
+            make_lenient_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
+
+        let mut buf = vec![0xFFu8; 512];
+        reader.read_at(&mut buf, 0).unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "lenient should fill zeros");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn lenient_returns_zeros_on_allocated_io_error() {
+        let (backend, mapper) = build_allocated_io_error_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let mut reader =
+            make_lenient_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
+
+        let mut buf = vec![0xFFu8; 512];
+        reader.read_at(&mut buf, 0).unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "lenient should fill zeros");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn lenient_returns_zeros_on_decompression_failure() {
+        let (backend, mapper, _) = build_bad_compressed_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let mut reader =
+            make_lenient_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
+
+        let mut buf = vec![0xFFu8; 512];
+        reader.read_at(&mut buf, 0).unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "lenient should fill zeros");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn lenient_returns_zeros_on_compressed_beyond_eof() {
+        let (backend, mapper) = build_compressed_beyond_eof_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let mut reader =
+            make_lenient_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
+
+        let mut buf = vec![0xFFu8; 512];
+        reader.read_at(&mut buf, 0).unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "lenient should fill zeros");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    // ---- Lenient mode: warning content ----
+
+    #[test]
+    fn lenient_warning_contains_guest_offset() {
+        let (backend, mapper) = build_small_l1_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let virtual_size = 2 * 8192 * CLUSTER_SIZE as u64;
+        let mut reader =
+            make_lenient_reader(&mapper, &backend, &mut cache, virtual_size, &mut warnings);
+
+        let beyond_l1 = 8192u64 * CLUSTER_SIZE as u64;
+        let mut buf = vec![0u8; 512];
+        reader.read_at(&mut buf, beyond_l1).unwrap();
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].guest_offset, beyond_l1);
+    }
+
+    #[test]
+    fn lenient_warning_contains_descriptive_message() {
+        let (backend, mapper) = build_compressed_beyond_eof_setup();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let mut reader =
+            make_lenient_reader(&mapper, &backend, &mut cache, 1 << 30, &mut warnings);
+
+        let mut buf = vec![0u8; 512];
+        reader.read_at(&mut buf, 0).unwrap();
+
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            !warnings[0].message.is_empty(),
+            "warning message should not be empty"
+        );
+        assert!(
+            warnings[0].message.contains("exceeds"),
+            "warning should describe the issue, got: {}",
+            warnings[0].message
+        );
+    }
+
+    #[test]
+    fn lenient_multi_cluster_read_partial_corruption() {
+        // Build an image with 3 clusters: cluster 0 has valid data, cluster 1
+        // has an L2 entry pointing beyond the file (I/O error), cluster 2
+        // has valid data.
+        let data1 = vec![0xAAu8; CLUSTER_SIZE];
+        let data3 = vec![0xCCu8; CLUSTER_SIZE];
+        let host1 = 3 * CLUSTER_SIZE as u64;
+        let bad_host = 20 * CLUSTER_SIZE as u64; // beyond file
+        let host3 = 5 * CLUSTER_SIZE as u64;
+
+        let (backend, mapper) = build_test_setup(
+            &[
+                (0, host1 | L2_COPIED_FLAG),
+                (1, bad_host | L2_COPIED_FLAG), // corrupt
+                (2, host3 | L2_COPIED_FLAG),
+            ],
+            &[(3, &data1), (5, &data3)],
+        );
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let virtual_size = 10 * CLUSTER_SIZE as u64;
+        let mut reader =
+            make_lenient_reader(&mapper, &backend, &mut cache, virtual_size, &mut warnings);
+
+        // Read spanning all 3 clusters
+        let mut buf = vec![0xFFu8; 3 * CLUSTER_SIZE];
+        reader.read_at(&mut buf, 0).unwrap();
+
+        // Cluster 0: valid data
+        assert!(
+            buf[..CLUSTER_SIZE].iter().all(|&b| b == 0xAA),
+            "cluster 0 should have valid data"
+        );
+        // Cluster 1: zeroed due to corruption
+        assert!(
+            buf[CLUSTER_SIZE..2 * CLUSTER_SIZE]
+                .iter()
+                .all(|&b| b == 0),
+            "cluster 1 should be zeros (corrupt)"
+        );
+        // Cluster 2: valid data
+        assert!(
+            buf[2 * CLUSTER_SIZE..].iter().all(|&b| b == 0xCC),
+            "cluster 2 should have valid data"
+        );
+
+        // Exactly one warning for the corrupt cluster
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].guest_offset, CLUSTER_SIZE as u64);
     }
 }

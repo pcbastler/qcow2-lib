@@ -12,9 +12,15 @@ pub mod cache;
 pub mod cluster_mapping;
 pub mod compression;
 pub mod image;
+pub mod read_mode;
 pub mod reader;
+pub mod refcount_manager;
+pub mod snapshot_manager;
+pub mod writer;
 
 // Re-exports for convenience
 pub use cache::{CacheConfig, CacheStats};
 pub use cluster_mapping::ClusterResolution;
 pub use image::Qcow2Image;
+pub use read_mode::{ReadMode, ReadWarning};
+pub use snapshot_manager::SnapshotInfo;

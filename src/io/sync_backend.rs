@@ -43,6 +43,23 @@ impl SyncFileBackend {
         Ok(Self { file })
     }
 
+    /// Create a new file at the given path for reading and writing.
+    ///
+    /// Fails if the file already exists (uses `create_new`).
+    pub fn create(path: &Path) -> Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| Error::Io {
+                source: e,
+                offset: 0,
+                context: "creating new file",
+            })?;
+        Ok(Self { file })
+    }
+
     /// Wrap an existing [`File`] handle.
     pub fn from_file(file: File) -> Self {
         Self { file }

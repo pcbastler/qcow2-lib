@@ -48,14 +48,16 @@ pub enum ClusterResolution {
 pub struct ClusterMapper {
     l1_table: L1Table,
     cluster_bits: u32,
+    file_size: u64,
 }
 
 impl ClusterMapper {
     /// Create a new cluster mapper.
-    pub fn new(l1_table: L1Table, cluster_bits: u32) -> Self {
+    pub fn new(l1_table: L1Table, cluster_bits: u32, file_size: u64) -> Self {
         Self {
             l1_table,
             cluster_bits,
+            file_size,
         }
     }
 
@@ -110,9 +112,25 @@ impl ClusterMapper {
             return Ok(table.clone());
         }
 
+        // Validate L2 table offset against file size
+        let cluster_size = 1u64 << self.cluster_bits;
+        let l2_end = offset
+            .0
+            .checked_add(cluster_size)
+            .ok_or(crate::error::Error::ArithmeticOverflow {
+                context: "L2 table offset + cluster_size",
+            })?;
+        if l2_end > self.file_size {
+            return Err(crate::error::Error::MetadataOffsetBeyondEof {
+                offset: offset.0,
+                size: cluster_size,
+                file_size: self.file_size,
+                context: "L2 table",
+            });
+        }
+
         // Cache miss: read from backend
-        let cluster_size = 1usize << self.cluster_bits;
-        let mut buf = vec![0u8; cluster_size];
+        let mut buf = vec![0u8; cluster_size as usize];
         backend.read_exact_at(&mut buf, offset.0)?;
         let table = L2Table::read_from(&buf, self.cluster_bits)?;
 
@@ -130,6 +148,25 @@ impl ClusterMapper {
     pub fn cluster_bits(&self) -> u32 {
         self.cluster_bits
     }
+
+    /// Read an L1 entry by index.
+    pub fn l1_entry(&self, index: L1Index) -> Result<crate::format::l1::L1Entry> {
+        self.l1_table.get(index)
+    }
+
+    /// Update an L1 entry at the given index.
+    pub fn set_l1_entry(
+        &mut self,
+        index: L1Index,
+        entry: crate::format::l1::L1Entry,
+    ) -> Result<()> {
+        self.l1_table.set(index, entry)
+    }
+
+    /// Update the known file size (after extending the image file).
+    pub fn set_file_size(&mut self, file_size: u64) {
+        self.file_size = file_size;
+    }
 }
 
 #[cfg(test)]
@@ -143,6 +180,7 @@ mod tests {
 
     const CLUSTER_BITS: u32 = 16;
     const CLUSTER_SIZE: usize = 1 << 16; // 65536
+    const IMAGE_SIZE: u64 = 10 * CLUSTER_SIZE as u64;
 
     /// Build a minimal QCOW2 image in memory with specific L1/L2 entries.
     fn build_test_image(l2_entries: &[(u32, u64)]) -> (MemoryBackend, L1Table) {
@@ -182,7 +220,7 @@ mod tests {
         // L1 entry is zero (unallocated)
         let l1_buf = vec![0u8; L1_ENTRY_SIZE];
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
         let backend = MemoryBackend::zeroed(CLUSTER_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
@@ -197,7 +235,7 @@ mod tests {
         let data_cluster_offset = 3 * CLUSTER_SIZE as u64;
         let l2_raw = data_cluster_offset | L2_COPIED_FLAG;
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result = mapper
@@ -216,7 +254,7 @@ mod tests {
     fn resolve_zero_cluster() {
         let l2_raw = L2_ZERO_FLAG;
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result = mapper
@@ -228,7 +266,7 @@ mod tests {
     #[test]
     fn resolve_unallocated_l2() {
         let (backend, l1_table) = build_test_image(&[]); // All L2 entries are 0
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result = mapper
@@ -245,7 +283,7 @@ mod tests {
         };
         let l2_raw = L2_COMPRESSED_FLAG | desc.encode(CLUSTER_BITS);
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result = mapper
@@ -265,7 +303,7 @@ mod tests {
         let data_offset = 3 * CLUSTER_SIZE as u64;
         let l2_raw = data_offset | L2_COPIED_FLAG;
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         // First resolve: cache miss
@@ -290,7 +328,7 @@ mod tests {
         // should fail.
         let l1_buf = vec![0u8; L1_ENTRY_SIZE];
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
         let backend = MemoryBackend::zeroed(10 * CLUSTER_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
@@ -307,7 +345,7 @@ mod tests {
         let data_offset = 3 * CLUSTER_SIZE as u64;
         let l2_raw = data_offset | L2_COPIED_FLAG;
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result1 = mapper
@@ -326,7 +364,7 @@ mod tests {
         let data_offset = 3 * CLUSTER_SIZE as u64;
         let l2_raw = data_offset | L2_COPIED_FLAG;
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         // Guest offset 12345 → intra = 12345 (within first cluster)
@@ -340,5 +378,110 @@ mod tests {
                 intra_cluster_offset: IntraClusterOffset(12345),
             }
         );
+    }
+
+    // ---- L2 bounds-checking tests ----
+
+    #[test]
+    fn reject_l2_table_beyond_file() {
+        // L1 points to an L2 table whose offset exceeds the file size.
+        let fake_l2_offset = 20 * CLUSTER_SIZE as u64; // well beyond IMAGE_SIZE
+        let l1_entry = L1Entry::with_l2_offset(ClusterOffset(fake_l2_offset), true);
+        let mut l1_buf = vec![0u8; L1_ENTRY_SIZE];
+        BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
+        let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
+
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let backend = MemoryBackend::zeroed(IMAGE_SIZE as usize);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        let result = mapper.resolve(GuestOffset(0), &backend, &mut cache);
+        assert!(result.is_err(), "should reject L2 table beyond file");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::MetadataOffsetBeyondEof { .. }),
+            "expected MetadataOffsetBeyondEof, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reject_l2_table_offset_overflow() {
+        // L1 points to an L2 offset so large that offset + cluster_size overflows u64.
+        let huge_offset = u64::MAX - 100;
+        let l1_entry = L1Entry::with_l2_offset(ClusterOffset(huge_offset), true);
+        let mut l1_buf = vec![0u8; L1_ENTRY_SIZE];
+        BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
+        let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
+
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let backend = MemoryBackend::zeroed(IMAGE_SIZE as usize);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        let result = mapper.resolve(GuestOffset(0), &backend, &mut cache);
+        assert!(result.is_err(), "should reject overflowing L2 offset");
+    }
+
+    // ---- Write-support methods ----
+
+    #[test]
+    fn l1_entry_read() {
+        let entry = L1Entry::with_l2_offset(ClusterOffset(0x20000), true);
+        let mut l1_buf = vec![0u8; 2 * L1_ENTRY_SIZE];
+        BigEndian::write_u64(&mut l1_buf[L1_ENTRY_SIZE..], entry.raw());
+        let l1_table = L1Table::read_from(&l1_buf, 2).unwrap();
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+
+        assert!(mapper.l1_entry(L1Index(0)).unwrap().is_unallocated());
+        assert_eq!(mapper.l1_entry(L1Index(1)).unwrap(), entry);
+    }
+
+    #[test]
+    fn set_l1_entry_updates_table() {
+        let l1_table = L1Table::new_empty(4);
+        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+
+        let entry = L1Entry::with_l2_offset(ClusterOffset(0x30000), true);
+        mapper.set_l1_entry(L1Index(2), entry).unwrap();
+        assert_eq!(mapper.l1_entry(L1Index(2)).unwrap(), entry);
+    }
+
+    #[test]
+    fn set_file_size_extends_boundary() {
+        let l2_offset = 12 * CLUSTER_SIZE as u64; // beyond original IMAGE_SIZE
+        let l1_entry = L1Entry::with_l2_offset(ClusterOffset(l2_offset), true);
+        let mut l1_buf = vec![0u8; L1_ENTRY_SIZE];
+        BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
+        let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
+
+        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let backend = MemoryBackend::zeroed(20 * CLUSTER_SIZE);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // Should fail with original file size
+        assert!(mapper.resolve(GuestOffset(0), &backend, &mut cache).is_err());
+
+        // After extending file size, should succeed
+        mapper.set_file_size(20 * CLUSTER_SIZE as u64);
+        let result = mapper.resolve(GuestOffset(0), &backend, &mut cache).unwrap();
+        assert_eq!(result, ClusterResolution::Unallocated);
+    }
+
+    #[test]
+    fn valid_l2_table_at_file_boundary_ok() {
+        // L2 table starts exactly at the last valid position: file_size - cluster_size.
+        // This should succeed.
+        let l2_offset = IMAGE_SIZE - CLUSTER_SIZE as u64; // cluster 9
+        let l1_entry = L1Entry::with_l2_offset(ClusterOffset(l2_offset), true);
+        let mut l1_buf = vec![0u8; L1_ENTRY_SIZE];
+        BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
+        let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
+
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let backend = MemoryBackend::zeroed(IMAGE_SIZE as usize);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // All L2 entries are zero → Unallocated
+        let result = mapper.resolve(GuestOffset(0), &backend, &mut cache);
+        assert_eq!(result.unwrap(), ClusterResolution::Unallocated);
     }
 }
