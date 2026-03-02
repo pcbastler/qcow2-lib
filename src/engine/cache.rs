@@ -103,6 +103,21 @@ impl MetadataCache {
         self.refcount_blocks.put(offset.0, block);
     }
 
+    /// Evict a specific L2 table from the cache.
+    ///
+    /// Used by the write path after modifying an L2 table on disk,
+    /// so that subsequent reads reload the updated version.
+    pub fn evict_l2_table(&mut self, offset: ClusterOffset) {
+        self.l2_tables.pop(&offset.0);
+    }
+
+    /// Evict a specific refcount block from the cache.
+    ///
+    /// Used by the write path after modifying a refcount block on disk.
+    pub fn evict_refcount_block(&mut self, offset: ClusterOffset) {
+        self.refcount_blocks.pop(&offset.0);
+    }
+
     /// Clear all cached entries.
     pub fn clear(&mut self) {
         self.l2_tables.clear();
@@ -271,6 +286,31 @@ mod tests {
         assert_eq!(cache.stats().l2_misses, 1);
         assert_eq!(cache.stats().refcount_hits, 1);
         assert_eq!(cache.stats().refcount_misses, 1);
+    }
+
+    #[test]
+    fn evict_l2_table_removes_entry() {
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let offset = ClusterOffset(0x10000);
+        cache.insert_l2_table(offset, make_l2_table(16));
+        assert!(cache.get_l2_table(offset).is_some());
+
+        cache.evict_l2_table(offset);
+        assert!(cache.get_l2_table(offset).is_none());
+    }
+
+    #[test]
+    fn evict_refcount_block_removes_entry() {
+        use crate::format::refcount::RefcountBlock;
+
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let offset = ClusterOffset(0x20000);
+        let block = RefcountBlock::read_from(&[0u8; 64], 4).unwrap();
+        cache.insert_refcount_block(offset, block);
+        assert!(cache.get_refcount_block(offset).is_some());
+
+        cache.evict_refcount_block(offset);
+        assert!(cache.get_refcount_block(offset).is_none());
     }
 
     #[test]
