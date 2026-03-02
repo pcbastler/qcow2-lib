@@ -7,7 +7,9 @@
 pub mod constants;
 pub mod types;
 pub mod feature_flags;
+pub mod header;
 
 // Re-exports for convenience
 pub use feature_flags::{AutoclearFeatures, CompatibleFeatures, IncompatibleFeatures};
+pub use header::Header;
 pub use types::*;
