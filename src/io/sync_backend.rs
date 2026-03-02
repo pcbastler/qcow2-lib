@@ -98,6 +98,14 @@ impl IoBackend for SyncFileBackend {
             context: "SyncFileBackend::file_size",
         })
     }
+
+    fn set_len(&self, size: u64) -> Result<()> {
+        self.file.set_len(size).map_err(|e| Error::Io {
+            source: e,
+            offset: size,
+            context: "SyncFileBackend::set_len",
+        })
+    }
 }
 
 #[cfg(test)]
@@ -155,5 +163,32 @@ mod tests {
     fn open_nonexistent_returns_error() {
         let result = SyncFileBackend::open(Path::new("/nonexistent/qcow2"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_len_grow_and_shrink() {
+        let tmp = NamedTempFile::new().unwrap();
+        let backend = SyncFileBackend::open_rw(tmp.path()).unwrap();
+
+        backend.write_all_at(&[0xBB; 64], 0).unwrap();
+        assert_eq!(backend.file_size().unwrap(), 64);
+
+        // Grow
+        backend.set_len(256).unwrap();
+        assert_eq!(backend.file_size().unwrap(), 256);
+
+        // Original data preserved
+        let mut buf = [0u8; 64];
+        backend.read_exact_at(&mut buf, 0).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xBB));
+
+        // New area is zeros
+        let mut buf2 = [0u8; 64];
+        backend.read_exact_at(&mut buf2, 128).unwrap();
+        assert!(buf2.iter().all(|&b| b == 0));
+
+        // Shrink
+        backend.set_len(32).unwrap();
+        assert_eq!(backend.file_size().unwrap(), 32);
     }
 }

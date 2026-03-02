@@ -275,6 +275,44 @@ pub enum Error {
         /// Description of what went wrong.
         message: String,
     },
+
+    // ---- Resize errors ----
+    /// Resize target is smaller than the current virtual size.
+    #[error("cannot shrink image from {current} to {requested} bytes (shrink not yet supported)")]
+    ShrinkNotSupported {
+        /// Current virtual size in bytes.
+        current: u64,
+        /// Requested virtual size in bytes.
+        requested: u64,
+    },
+
+    /// Resize target is not aligned to the cluster size.
+    #[error("resize target {size} is not aligned to cluster size {cluster_size}")]
+    ResizeNotAligned {
+        /// The unaligned requested size.
+        size: u64,
+        /// The cluster size that alignment is required to.
+        cluster_size: u64,
+    },
+
+    // ---- Conversion errors ----
+    /// A format conversion operation failed.
+    #[error("conversion failed: {message}")]
+    ConversionFailed {
+        /// Description of what went wrong.
+        message: String,
+    },
+
+    /// Compression of a cluster produced output that is not smaller than the original.
+    #[error("compression ineffective: compressed size {compressed_size} >= cluster size {cluster_size} at guest offset 0x{guest_offset:x}")]
+    CompressionTooLarge {
+        /// Size of the compressed data in bytes.
+        compressed_size: usize,
+        /// Cluster size in bytes.
+        cluster_size: usize,
+        /// Guest offset of the cluster.
+        guest_offset: u64,
+    },
 }
 
 #[cfg(test)]
@@ -619,5 +657,54 @@ mod tests {
             msg.contains("L2 table allocation failed"),
             "should contain message: {msg}"
         );
+    }
+
+    #[test]
+    fn shrink_not_supported_displays_sizes() {
+        let err = Error::ShrinkNotSupported {
+            current: 1073741824,
+            requested: 536870912,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("1073741824"), "should contain current: {msg}");
+        assert!(msg.contains("536870912"), "should contain requested: {msg}");
+        assert!(msg.contains("shrink"), "should mention shrink: {msg}");
+    }
+
+    #[test]
+    fn resize_not_aligned_displays_sizes() {
+        let err = Error::ResizeNotAligned {
+            size: 1000,
+            cluster_size: 65536,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("1000"), "should contain size: {msg}");
+        assert!(msg.contains("65536"), "should contain cluster_size: {msg}");
+        assert!(msg.contains("not aligned"), "should mention alignment: {msg}");
+    }
+
+    #[test]
+    fn conversion_failed_displays_message() {
+        let err = Error::ConversionFailed {
+            message: "unsupported source format".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported source format"),
+            "should contain message: {msg}"
+        );
+    }
+
+    #[test]
+    fn compression_too_large_displays_context() {
+        let err = Error::CompressionTooLarge {
+            compressed_size: 70000,
+            cluster_size: 65536,
+            guest_offset: 0x10_0000,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("70000"), "should contain compressed_size: {msg}");
+        assert!(msg.contains("65536"), "should contain cluster_size: {msg}");
+        assert!(msg.contains("100000"), "should contain hex offset: {msg}");
     }
 }

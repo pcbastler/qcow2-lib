@@ -33,6 +33,11 @@ pub trait IoBackend: Send + Sync {
 
     /// Total size of the backing storage in bytes.
     fn file_size(&self) -> Result<u64>;
+
+    /// Resize the backing storage to exactly `size` bytes.
+    ///
+    /// Extends with zeros or truncates as appropriate.
+    fn set_len(&self, size: u64) -> Result<()>;
 }
 
 /// In-memory I/O backend for testing.
@@ -105,6 +110,12 @@ impl IoBackend for MemoryBackend {
     fn file_size(&self) -> Result<u64> {
         Ok(self.data.read().unwrap().len() as u64)
     }
+
+    fn set_len(&self, size: u64) -> Result<()> {
+        let mut data = self.data.write().unwrap();
+        data.resize(size as usize, 0);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +153,28 @@ mod tests {
     fn memory_backend_file_size() {
         let backend = MemoryBackend::new(vec![0u8; 256]);
         assert_eq!(backend.file_size().unwrap(), 256);
+    }
+
+    #[test]
+    fn memory_backend_set_len_grow() {
+        let backend = MemoryBackend::zeroed(100);
+        backend.set_len(200).unwrap();
+        assert_eq!(backend.file_size().unwrap(), 200);
+        // New bytes should be zero
+        let mut buf = [0u8; 10];
+        backend.read_exact_at(&mut buf, 150).unwrap();
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn memory_backend_set_len_shrink() {
+        let backend = MemoryBackend::zeroed(200);
+        backend.write_all_at(&[0xAA; 50], 0).unwrap();
+        backend.set_len(100).unwrap();
+        assert_eq!(backend.file_size().unwrap(), 100);
+        // Original data in range should be preserved
+        let mut buf = [0u8; 50];
+        backend.read_exact_at(&mut buf, 0).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAA));
     }
 }

@@ -11,6 +11,7 @@ pub mod backing;
 pub mod cache;
 pub mod cluster_mapping;
 pub mod compression;
+pub mod converter;
 pub mod image;
 pub mod read_mode;
 pub mod reader;

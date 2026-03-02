@@ -167,6 +167,20 @@ impl L1Table {
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Extend the table to `new_count` entries, filling new entries as unallocated.
+    ///
+    /// Panics if `new_count` is less than the current length.
+    pub fn grow(&mut self, new_count: u32) {
+        assert!(
+            new_count as usize >= self.entries.len(),
+            "grow() cannot shrink: {} -> {}",
+            self.entries.len(),
+            new_count
+        );
+        self.entries
+            .resize(new_count as usize, L1Entry::unallocated());
+    }
 }
 
 #[cfg(test)]
@@ -403,5 +417,44 @@ mod tests {
         let table = L1Table::new_empty(7);
         assert_eq!(table.entry_count(), 7);
         assert_eq!(table.entry_count(), table.len() as usize);
+    }
+
+    // ---- grow() tests ----
+
+    #[test]
+    fn grow_extends_with_unallocated() {
+        let mut table = L1Table::new_empty(4);
+        table
+            .set(L1Index(1), L1Entry::with_l2_offset(ClusterOffset(0x10000), true))
+            .unwrap();
+        table.grow(8);
+        assert_eq!(table.len(), 8);
+        // New entries should be unallocated
+        for i in 4..8 {
+            assert!(table.get(L1Index(i)).unwrap().is_unallocated());
+        }
+    }
+
+    #[test]
+    fn grow_same_size_is_noop() {
+        let mut table = L1Table::new_empty(4);
+        table.grow(4);
+        assert_eq!(table.len(), 4);
+    }
+
+    #[test]
+    fn grow_preserves_existing_entries() {
+        let mut table = L1Table::new_empty(2);
+        let entry = L1Entry::with_l2_offset(ClusterOffset(0x20000), true);
+        table.set(L1Index(1), entry).unwrap();
+        table.grow(10);
+        assert_eq!(table.get(L1Index(1)).unwrap(), entry);
+    }
+
+    #[test]
+    #[should_panic(expected = "grow() cannot shrink")]
+    fn grow_panics_on_shrink() {
+        let mut table = L1Table::new_empty(8);
+        table.grow(4);
     }
 }

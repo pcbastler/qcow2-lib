@@ -167,6 +167,16 @@ impl ClusterMapper {
     pub fn set_file_size(&mut self, file_size: u64) {
         self.file_size = file_size;
     }
+
+    /// Replace the L1 table (used during resize when the table relocates).
+    pub fn replace_l1_table(&mut self, new_table: L1Table) {
+        self.l1_table = new_table;
+    }
+
+    /// Mutable access to the L1 table (for in-place grow).
+    pub fn l1_table_mut(&mut self) -> &mut L1Table {
+        &mut self.l1_table
+    }
 }
 
 #[cfg(test)]
@@ -483,5 +493,33 @@ mod tests {
         // All L2 entries are zero → Unallocated
         let result = mapper.resolve(GuestOffset(0), &backend, &mut cache);
         assert_eq!(result.unwrap(), ClusterResolution::Unallocated);
+    }
+
+    #[test]
+    fn replace_l1_table_updates_mapping() {
+        let l1_table = L1Table::new_empty(1);
+        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+
+        // Start with empty table
+        assert!(mapper.l1_entry(L1Index(0)).unwrap().is_unallocated());
+
+        // Replace with a table that has an entry
+        let mut new_table = L1Table::new_empty(2);
+        let entry = L1Entry::with_l2_offset(ClusterOffset(0x20000), true);
+        new_table.set(L1Index(1), entry).unwrap();
+        mapper.replace_l1_table(new_table);
+
+        assert_eq!(mapper.l1_table().len(), 2);
+        assert_eq!(mapper.l1_entry(L1Index(1)).unwrap(), entry);
+    }
+
+    #[test]
+    fn l1_table_mut_allows_in_place_grow() {
+        let l1_table = L1Table::new_empty(2);
+        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+
+        mapper.l1_table_mut().grow(4);
+        assert_eq!(mapper.l1_table().len(), 4);
+        assert!(mapper.l1_entry(L1Index(3)).unwrap().is_unallocated());
     }
 }
