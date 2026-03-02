@@ -170,6 +170,13 @@ impl Qcow2Image {
     pub fn cache_stats(&self) -> &CacheStats {
         self.cache.stats()
     }
+
+    /// Access the underlying I/O backend.
+    ///
+    /// Useful for CLI tools that need to read raw metadata directly.
+    pub fn backend(&self) -> &dyn IoBackend {
+        self.backend.as_ref()
+    }
 }
 
 #[cfg(test)]
