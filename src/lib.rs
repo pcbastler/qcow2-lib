@@ -10,5 +10,6 @@
 #![warn(missing_docs)]
 
 pub mod error;
+pub mod format;
 
 pub use error::{Error, Result};
