@@ -109,7 +109,13 @@ impl<'a> Qcow2Reader<'a> {
                 intra_cluster_offset,
             } => {
                 let cluster_size = 1usize << self.cluster_bits;
-                let mut compressed_data = vec![0u8; descriptor.compressed_size as usize];
+                // The compressed_size from the descriptor is the maximum number
+                // of sectors the data can span, but may extend past EOF for the
+                // last compressed cluster in the file. Clamp to available data.
+                let file_size = self.backend.file_size()?;
+                let available = file_size.saturating_sub(descriptor.host_offset);
+                let read_size = (descriptor.compressed_size as usize).min(available as usize);
+                let mut compressed_data = vec![0u8; read_size];
                 self.backend
                     .read_exact_at(&mut compressed_data, descriptor.host_offset)?;
                 let decompressed =

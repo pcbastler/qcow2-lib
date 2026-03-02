@@ -205,7 +205,7 @@ mod tests {
         let image_size = 10 * CLUSTER_SIZE;
         let mut image_data = vec![0u8; image_size];
 
-        let l1_offset = 1 * CLUSTER_SIZE;
+        let l1_offset = CLUSTER_SIZE;
         let l2_offset = 2 * CLUSTER_SIZE;
 
         // Write header
