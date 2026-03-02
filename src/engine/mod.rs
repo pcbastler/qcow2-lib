@@ -8,3 +8,4 @@ pub mod backing;
 pub mod cache;
 pub mod cluster_mapping;
 pub mod compression;
+pub mod reader;
