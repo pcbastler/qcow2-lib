@@ -1,0 +1,20 @@
+//! Stateful read engine for QCOW2 images.
+//!
+//! This module composes the pure `format` layer with the `io` backend
+//! to provide a complete read path. It handles L1/L2 address translation,
+//! metadata caching, decompression, and backing file chains.
+//!
+//! The primary entry point is [`Qcow2Image`], which provides a high-level
+//! API for opening and reading QCOW2 disk images.
+
+pub mod backing;
+pub mod cache;
+pub mod cluster_mapping;
+pub mod compression;
+pub mod image;
+pub mod reader;
+
+// Re-exports for convenience
+pub use cache::{CacheConfig, CacheStats};
+pub use cluster_mapping::ClusterResolution;
+pub use image::Qcow2Image;
