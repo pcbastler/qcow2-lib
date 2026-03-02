@@ -1,0 +1,27 @@
+[package]
+name = "qcow2-lib"
+version = "0.1.0"
+edition = "2021"
+description = "A textbook-quality QCOW2 image format library for Rust"
+license-file = "LICENSE"
+rust-version = "1.70"
+
+[dependencies]
+thiserror = "2"
+byteorder = "1"
+bitflags = "2"
+flate2 = "1"
+lru = "0.12"
+clap = { version = "4", features = ["derive"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
+cli = ["dep:clap"]
+
+[[bin]]
+name = "qcow2-tool"
+path = "src/cli/main.rs"
+required-features = ["cli"]
