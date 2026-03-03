@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process;
 
+mod bitmap;
 mod check;
 mod commit;
 mod compact;
@@ -56,6 +57,12 @@ enum Command {
     Snapshot {
         #[command(subcommand)]
         action: SnapshotAction,
+    },
+
+    /// Manage persistent dirty bitmaps.
+    Bitmap {
+        #[command(subcommand)]
+        action: BitmapAction,
     },
 
     /// Resize the image's virtual disk size.
@@ -137,6 +144,42 @@ enum SnapshotAction {
     },
 }
 
+#[derive(Subcommand)]
+enum BitmapAction {
+    /// List all bitmaps.
+    List {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+    },
+    /// Create a new bitmap.
+    Create {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+        /// Name for the new bitmap.
+        name: String,
+        /// Granularity in bits (9=512B, 16=64KiB, 20=1MiB). Default: 16.
+        #[arg(long)]
+        granularity: Option<u8>,
+        /// Enable automatic dirty tracking on writes.
+        #[arg(long)]
+        auto: bool,
+    },
+    /// Delete an existing bitmap.
+    Delete {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+        /// Name of the bitmap to delete.
+        name: String,
+    },
+    /// Dump dirty regions of a bitmap.
+    Dump {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+        /// Name of the bitmap to dump.
+        name: String,
+    },
+}
+
 #[derive(Clone, clap::ValueEnum)]
 enum DumpTarget {
     /// L1 table entries.
@@ -159,6 +202,14 @@ fn main() {
             SnapshotAction::Create { path, name } => snapshot::run_create(&path, &name),
             SnapshotAction::Delete { path, name } => snapshot::run_delete(&path, &name),
             SnapshotAction::Apply { path, name } => snapshot::run_apply(&path, &name),
+        },
+        Command::Bitmap { action } => match action {
+            BitmapAction::List { path } => bitmap::run_list(&path),
+            BitmapAction::Create { path, name, granularity, auto } => {
+                bitmap::run_create(&path, &name, granularity, auto)
+            }
+            BitmapAction::Delete { path, name } => bitmap::run_delete(&path, &name),
+            BitmapAction::Dump { path, name } => bitmap::run_dump(&path, &name),
         },
         Command::Resize { path, size } => resize::run(&path, &size),
         Command::Convert {
