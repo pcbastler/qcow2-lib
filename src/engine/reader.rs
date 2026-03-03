@@ -840,4 +840,121 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].guest_offset, CLUSTER_SIZE as u64);
     }
+
+    // ---- Backing bounds tests ----
+
+    /// Create a backing Qcow2Image with `backing_vs` virtual size
+    /// and 0xBB written to the first 512 bytes.
+    fn make_backing_image(backing_vs: u64) -> crate::engine::image::Qcow2Image {
+        let backend = MemoryBackend::zeroed(0);
+        let mut img = crate::engine::image::Qcow2Image::create_on_backend(
+            Box::new(backend),
+            crate::engine::image::CreateOptions {
+                virtual_size: backing_vs,
+                cluster_bits: Some(CLUSTER_BITS),
+            },
+        )
+        .unwrap();
+        img.write_at(&[0xBB; 512], 0).unwrap();
+        img
+    }
+
+    #[test]
+    fn unallocated_beyond_backing_returns_zeros() {
+        // Backing is 64 KB, read at offset 128 KB (beyond backing)
+        let mut backing = make_backing_image(CLUSTER_SIZE as u64);
+
+        // Overlay: all unallocated (L2 entries all zero)
+        let (backend, mapper) = build_test_setup(&[], &[]);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+
+        let virtual_size = 4 * CLUSTER_SIZE as u64;
+        let mut reader = Qcow2Reader::new(
+            &mapper,
+            &backend,
+            &mut cache,
+            CLUSTER_BITS,
+            virtual_size,
+            ReadMode::Strict,
+            &mut warnings,
+            Some(&mut backing),
+        );
+
+        let mut buf = vec![0xFF; 512];
+        reader.read_at(&mut buf, 2 * CLUSTER_SIZE as u64).unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "beyond backing should be zeros");
+    }
+
+    #[test]
+    fn unallocated_partial_overlap_with_backing() {
+        // Backing is 256 bytes into the first cluster (virtual_size = 256).
+        // Read 512 bytes from offset 0 — first 256 from backing, rest zeros.
+        let backend_mem = MemoryBackend::zeroed(0);
+        let mut backing = crate::engine::image::Qcow2Image::create_on_backend(
+            Box::new(backend_mem),
+            crate::engine::image::CreateOptions {
+                virtual_size: 256,
+                cluster_bits: Some(CLUSTER_BITS),
+            },
+        )
+        .unwrap();
+        backing.write_at(&[0xCC; 256], 0).unwrap();
+
+        let (backend, mapper) = build_test_setup(&[], &[]);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let virtual_size = CLUSTER_SIZE as u64;
+
+        let mut reader = Qcow2Reader::new(
+            &mapper,
+            &backend,
+            &mut cache,
+            CLUSTER_BITS,
+            virtual_size,
+            ReadMode::Strict,
+            &mut warnings,
+            Some(&mut backing),
+        );
+
+        let mut buf = vec![0xFF; 512];
+        reader.read_at(&mut buf, 0).unwrap();
+        assert!(
+            buf[..256].iter().all(|&b| b == 0xCC),
+            "first 256 bytes should come from backing"
+        );
+        assert!(
+            buf[256..].iter().all(|&b| b == 0),
+            "bytes beyond backing should be zeros"
+        );
+    }
+
+    #[test]
+    fn unallocated_within_backing_reads_data() {
+        // Backing is large enough; read entirely from backing
+        let mut backing = make_backing_image(CLUSTER_SIZE as u64);
+
+        let (backend, mapper) = build_test_setup(&[], &[]);
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let mut warnings = vec![];
+        let virtual_size = CLUSTER_SIZE as u64;
+
+        let mut reader = Qcow2Reader::new(
+            &mapper,
+            &backend,
+            &mut cache,
+            CLUSTER_BITS,
+            virtual_size,
+            ReadMode::Strict,
+            &mut warnings,
+            Some(&mut backing),
+        );
+
+        let mut buf = vec![0u8; 512];
+        reader.read_at(&mut buf, 0).unwrap();
+        assert!(
+            buf.iter().all(|&b| b == 0xBB),
+            "should read 0xBB from backing"
+        );
+    }
 }
