@@ -19,6 +19,8 @@ pub struct CacheConfig {
     pub l2_table_capacity: usize,
     /// Maximum number of refcount blocks to cache.
     pub refcount_block_capacity: usize,
+    /// Maximum number of bitmap data clusters to cache.
+    pub bitmap_data_capacity: usize,
 }
 
 impl Default for CacheConfig {
@@ -26,6 +28,7 @@ impl Default for CacheConfig {
         Self {
             l2_table_capacity: 32,
             refcount_block_capacity: 16,
+            bitmap_data_capacity: 8,
         }
     }
 }
@@ -40,6 +43,7 @@ impl Default for CacheConfig {
 pub struct MetadataCache {
     l2_tables: LruCache<u64, L2Table>,
     refcount_blocks: LruCache<u64, RefcountBlock>,
+    bitmap_data: LruCache<u64, Vec<u8>>,
     stats: CacheStats,
 }
 
@@ -54,6 +58,10 @@ pub struct CacheStats {
     pub refcount_hits: u64,
     /// Number of refcount block cache misses.
     pub refcount_misses: u64,
+    /// Number of bitmap data cluster cache hits.
+    pub bitmap_hits: u64,
+    /// Number of bitmap data cluster cache misses.
+    pub bitmap_misses: u64,
 }
 
 impl MetadataCache {
@@ -65,6 +73,10 @@ impl MetadataCache {
             ),
             refcount_blocks: LruCache::new(
                 NonZeroUsize::new(config.refcount_block_capacity)
+                    .unwrap_or(NonZeroUsize::new(1).unwrap()),
+            ),
+            bitmap_data: LruCache::new(
+                NonZeroUsize::new(config.bitmap_data_capacity)
                     .unwrap_or(NonZeroUsize::new(1).unwrap()),
             ),
             stats: CacheStats::default(),
@@ -118,10 +130,32 @@ impl MetadataCache {
         self.refcount_blocks.pop(&offset.0);
     }
 
+    /// Look up a cached bitmap data cluster by host offset.
+    pub fn get_bitmap_data(&mut self, offset: ClusterOffset) -> Option<&Vec<u8>> {
+        let result = self.bitmap_data.get(&offset.0);
+        if result.is_some() {
+            self.stats.bitmap_hits += 1;
+        } else {
+            self.stats.bitmap_misses += 1;
+        }
+        result
+    }
+
+    /// Insert a bitmap data cluster into the cache.
+    pub fn insert_bitmap_data(&mut self, offset: ClusterOffset, data: Vec<u8>) {
+        self.bitmap_data.put(offset.0, data);
+    }
+
+    /// Evict a specific bitmap data cluster from the cache.
+    pub fn evict_bitmap_data(&mut self, offset: ClusterOffset) {
+        self.bitmap_data.pop(&offset.0);
+    }
+
     /// Clear all cached entries.
     pub fn clear(&mut self) {
         self.l2_tables.clear();
         self.refcount_blocks.clear();
+        self.bitmap_data.clear();
     }
 
     /// Get cache statistics.
@@ -164,6 +198,7 @@ mod tests {
         let config = CacheConfig {
             l2_table_capacity: 2,
             refcount_block_capacity: 1,
+            bitmap_data_capacity: 1,
         };
         let mut cache = MetadataCache::new(config);
 
@@ -207,6 +242,7 @@ mod tests {
         let config = CacheConfig {
             l2_table_capacity: 1,
             refcount_block_capacity: 1,
+            bitmap_data_capacity: 1,
         };
         let mut cache = MetadataCache::new(config);
 
@@ -248,6 +284,7 @@ mod tests {
         let config = CacheConfig {
             l2_table_capacity: 8,
             refcount_block_capacity: 2,
+            bitmap_data_capacity: 1,
         };
         let mut cache = MetadataCache::new(config);
 
@@ -313,4 +350,122 @@ mod tests {
         assert!(cache.get_refcount_block(offset).is_none());
     }
 
+    // ---- Bitmap data cache ----
+
+    #[test]
+    fn bitmap_data_insert_and_get() {
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let offset = ClusterOffset(0x50000);
+        let data = vec![0xAA; 4096];
+
+        cache.insert_bitmap_data(offset, data.clone());
+        let cached = cache.get_bitmap_data(offset);
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap(), &data);
+
+        assert_eq!(cache.stats().bitmap_hits, 1);
+        assert_eq!(cache.stats().bitmap_misses, 0);
+    }
+
+    #[test]
+    fn bitmap_data_miss() {
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        assert!(cache.get_bitmap_data(ClusterOffset(0x99999)).is_none());
+        assert_eq!(cache.stats().bitmap_misses, 1);
+    }
+
+    #[test]
+    fn bitmap_data_eviction() {
+        let config = CacheConfig {
+            l2_table_capacity: 1,
+            refcount_block_capacity: 1,
+            bitmap_data_capacity: 2,
+        };
+        let mut cache = MetadataCache::new(config);
+
+        cache.insert_bitmap_data(ClusterOffset(0x10000), vec![1; 64]);
+        cache.insert_bitmap_data(ClusterOffset(0x20000), vec![2; 64]);
+        cache.insert_bitmap_data(ClusterOffset(0x30000), vec![3; 64]);
+
+        // First entry evicted
+        assert!(cache.get_bitmap_data(ClusterOffset(0x10000)).is_none());
+        assert!(cache.get_bitmap_data(ClusterOffset(0x20000)).is_some());
+        assert!(cache.get_bitmap_data(ClusterOffset(0x30000)).is_some());
+    }
+
+    #[test]
+    fn bitmap_data_evict_specific() {
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        let offset = ClusterOffset(0x40000);
+        cache.insert_bitmap_data(offset, vec![0xFF; 128]);
+        assert!(cache.get_bitmap_data(offset).is_some());
+
+        cache.evict_bitmap_data(offset);
+        assert!(cache.get_bitmap_data(offset).is_none());
+    }
+
+    #[test]
+    fn bitmap_data_stats_tracking() {
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        cache.insert_bitmap_data(ClusterOffset(0x10000), vec![0; 64]);
+
+        cache.get_bitmap_data(ClusterOffset(0x10000)); // hit
+        cache.get_bitmap_data(ClusterOffset(0x20000)); // miss
+        cache.get_bitmap_data(ClusterOffset(0x10000)); // hit
+        cache.get_bitmap_data(ClusterOffset(0x30000)); // miss
+
+        assert_eq!(cache.stats().bitmap_hits, 2);
+        assert_eq!(cache.stats().bitmap_misses, 2);
+    }
+
+    #[test]
+    fn clear_also_clears_bitmap_data() {
+        let mut cache = MetadataCache::new(CacheConfig::default());
+        cache.insert_bitmap_data(ClusterOffset(0x10000), vec![1; 64]);
+        cache.insert_l2_table(ClusterOffset(0x20000), make_l2_table(16));
+
+        cache.clear();
+
+        assert!(cache.get_bitmap_data(ClusterOffset(0x10000)).is_none());
+        assert!(cache.get_l2_table(ClusterOffset(0x20000)).is_none());
+    }
+
+    #[test]
+    fn bitmap_data_capacity_one() {
+        let config = CacheConfig {
+            l2_table_capacity: 1,
+            refcount_block_capacity: 1,
+            bitmap_data_capacity: 1,
+        };
+        let mut cache = MetadataCache::new(config);
+
+        cache.insert_bitmap_data(ClusterOffset(0x10000), vec![1; 64]);
+        assert!(cache.get_bitmap_data(ClusterOffset(0x10000)).is_some());
+
+        cache.insert_bitmap_data(ClusterOffset(0x20000), vec![2; 64]);
+        assert!(cache.get_bitmap_data(ClusterOffset(0x10000)).is_none());
+        assert!(cache.get_bitmap_data(ClusterOffset(0x20000)).is_some());
+    }
+
+    #[test]
+    fn mixed_all_three_cache_types() {
+        use crate::format::refcount::RefcountBlock;
+
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        cache.insert_l2_table(ClusterOffset(0x10000), make_l2_table(16));
+        let block = RefcountBlock::read_from(&[0u8; 64], 4).unwrap();
+        cache.insert_refcount_block(ClusterOffset(0x20000), block);
+        cache.insert_bitmap_data(ClusterOffset(0x30000), vec![0xBB; 256]);
+
+        cache.get_l2_table(ClusterOffset(0x10000));
+        cache.get_refcount_block(ClusterOffset(0x20000));
+        cache.get_bitmap_data(ClusterOffset(0x30000));
+        cache.get_bitmap_data(ClusterOffset(0x99999));
+
+        assert_eq!(cache.stats().l2_hits, 1);
+        assert_eq!(cache.stats().refcount_hits, 1);
+        assert_eq!(cache.stats().bitmap_hits, 1);
+        assert_eq!(cache.stats().bitmap_misses, 1);
+    }
 }
