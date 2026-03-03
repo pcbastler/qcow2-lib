@@ -1313,4 +1313,129 @@ mod tests {
             other => panic!("expected Standard, got {other:?}"),
         }
     }
+
+    // ---- Overflow and compressed write tests ----
+
+    #[test]
+    fn write_u64_overflow_rejected() {
+        let mut s = setup();
+        // guest_offset near u64::MAX + buf.len() would overflow
+        let buf = vec![0xAA; 100];
+        let result = make_writer(&mut s).write_at(&buf, u64::MAX - 10);
+        assert!(result.is_err(), "should reject write that overflows u64");
+    }
+
+    #[test]
+    fn write_to_compressed_cluster_decompresses_and_reallocates() {
+        use crate::engine::compression;
+        use crate::format::compressed::CompressedClusterDescriptor;
+
+        // Create setup with an L2 table (at cluster 4)
+        let mut s = setup();
+
+        // First, write a full cluster so we get an L2 table allocated
+        let original_data = vec![0xAA; CLUSTER_SIZE];
+        make_writer(&mut s).write_at(&original_data, 0).unwrap();
+
+        // Now find where the data cluster landed
+        let l1_entry = s.mapper.l1_entry(L1Index(0)).unwrap();
+        let l2_offset = l1_entry.l2_table_offset().unwrap();
+
+        // Compress the original data
+        let compressed = compression::compress_cluster(&original_data, CLUSTER_SIZE)
+            .unwrap()
+            .expect("all-0xAA should compress");
+
+        // Allocate a cluster for the compressed data
+        let comp_host = s
+            .refcount_manager
+            .allocate_cluster(&s.backend, &mut s.cache)
+            .unwrap();
+        let file_size = s.backend.file_size().unwrap();
+        s.mapper.set_file_size(file_size);
+
+        // Write compressed data to backend, padded to sector alignment
+        let sector_aligned = ((compressed.len() + 511) & !511).max(512);
+        let mut padded = vec![0u8; sector_aligned];
+        padded[..compressed.len()].copy_from_slice(&compressed);
+        s.backend.write_all_at(&padded, comp_host.0).unwrap();
+
+        // Patch L2 entry 0 to be Compressed
+        let descriptor = CompressedClusterDescriptor {
+            host_offset: comp_host.0,
+            compressed_size: sector_aligned as u64,
+        };
+        let comp_entry = L2Entry::Compressed(descriptor);
+        let encoded = comp_entry.encode(CLUSTER_BITS);
+        let entry_offset = l2_offset.0; // entry index 0
+        let mut entry_buf = [0u8; 8];
+        BigEndian::write_u64(&mut entry_buf, encoded);
+        s.backend.write_all_at(&entry_buf, entry_offset).unwrap();
+        s.cache.evict_l2_table(l2_offset);
+
+        // Now write 64 bytes of 0xBB at offset 100 within that compressed cluster
+        let write_data = vec![0xBB; 64];
+        make_writer(&mut s).write_at(&write_data, 100).unwrap();
+
+        // The L2 entry should now be Standard (decompressed + reallocated)
+        let l1_entry = s.mapper.l1_entry(L1Index(0)).unwrap();
+        let l2_off = l1_entry.l2_table_offset().unwrap();
+        let mut l2_buf = vec![0u8; CLUSTER_SIZE];
+        s.backend.read_exact_at(&mut l2_buf, l2_off.0).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+
+        match l2_table.get(L2Index(0)).unwrap() {
+            L2Entry::Standard { host_offset, copied } => {
+                assert!(copied);
+                // Read back the full cluster
+                let mut readback = vec![0u8; CLUSTER_SIZE];
+                s.backend.read_exact_at(&mut readback, host_offset.0).unwrap();
+                // Bytes 0..100 should be 0xAA (original)
+                assert!(readback[..100].iter().all(|&b| b == 0xAA));
+                // Bytes 100..164 should be 0xBB (our write)
+                assert!(readback[100..164].iter().all(|&b| b == 0xBB));
+                // Bytes 164.. should be 0xAA (original)
+                assert!(readback[164..].iter().all(|&b| b == 0xAA));
+            }
+            other => panic!("expected Standard after write to compressed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_compressed_at_packs_cluster() {
+        use crate::engine::compression;
+
+        let mut s = setup();
+
+        // Compress a full cluster of 0xAA data
+        let data = vec![0xAA; CLUSTER_SIZE];
+        let compressed = compression::compress_cluster(&data, CLUSTER_SIZE)
+            .unwrap()
+            .expect("all-0xAA should compress");
+
+        // Write compressed data at guest offset 0
+        make_writer(&mut s)
+            .write_compressed_at(&compressed, 0)
+            .unwrap();
+
+        // Verify L2 entry is Compressed
+        let l1_entry = s.mapper.l1_entry(L1Index(0)).unwrap();
+        let l2_offset = l1_entry.l2_table_offset().unwrap();
+        let mut l2_buf = vec![0u8; CLUSTER_SIZE];
+        s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+
+        match l2_table.get(L2Index(0)).unwrap() {
+            L2Entry::Compressed(desc) => {
+                // Read the actual compressed bytes (deflate is self-terminating,
+                // so we only need the raw bytes, not the sector-aligned size)
+                let mut comp_buf = vec![0u8; compressed.len()];
+                s.backend.read_exact_at(&mut comp_buf, desc.host_offset).unwrap();
+                let decompressed =
+                    compression::decompress_cluster(&comp_buf, CLUSTER_SIZE, 0).unwrap();
+                assert_eq!(decompressed, data, "decompressed data should match original");
+            }
+            other => panic!("expected Compressed L2 entry, got {other:?}"),
+        }
+    }
 }

@@ -94,6 +94,13 @@ pub enum Error {
         table_size: u32,
     },
 
+    /// An L1 table was found at a non-cluster-aligned offset.
+    #[error("L1 table at offset 0x{offset:x} is not cluster-aligned")]
+    L1TableMisaligned {
+        /// The misaligned host offset.
+        offset: u64,
+    },
+
     /// An L2 table was found at a non-cluster-aligned offset.
     #[error("L2 table at offset 0x{offset:x} is not cluster-aligned")]
     L2TableMisaligned {

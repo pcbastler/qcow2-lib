@@ -336,7 +336,7 @@ impl Header {
         // L1 table offset alignment (must be cluster-aligned if non-zero)
         if self.l1_table_entries > 0 && !self.l1_table_offset.is_cluster_aligned(self.cluster_bits)
         {
-            return Err(Error::L2TableMisaligned {
+            return Err(Error::L1TableMisaligned {
                 offset: self.l1_table_offset.0,
             });
         }
@@ -855,8 +855,8 @@ mod tests {
         h.write_to(&mut buf).unwrap();
 
         match Header::read_from(&buf) {
-            Err(Error::L2TableMisaligned { offset: 0x3_0001 }) => {}
-            other => panic!("expected L2TableMisaligned, got {other:?}"),
+            Err(Error::L1TableMisaligned { offset: 0x3_0001 }) => {}
+            other => panic!("expected L1TableMisaligned, got {other:?}"),
         }
     }
 

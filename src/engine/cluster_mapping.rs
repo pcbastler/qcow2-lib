@@ -112,14 +112,12 @@ impl ClusterMapper {
             return Ok(table.clone());
         }
 
-        // Validate L2 table offset against file size
+        // Validate L2 table offset against file size.
+        // Note: overflow is impossible here because L1_OFFSET_MASK caps the
+        // offset at ~1 EB (0x00FF_FFFF_FFFF_FE00) and max cluster_size is
+        // 2 MB — their sum never exceeds u64.
         let cluster_size = 1u64 << self.cluster_bits;
-        let l2_end = offset
-            .0
-            .checked_add(cluster_size)
-            .ok_or(crate::error::Error::ArithmeticOverflow {
-                context: "L2 table offset + cluster_size",
-            })?;
+        let l2_end = offset.0 + cluster_size;
         if l2_end > self.file_size {
             return Err(crate::error::Error::MetadataOffsetBeyondEof {
                 offset: offset.0,

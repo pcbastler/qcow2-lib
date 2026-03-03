@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_bits_preserved_in_truncate() {
+    fn unknown_bits_removed_by_truncate() {
         // Bit 5 is unknown — from_bits_truncate should drop it
         let with_unknown = IncompatibleFeatures::from_bits_truncate(0b100001);
         assert!(with_unknown.contains(IncompatibleFeatures::DIRTY));
