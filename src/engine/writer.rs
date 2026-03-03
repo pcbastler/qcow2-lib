@@ -260,10 +260,15 @@ impl<'a> Qcow2Writer<'a> {
             // Full cluster write — no need to read backing data
             self.backend.write_all_at(buf, new_offset.0)?;
         } else if let Some(ref mut backing) = self.backing_image {
-            // Partial write with backing: read full cluster from backing,
-            // then overlay the new data.
+            // Partial write with backing: read what's available from backing,
+            // zero-fill anything beyond the backing's virtual size.
             let mut cluster_buf = vec![0u8; cluster_size as usize];
-            backing.read_at(&mut cluster_buf, guest_cluster_offset)?;
+            let backing_vs = backing.virtual_size();
+            if guest_cluster_offset < backing_vs {
+                let available =
+                    (backing_vs - guest_cluster_offset).min(cluster_size) as usize;
+                backing.read_at(&mut cluster_buf[..available], guest_cluster_offset)?;
+            }
             let start = intra.0 as usize;
             cluster_buf[start..start + buf.len()].copy_from_slice(buf);
             self.backend.write_all_at(&cluster_buf, new_offset.0)?;
