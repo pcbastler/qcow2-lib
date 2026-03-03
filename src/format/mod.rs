@@ -4,6 +4,7 @@
 //! `&[u8]` and serialize to `&mut [u8]`. This makes them trivially testable
 //! and reusable across sync and async engines.
 
+pub mod bitmap;
 pub mod compressed;
 pub mod constants;
 pub mod feature_flags;
@@ -16,6 +17,9 @@ pub mod snapshot;
 pub mod types;
 
 // Re-exports for convenience
+pub use bitmap::{
+    BitmapDirectoryEntry, BitmapExtension, BitmapTable, BitmapTableEntry, BitmapTableEntryState,
+};
 pub use compressed::CompressedClusterDescriptor;
 pub use feature_flags::{AutoclearFeatures, CompatibleFeatures, IncompatibleFeatures};
 pub use header::Header;

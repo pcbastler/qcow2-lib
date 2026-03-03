@@ -11,8 +11,10 @@ use byteorder::{BigEndian, ByteOrder};
 use crate::engine::cache::MetadataCache;
 use crate::engine::refcount_manager::RefcountManager;
 use crate::error::Result;
+use crate::format::bitmap::{BitmapDirectoryEntry, BitmapTableEntryState};
 use crate::format::constants::*;
 use crate::format::header::Header;
+use crate::format::header_extension::HeaderExtension;
 use crate::format::l1::L1Entry;
 use crate::format::l2::{L2Entry, L2Table};
 use crate::format::refcount::{RefcountBlock, RefcountTableEntry};
@@ -202,6 +204,9 @@ pub fn build_reference_map(
             }
         }
     }
+
+    // 8. Bitmap clusters (directory, tables, data)
+    walk_bitmaps(backend, header, cluster_size, &mut refs)?;
 
     Ok((refs, stats))
 }
@@ -489,6 +494,90 @@ fn walk_l1_l2(
                         *refs.entry(c).or_insert(0) += 1;
                     }
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Walk bitmap structures and count all referenced clusters.
+///
+/// Counts:
+/// - Bitmap directory clusters
+/// - Bitmap table clusters (per bitmap)
+/// - Bitmap data clusters (from table entries with data offsets)
+fn walk_bitmaps(
+    backend: &dyn IoBackend,
+    header: &Header,
+    cluster_size: u64,
+    refs: &mut HashMap<u64, u64>,
+) -> Result<()> {
+    // Read header extensions to find bitmap extension
+    let ext_start = header.header_length as u64;
+    let ext_end = cluster_size.min(backend.file_size()?);
+    if ext_start >= ext_end {
+        return Ok(());
+    }
+
+    let mut ext_buf = vec![0u8; (ext_end - ext_start) as usize];
+    backend.read_exact_at(&mut ext_buf, ext_start)?;
+    let extensions = HeaderExtension::read_all(&ext_buf).unwrap_or_default();
+
+    let bitmap_ext = match extensions.iter().find_map(|e| match e {
+        HeaderExtension::Bitmaps(b) => Some(b),
+        _ => None,
+    }) {
+        Some(ext) if ext.nb_bitmaps > 0 => ext,
+        _ => return Ok(()),
+    };
+
+    // Count directory clusters
+    let dir_cluster_count =
+        (bitmap_ext.bitmap_directory_size + cluster_size - 1) / cluster_size;
+    for c in 0..dir_cluster_count {
+        add_ref(
+            refs,
+            bitmap_ext.bitmap_directory_offset + c * cluster_size,
+            cluster_size,
+        );
+    }
+
+    // Read directory entries
+    let mut dir_buf = vec![0u8; bitmap_ext.bitmap_directory_size as usize];
+    backend.read_exact_at(&mut dir_buf, bitmap_ext.bitmap_directory_offset)?;
+    let entries =
+        BitmapDirectoryEntry::read_directory(&dir_buf, bitmap_ext.nb_bitmaps)?;
+
+    for entry in &entries {
+        // Count bitmap table clusters
+        let table_byte_size =
+            entry.bitmap_table_size as u64 * BITMAP_TABLE_ENTRY_SIZE as u64;
+        let table_cluster_count =
+            (table_byte_size + cluster_size - 1) / cluster_size;
+        for c in 0..table_cluster_count {
+            add_ref(
+                refs,
+                entry.bitmap_table_offset.0 + c * cluster_size,
+                cluster_size,
+            );
+        }
+
+        // Read bitmap table and count data clusters
+        let mut table_buf =
+            vec![0u8; entry.bitmap_table_size as usize * BITMAP_TABLE_ENTRY_SIZE];
+        backend.read_exact_at(&mut table_buf, entry.bitmap_table_offset.0)?;
+        let table = crate::format::bitmap::BitmapTable::read_from(
+            &table_buf,
+            entry.bitmap_table_size,
+        )?;
+
+        for i in 0..table.len() {
+            let te = table
+                .get(crate::format::types::BitmapIndex(i as u32))
+                .unwrap();
+            if let BitmapTableEntryState::Data(data_offset) = te.state() {
+                add_ref(refs, data_offset.0, cluster_size);
             }
         }
     }

@@ -8,6 +8,7 @@
 //! API for opening and reading QCOW2 disk images.
 
 pub mod backing;
+pub mod bitmap_manager;
 pub mod cache;
 pub mod cluster_mapping;
 pub mod compression;
@@ -21,6 +22,7 @@ pub mod snapshot_manager;
 pub mod writer;
 
 // Re-exports for convenience
+pub use bitmap_manager::BitmapInfo;
 pub use cache::{CacheConfig, CacheStats};
 pub use cluster_mapping::ClusterResolution;
 pub use image::Qcow2Image;

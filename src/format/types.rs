@@ -31,6 +31,10 @@ pub struct L1Index(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct L2Index(pub u32);
 
+/// Index into a bitmap table.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct BitmapIndex(pub u32);
+
 /// Byte offset within a single cluster (0..cluster_size).
 ///
 /// Stored as `u32` because the maximum cluster size is 2 MB (fits in 21 bits).
@@ -94,6 +98,18 @@ impl fmt::Debug for L2Index {
 }
 
 impl fmt::Display for L2Index {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Debug for BitmapIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BitmapIndex({})", self.0)
+    }
+}
+
+impl fmt::Display for BitmapIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }

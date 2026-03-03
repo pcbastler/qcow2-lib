@@ -7,6 +7,7 @@
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::error::{Error, Result};
+use crate::format::bitmap::BitmapExtension;
 use crate::format::constants::*;
 
 /// Minimum size of a TLV header (4-byte type + 4-byte length).
@@ -21,8 +22,8 @@ pub enum HeaderExtension {
     /// Feature name table: maps (type, bit) pairs to human-readable names.
     FeatureNameTable(Vec<FeatureNameEntry>),
 
-    /// Bitmaps extension data (raw bytes, parsed in the bitmap module).
-    Bitmaps(Vec<u8>),
+    /// Bitmaps extension (persistent dirty tracking bitmaps).
+    Bitmaps(BitmapExtension),
 
     /// Full disk encryption header pointer.
     FullDiskEncryption {
@@ -166,7 +167,13 @@ impl HeaderExtension {
                 }
                 Ok(Self::FeatureNameTable(entries))
             }
-            EXT_BITMAPS => Ok(Self::Bitmaps(data.to_vec())),
+            EXT_BITMAPS => match BitmapExtension::read_from(data) {
+                Ok(ext) => Ok(Self::Bitmaps(ext)),
+                Err(_) => Ok(Self::Unknown {
+                    extension_type: ext_type,
+                    data: data.to_vec(),
+                }),
+            },
             EXT_FULL_DISK_ENCRYPTION => {
                 if data.len() >= 16 {
                     let offset = BigEndian::read_u64(data);
@@ -207,7 +214,7 @@ impl HeaderExtension {
                 }
                 (EXT_FEATURE_NAME_TABLE, data)
             }
-            Self::Bitmaps(raw) => (EXT_BITMAPS, raw.clone()),
+            Self::Bitmaps(ext) => (EXT_BITMAPS, ext.write_to()),
             Self::FullDiskEncryption { offset, length } => {
                 let mut data = vec![0u8; 16];
                 BigEndian::write_u64(&mut data[0..], *offset);
