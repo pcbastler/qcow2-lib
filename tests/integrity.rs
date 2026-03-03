@@ -5,6 +5,8 @@
 
 mod common;
 
+use qcow2_lib::engine::image::Qcow2Image;
+
 #[test]
 fn qemu_check_fresh_default_image() {
     let img = common::TestImage::create("10M");
@@ -65,6 +67,15 @@ fn qemu_check_compressed_image() {
         check_output.status.success(),
         "compressed image should pass check"
     );
+
+    // Verify our library can read the compressed image
+    let mut image = Qcow2Image::open(&compressed_path).unwrap();
+    let mut buf = vec![0u8; 65536];
+    image.read_at(&mut buf, 0).unwrap();
+    assert!(
+        buf.iter().all(|&b| b == 0xAA),
+        "library should read compressed data correctly"
+    );
 }
 
 #[test]
@@ -82,5 +93,14 @@ fn qemu_check_image_with_backing() {
     assert!(
         overlay.qemu_check(),
         "image with backing should pass check"
+    );
+
+    // Verify our library reads through the backing chain
+    let mut image = Qcow2Image::open(&overlay.path).unwrap();
+    let mut buf = vec![0u8; 4096];
+    image.read_at(&mut buf, 0).unwrap();
+    assert!(
+        buf.iter().all(|&b| b == 0xBB),
+        "library should read backing data through overlay"
     );
 }

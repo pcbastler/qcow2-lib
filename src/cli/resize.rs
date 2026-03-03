@@ -99,5 +99,11 @@ mod tests {
     fn parse_size_invalid() {
         assert!(parse_size("abc").is_err());
         assert!(parse_size("").is_err());
+        // Overflow through multiplication
+        assert!(parse_size("17179869184G").is_err(), "should reject overflow");
+        // Suffix without number
+        assert!(parse_size("K").is_err(), "should reject bare suffix");
+        // Decimal number
+        assert!(parse_size("1.5M").is_err(), "should reject decimal");
     }
 }

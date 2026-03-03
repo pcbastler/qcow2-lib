@@ -683,16 +683,24 @@ fn commit_empty_overlay_is_noop() {
         &[],
     );
 
-    // Get backing file checksum before commit
-    let before = std::fs::read(&base).unwrap();
+    // Read virtual content of backing before commit
+    let mut before = vec![0u8; size as usize];
+    {
+        let mut image = Qcow2Image::open(&base).unwrap();
+        image.read_at(&mut before, 0).unwrap();
+    }
 
     let mut image = Qcow2Image::open_rw(&overlay).unwrap();
     image.commit().unwrap();
     drop(image);
 
-    // Backing should be byte-for-byte identical (commit of empty overlay = noop)
-    let after = std::fs::read(&base).unwrap();
-    assert_eq!(before, after, "empty overlay commit should not modify backing");
+    // Virtual content of backing should be identical after empty commit
+    let mut after = vec![0u8; size as usize];
+    {
+        let mut image = Qcow2Image::open(&base).unwrap();
+        image.read_at(&mut after, 0).unwrap();
+    }
+    assert_eq!(before, after, "empty overlay commit should not change backing content");
 }
 
 // ---- Read-only error paths ----

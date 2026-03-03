@@ -1231,6 +1231,10 @@ impl Qcow2Image {
         self.mapper.l1_table_mut().shrink(new_l1_entries);
         self.header.l1_table_entries = new_l1_entries;
 
+        // Invalidate cache — L2 tables and refcount blocks may reference
+        // clusters that no longer exist after shrink.
+        self.cache.clear();
+
         Ok(())
     }
 
@@ -1281,6 +1285,9 @@ impl Qcow2Image {
 
         // Update mapper's file size
         self.mapper.set_file_size(new_file_size);
+
+        // Invalidate cache — refcount blocks may reference truncated regions.
+        self.cache.clear();
 
         Ok(saved)
     }

@@ -202,3 +202,12 @@ pub fn has_qemu_io() -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
+
+/// Check if qemu-img is available.
+pub fn has_qemu_img() -> bool {
+    Command::new("qemu-img")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}

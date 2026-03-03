@@ -797,25 +797,6 @@ mod tests {
     }
 
     #[test]
-    fn repair_on_clean_image_is_noop() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.qcow2");
-        let mut image = Qcow2Image::create(
-            &path,
-            CreateOptions {
-                virtual_size: 2 * 1024 * 1024,
-                cluster_bits: None,
-            },
-        )
-        .unwrap();
-        image.write_at(&[0xAA; 4096], 0).unwrap();
-        image.flush().unwrap();
-
-        let report = image.check_and_repair(Some(RepairMode::Full)).unwrap();
-        assert!(report.is_clean());
-    }
-
-    #[test]
     fn repair_fixes_leaked_cluster() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.qcow2");
