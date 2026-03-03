@@ -355,6 +355,60 @@ pub enum Error {
         /// Description of what went wrong.
         message: String,
     },
+
+    // ---- Bitmap errors ----
+
+    /// A bitmap with this name was not found.
+    #[error("bitmap not found: {name}")]
+    BitmapNotFound {
+        /// The bitmap name that was searched for.
+        name: String,
+    },
+
+    /// A bitmap with this name already exists.
+    #[error("bitmap with name {name:?} already exists")]
+    BitmapNameDuplicate {
+        /// The duplicate name.
+        name: String,
+    },
+
+    /// Bitmap name must not be empty.
+    #[error("bitmap name must not be empty")]
+    BitmapNameEmpty,
+
+    /// Bitmap directory entry is truncated.
+    #[error("bitmap directory entry at offset 0x{offset:x} is truncated: need {expected} bytes, got {actual}")]
+    BitmapDirectoryTruncated {
+        /// Byte offset within the directory.
+        offset: usize,
+        /// Number of bytes required.
+        expected: usize,
+        /// Number of bytes available.
+        actual: usize,
+    },
+
+    /// Bitmap extension header is invalid.
+    #[error("invalid bitmap extension: {message}")]
+    InvalidBitmapExtension {
+        /// Description of what is wrong.
+        message: String,
+    },
+
+    /// A bitmap table index is out of bounds.
+    #[error("bitmap table index {index} out of bounds (table size: {table_size})")]
+    BitmapIndexOutOfBounds {
+        /// The requested index.
+        index: u32,
+        /// The actual table size.
+        table_size: u32,
+    },
+
+    /// A bitmap table was found at a non-cluster-aligned offset.
+    #[error("bitmap table at offset 0x{offset:x} is not cluster-aligned")]
+    BitmapTableMisaligned {
+        /// The misaligned host offset.
+        offset: u64,
+    },
 }
 
 #[cfg(test)]

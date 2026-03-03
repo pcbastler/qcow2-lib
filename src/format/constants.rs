@@ -127,6 +127,53 @@ pub const L1_ENTRY_SIZE: usize = 8;
 /// Size of each refcount table entry in bytes.
 pub const REFCOUNT_TABLE_ENTRY_SIZE: usize = 8;
 
+// ---- Bitmap constants ----
+
+/// Fixed-size portion of a bitmap directory entry (before variable name/extra data).
+pub const BITMAP_DIR_ENTRY_FIXED_SIZE: usize = 24;
+
+/// Size of each bitmap table entry in bytes.
+pub const BITMAP_TABLE_ENTRY_SIZE: usize = 8;
+
+/// Bit 0 of a bitmap table entry: all-ones flag (valid only when offset is 0).
+pub const BME_TABLE_ALL_ONES_FLAG: u64 = 1;
+
+/// Bits 9..=55 of a bitmap table entry: cluster-aligned offset to bitmap data.
+pub const BME_TABLE_OFFSET_MASK: u64 = 0x00ff_ffff_ffff_fe00;
+
+/// Bitmap directory entry flag: bitmap was not saved correctly.
+pub const BME_FLAG_IN_USE: u32 = 1 << 0;
+
+/// Bitmap directory entry flag: bitmap auto-tracks all writes.
+pub const BME_FLAG_AUTO: u32 = 1 << 1;
+
+/// Bitmap directory entry flag: unknown extra data is safe to ignore.
+pub const BME_FLAG_EXTRA_DATA_COMPATIBLE: u32 = 1 << 2;
+
+/// Mask of all known bitmap directory entry flags.
+pub const BME_KNOWN_FLAGS: u32 = BME_FLAG_IN_USE | BME_FLAG_AUTO | BME_FLAG_EXTRA_DATA_COMPATIBLE;
+
+/// Dirty tracking bitmap type (the only defined type).
+pub const BITMAP_TYPE_DIRTY: u8 = 1;
+
+/// Maximum number of bitmaps in a single image.
+pub const BITMAP_MAX_COUNT: u32 = 65535;
+
+/// Maximum bitmap name length in bytes.
+pub const BITMAP_MAX_NAME_SIZE: u16 = 1023;
+
+/// Minimum valid granularity_bits (512 bytes).
+pub const BITMAP_MIN_GRANULARITY_BITS: u8 = 9;
+
+/// Maximum valid granularity_bits (2 GiB).
+pub const BITMAP_MAX_GRANULARITY_BITS: u8 = 31;
+
+/// Default granularity_bits (64 KiB).
+pub const BITMAP_DEFAULT_GRANULARITY_BITS: u8 = 16;
+
+/// Size of the bitmaps header extension data in bytes.
+pub const BITMAP_EXTENSION_DATA_SIZE: usize = 24;
+
 #[cfg(test)]
 mod tests {
     use super::*;
