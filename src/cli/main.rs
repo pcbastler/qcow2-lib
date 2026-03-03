@@ -8,9 +8,12 @@ use std::path::PathBuf;
 use std::process;
 
 mod check;
+mod commit;
+mod compact;
 mod convert;
 mod dump;
 mod info;
+mod rebase;
 mod resize;
 mod snapshot;
 
@@ -44,6 +47,9 @@ enum Command {
     Check {
         /// Path to the QCOW2 image file.
         path: PathBuf,
+        /// Repair any inconsistencies found.
+        #[arg(long)]
+        repair: bool,
     },
 
     /// Manage image snapshots.
@@ -52,7 +58,7 @@ enum Command {
         action: SnapshotAction,
     },
 
-    /// Resize the image's virtual disk size (grow only).
+    /// Resize the image's virtual disk size.
     Resize {
         /// Path to the QCOW2 image file.
         path: PathBuf,
@@ -72,6 +78,32 @@ enum Command {
         /// Compress output clusters (QCOW2 output only).
         #[arg(long)]
         compress: bool,
+    },
+
+    /// Compact/defragment a QCOW2 image into a new file.
+    Compact {
+        /// Input image file.
+        input: PathBuf,
+        /// Output image file.
+        output: PathBuf,
+        /// Compress output clusters.
+        #[arg(long)]
+        compress: bool,
+    },
+
+    /// Merge overlay data into its backing file.
+    Commit {
+        /// Path to the overlay QCOW2 image file.
+        path: PathBuf,
+    },
+
+    /// Change the backing file reference (unsafe, no data migration).
+    Rebase {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+        /// New backing file path. Omit to remove the backing reference.
+        #[arg(long)]
+        backing: Option<PathBuf>,
     },
 }
 
@@ -121,7 +153,7 @@ fn main() {
     let result = match cli.command {
         Command::Info { path } => info::run(&path),
         Command::Dump { path, target } => dump::run(&path, &target),
-        Command::Check { path } => check::run(&path),
+        Command::Check { path, repair } => check::run(&path, repair),
         Command::Snapshot { action } => match action {
             SnapshotAction::List { path } => snapshot::run_list(&path),
             SnapshotAction::Create { path, name } => snapshot::run_create(&path, &name),
@@ -135,6 +167,13 @@ fn main() {
             format,
             compress,
         } => convert::run(&input, &output, &format, compress),
+        Command::Compact {
+            input,
+            output,
+            compress,
+        } => compact::run(&input, &output, compress),
+        Command::Commit { path } => commit::run(&path),
+        Command::Rebase { path, backing } => rebase::run(&path, backing.as_ref()),
     };
 
     if let Err(e) = result {
