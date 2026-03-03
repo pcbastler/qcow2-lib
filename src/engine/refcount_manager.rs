@@ -623,30 +623,37 @@ mod tests {
 
     #[test]
     fn custom_allocator() {
-        /// Always allocates at a fixed offset for testing.
+        /// Allocates sequentially from a starting offset.
         #[derive(Debug)]
-        struct FixedAllocator(u64);
+        struct SequentialAllocator(u64);
 
-        impl AllocationStrategy for FixedAllocator {
+        impl AllocationStrategy for SequentialAllocator {
             fn find_free_cluster(&mut self, _state: &RefcountManagerState) -> Option<u64> {
-                Some(self.0)
+                let offset = self.0;
+                self.0 += CLUSTER_SIZE as u64;
+                Some(offset)
             }
         }
 
         let block_offset = 3 * CLUSTER_SIZE as u64;
         let header = make_header(1);
         let backend = make_backend(1, &[(0, block_offset)]);
-        let fixed_offset = 5 * CLUSTER_SIZE as u64;
+        let start_offset = 5 * CLUSTER_SIZE as u64;
         let mut mgr = RefcountManager::load_with_allocator(
             &backend,
             &header,
-            Box::new(FixedAllocator(fixed_offset)),
+            Box::new(SequentialAllocator(start_offset)),
         )
         .unwrap();
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let c = mgr.allocate_cluster(&backend, &mut cache).unwrap();
-        assert_eq!(c.0, fixed_offset);
+        let c1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        assert_eq!(c1.0, start_offset);
+
+        // Second allocation must return a different cluster
+        let c2 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        assert_ne!(c1, c2, "allocator must not return the same cluster twice");
+        assert_eq!(c2.0, start_offset + CLUSTER_SIZE as u64);
     }
 
     #[test]
@@ -791,10 +798,10 @@ mod tests {
     fn max_refcount_64bit() {
         let mut header = make_header(1);
         header.refcount_order = 6; // 64-bit refcounts
-        // Note: won't load properly (refcount block parsing would differ),
-        // but max_refcount is computed from state only.
+        // load() works because the refcount table has no block entries to parse.
         let backend = make_backend(1, &[]);
         let mgr = RefcountManager::load(&backend, &header).unwrap();
+        assert_eq!(mgr.state().refcount_order, 6);
         assert_eq!(mgr.max_refcount(), u64::MAX);
     }
 }

@@ -463,8 +463,8 @@ impl Header {
 
         // Only deflate compression is supported
         if self.compression_type != COMPRESSION_DEFLATE {
-            return Err(Error::UnsupportedIncompatibleFeatures {
-                features: self.compression_type as u64,
+            return Err(Error::UnsupportedCompressionType {
+                compression_type: self.compression_type,
             });
         }
 
@@ -1015,8 +1015,8 @@ mod tests {
         let mut h = make_test_header_v3();
         h.compression_type = 99;
         match h.validate_against_file(0x100_0000) {
-            Err(Error::UnsupportedIncompatibleFeatures { .. }) => {}
-            other => panic!("expected UnsupportedIncompatibleFeatures, got {other:?}"),
+            Err(Error::UnsupportedCompressionType { compression_type: 99 }) => {}
+            other => panic!("expected UnsupportedCompressionType, got {other:?}"),
         }
     }
 }

@@ -9,16 +9,12 @@ use qcow2_lib::engine::image::Qcow2Image;
 
 #[test]
 fn detect_backing_file() {
-    if !common::has_qemu_io() {
-        eprintln!("skipping: qemu-io not available");
+    if !common::has_qemu_img() {
+        eprintln!("skipping: qemu-img not available");
         return;
     }
 
-    // Create base image with data
     let base = common::TestImage::create("1M");
-    base.write_pattern(0xBB, 0, 4096);
-
-    // Create overlay with backing
     let overlay = common::TestImage::create_with_backing("1M", &base.path);
 
     let image = Qcow2Image::open(&overlay.path).unwrap();

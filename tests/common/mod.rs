@@ -14,6 +14,11 @@ pub struct TestImage {
 }
 
 impl TestImage {
+    /// Wrap an existing image path and its owning TempDir into a TestImage.
+    pub fn wrap(path: PathBuf, dir: TempDir) -> Self {
+        Self { path, _dir: dir }
+    }
+
     /// Create a new QCOW2 v3 image with the given virtual size using qemu-img.
     pub fn create(size: &str) -> Self {
         let dir = TempDir::new().expect("failed to create temp dir");
@@ -192,6 +197,15 @@ fn parse_qemu_io_hex_dump(output: &str) -> Vec<u8> {
 /// Check if qemu-io is available.
 pub fn has_qemu_io() -> bool {
     Command::new("qemu-io")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Check if qemu-img is available.
+pub fn has_qemu_img() -> bool {
+    Command::new("qemu-img")
         .arg("--version")
         .output()
         .map(|o| o.status.success())

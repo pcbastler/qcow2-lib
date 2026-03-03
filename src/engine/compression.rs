@@ -74,12 +74,18 @@ mod tests {
         let cluster_size = 4096;
         let original: Vec<u8> = (0..cluster_size).map(|i| (i % 256) as u8).collect();
 
-        // Compress with deflate
-        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&original).unwrap();
-        let compressed = encoder.finish().unwrap();
+        // Compress with the library function
+        let compressed = compress_cluster(&original, cluster_size)
+            .unwrap()
+            .expect("patterned data should compress");
 
-        // Decompress with our function
+        assert!(
+            compressed.len() < cluster_size,
+            "compressed should be smaller: {} >= {cluster_size}",
+            compressed.len()
+        );
+
+        // Decompress and verify round-trip
         let decompressed = decompress_cluster(&compressed, cluster_size, 0).unwrap();
         assert_eq!(decompressed, original);
     }

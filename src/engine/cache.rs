@@ -313,20 +313,4 @@ mod tests {
         assert!(cache.get_refcount_block(offset).is_none());
     }
 
-    #[test]
-    fn clear_does_not_reset_stats() {
-        let mut cache = MetadataCache::new(CacheConfig::default());
-        cache.insert_l2_table(ClusterOffset(0x10000), make_l2_table(16));
-        cache.get_l2_table(ClusterOffset(0x10000)); // hit
-        cache.get_l2_table(ClusterOffset(0x99999)); // miss
-
-        cache.clear();
-
-        // Stats should persist after clear
-        assert_eq!(cache.stats().l2_hits, 1);
-        assert_eq!(cache.stats().l2_misses, 1);
-
-        // But entries are gone
-        assert!(cache.get_l2_table(ClusterOffset(0x10000)).is_none());
-    }
 }

@@ -9,7 +9,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::format::constants::MAX_BACKING_CHAIN_DEPTH;
+use crate::format::constants::{HEADER_V3_MIN_LENGTH, MAX_BACKING_CHAIN_DEPTH};
+use crate::format::header::Header;
+use crate::io::sync_backend::SyncFileBackend;
+use crate::io::IoBackend;
 
 /// A single entry in the backing file chain.
 #[derive(Debug)]
@@ -38,27 +41,55 @@ impl BackingChain {
     pub fn resolve(backing_file_name: &str, image_dir: &Path) -> Result<Self> {
         let mut entries = Vec::new();
         let mut visited = HashSet::new();
+        let mut current_name = backing_file_name.to_string();
+        let mut current_dir = image_dir.to_path_buf();
 
-        let path = resolve_backing_path(backing_file_name, image_dir);
-        let canonical = path
-            .canonicalize()
-            .map_err(|_| Error::BackingFileNotFound {
-                path: path.display().to_string(),
-            })?;
+        loop {
+            if entries.len() >= MAX_BACKING_CHAIN_DEPTH as usize {
+                return Err(Error::BackingChainTooDeep {
+                    max_depth: MAX_BACKING_CHAIN_DEPTH,
+                });
+            }
 
-        if !visited.insert(canonical.clone()) {
-            return Err(Error::BackingChainTooDeep {
-                max_depth: MAX_BACKING_CHAIN_DEPTH,
+            let path = resolve_backing_path(&current_name, &current_dir);
+            let canonical =
+                path.canonicalize()
+                    .map_err(|_| Error::BackingFileNotFound {
+                        path: path.display().to_string(),
+                    })?;
+
+            if !visited.insert(canonical.clone()) {
+                return Err(Error::BackingChainLoop {
+                    path: canonical.display().to_string(),
+                });
+            }
+
+            entries.push(BackingEntry {
+                path: canonical.clone(),
             });
+
+            // Read this backing file's header to check for further backing
+            let backend = SyncFileBackend::open(&canonical)?;
+            let mut header_buf = vec![0u8; HEADER_V3_MIN_LENGTH];
+            backend.read_exact_at(&mut header_buf, 0)?;
+            let header = Header::read_from(&header_buf)?;
+
+            if !header.has_backing_file() {
+                break;
+            }
+
+            // Read the next backing file name and continue
+            let name = read_backing_file_name(
+                &backend,
+                header.backing_file_offset,
+                header.backing_file_size,
+            )?;
+            current_dir = canonical
+                .parent()
+                .unwrap_or(Path::new("/"))
+                .to_path_buf();
+            current_name = name;
         }
-
-        entries.push(BackingEntry {
-            path: canonical.clone(),
-        });
-
-        // TODO: Read the backing file's header to check if it itself has
-        // a backing file, and walk the chain up to MAX_BACKING_CHAIN_DEPTH.
-        // For Phase 1 we only resolve the immediate backing file.
 
         Ok(Self { entries })
     }
@@ -101,17 +132,7 @@ pub fn read_backing_file_name(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
-
-    #[test]
-    fn resolve_existing_backing_file() {
-        let tmp = NamedTempFile::new().unwrap();
-        let dir = tmp.path().parent().unwrap();
-        let name = tmp.path().file_name().unwrap().to_str().unwrap();
-
-        let chain = BackingChain::resolve(name, dir).unwrap();
-        assert_eq!(chain.depth(), 1);
-    }
+    use crate::engine::image::{CreateOptions, Qcow2Image};
 
     #[test]
     fn resolve_nonexistent_backing_file() {
@@ -129,5 +150,113 @@ mod tests {
         let backend = crate::io::MemoryBackend::new(name.as_bytes().to_vec());
         let result = read_backing_file_name(&backend, 0, name.len() as u32).unwrap();
         assert_eq!(result, "base.qcow2");
+    }
+
+    #[test]
+    fn resolve_single_backing() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("base.qcow2");
+        Qcow2Image::create(
+            &base_path,
+            CreateOptions {
+                virtual_size: 1024 * 1024,
+                cluster_bits: None,
+            },
+        )
+        .unwrap();
+
+        let overlay_path = dir.path().join("overlay.qcow2");
+        Qcow2Image::create_overlay(&overlay_path, &base_path, 1024 * 1024).unwrap();
+
+        // Open overlay and check its backing chain
+        let image = Qcow2Image::open(&overlay_path).unwrap();
+        let chain = image.backing_chain().unwrap();
+        assert_eq!(chain.depth(), 1);
+        assert_eq!(chain.entries()[0].path, base_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_three_level_chain() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // base → mid → top
+        let base_path = dir.path().join("base.qcow2");
+        Qcow2Image::create(
+            &base_path,
+            CreateOptions {
+                virtual_size: 1024 * 1024,
+                cluster_bits: None,
+            },
+        )
+        .unwrap();
+
+        let mid_path = dir.path().join("mid.qcow2");
+        Qcow2Image::create_overlay(&mid_path, &base_path, 1024 * 1024).unwrap();
+
+        let top_path = dir.path().join("top.qcow2");
+        Qcow2Image::create_overlay(&top_path, &mid_path, 1024 * 1024).unwrap();
+
+        // Resolve chain from top
+        let chain = BackingChain::resolve(
+            "mid.qcow2",
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(chain.depth(), 2);
+        assert_eq!(chain.entries()[0].path, mid_path.canonicalize().unwrap());
+        assert_eq!(chain.entries()[1].path, base_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_detects_loop() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create base
+        let base_path = dir.path().join("base.qcow2");
+        Qcow2Image::create(
+            &base_path,
+            CreateOptions {
+                virtual_size: 1024 * 1024,
+                cluster_bits: None,
+            },
+        )
+        .unwrap();
+
+        // Create A → base
+        let a_path = dir.path().join("a.qcow2");
+        Qcow2Image::create_overlay(&a_path, &base_path, 1024 * 1024).unwrap();
+
+        // Create B → A
+        let b_path = dir.path().join("b.qcow2");
+        Qcow2Image::create_overlay(&b_path, &a_path, 1024 * 1024).unwrap();
+
+        // Now rewrite A's backing to point to B (creating a loop: B → A → B → ...)
+        // We do this by using rebase at the raw level
+        {
+            let backend = SyncFileBackend::open_rw(&a_path).unwrap();
+            let mut header_buf = vec![0u8; HEADER_V3_MIN_LENGTH];
+            backend.read_exact_at(&mut header_buf, 0).unwrap();
+            let mut header = Header::read_from(&header_buf).unwrap();
+
+            // Write new backing name at the existing offset
+            let new_name = "b.qcow2";
+            let name_bytes = new_name.as_bytes();
+            backend
+                .write_all_at(name_bytes, header.backing_file_offset)
+                .unwrap();
+            header.backing_file_size = name_bytes.len() as u32;
+
+            let mut buf = vec![0u8; header.serialized_length()];
+            header.write_to(&mut buf).unwrap();
+            backend.write_all_at(&buf, 0).unwrap();
+            backend.flush().unwrap();
+        }
+
+        // Now resolving from B should detect the loop
+        let result = BackingChain::resolve("b.qcow2", dir.path());
+        match result {
+            Err(Error::BackingChainLoop { .. }) => {}
+            other => panic!("expected BackingChainLoop, got {other:?}"),
+        }
     }
 }

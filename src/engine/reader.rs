@@ -121,7 +121,21 @@ impl<'a> Qcow2Reader<'a> {
             }
             ClusterResolution::Unallocated => {
                 if let Some(ref mut backing) = self.backing_image {
-                    backing.read_at(buf, guest_offset)
+                    let backing_vs = backing.virtual_size();
+                    let read_end = guest_offset + buf.len() as u64;
+                    if guest_offset >= backing_vs {
+                        // Entirely beyond backing — zeros
+                        buf.fill(0);
+                        Ok(())
+                    } else if read_end > backing_vs {
+                        // Partial overlap: read what's available, zero the rest
+                        let available = (backing_vs - guest_offset) as usize;
+                        backing.read_at(&mut buf[..available], guest_offset)?;
+                        buf[available..].fill(0);
+                        Ok(())
+                    } else {
+                        backing.read_at(buf, guest_offset)
+                    }
                 } else {
                     buf.fill(0);
                     Ok(())

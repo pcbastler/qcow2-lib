@@ -22,7 +22,7 @@ pub enum OutputFormat {
 
 /// Run the convert subcommand.
 pub fn run(input: &Path, output: &Path, format: &OutputFormat, compress: bool) -> Result<()> {
-    let input_format = detect_format(input);
+    let input_format = detect_format(input)?;
 
     match (input_format, format) {
         (InputFormat::Qcow2, OutputFormat::Raw) => {
@@ -62,19 +62,21 @@ pub fn run(input: &Path, output: &Path, format: &OutputFormat, compress: bool) -
 }
 
 /// Detect whether the input file is QCOW2 or raw by checking the magic bytes.
-fn detect_format(path: &Path) -> InputFormat {
+fn detect_format(path: &Path) -> Result<InputFormat> {
     use std::fs::File;
     use std::io::Read;
 
-    let Ok(mut file) = File::open(path) else {
-        return InputFormat::Raw;
-    };
+    let mut file = File::open(path).map_err(|source| qcow2_lib::error::Error::Io {
+        source,
+        offset: 0,
+        context: "opening input file for format detection",
+    })?;
 
     let mut magic = [0u8; 4];
     if file.read_exact(&mut magic).is_ok() && &magic == b"QFI\xfb" {
-        InputFormat::Qcow2
+        Ok(InputFormat::Qcow2)
     } else {
-        InputFormat::Raw
+        Ok(InputFormat::Raw)
     }
 }
 
@@ -88,7 +90,7 @@ mod tests {
         let path = dir.path().join("test.qcow2");
         // Write QCOW2 magic
         std::fs::write(&path, b"QFI\xfb\x00\x00\x00\x03").unwrap();
-        assert!(matches!(detect_format(&path), InputFormat::Qcow2));
+        assert!(matches!(detect_format(&path).unwrap(), InputFormat::Qcow2));
     }
 
     #[test]
@@ -96,14 +98,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("test.raw");
         std::fs::write(&path, &[0u8; 512]).unwrap();
-        assert!(matches!(detect_format(&path), InputFormat::Raw));
+        assert!(matches!(detect_format(&path).unwrap(), InputFormat::Raw));
     }
 
     #[test]
     fn detect_format_nonexistent() {
-        assert!(matches!(
-            detect_format(Path::new("/nonexistent/file")),
-            InputFormat::Raw
-        ));
+        let result = detect_format(Path::new("/nonexistent/file"));
+        assert!(result.is_err(), "should return error for nonexistent file");
     }
 }

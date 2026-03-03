@@ -56,6 +56,10 @@ fn read_at_offset_within_cluster() {
     // Read the region before the pattern (should be zeros from qemu-io write filling the cluster)
     let mut before = vec![0xFFu8; 512];
     image.read_at(&mut before, 0).unwrap();
+    assert!(
+        before.iter().all(|&b| b == 0),
+        "bytes before pattern should be zero"
+    );
 
     // Read the pattern itself
     let mut pattern = vec![0u8; 512];

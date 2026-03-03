@@ -415,9 +415,10 @@ mod tests {
     }
 
     #[test]
-    fn reject_l2_table_offset_overflow() {
-        // L1 points to an L2 offset so large that offset + cluster_size overflows u64.
-        let huge_offset = u64::MAX - 100;
+    fn reject_l2_table_offset_beyond_eof() {
+        // L1 points to an L2 offset beyond the file (L1_OFFSET_MASK caps at 0x00ff_ffff_ffff_fe00,
+        // so arithmetic overflow is unreachable — but MetadataOffsetBeyondEof must catch it).
+        let huge_offset = u64::MAX - 100; // masked to L1_OFFSET_MASK by with_l2_offset
         let l1_entry = L1Entry::with_l2_offset(ClusterOffset(huge_offset), true);
         let mut l1_buf = vec![0u8; L1_ENTRY_SIZE];
         BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
@@ -428,7 +429,10 @@ mod tests {
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result = mapper.resolve(GuestOffset(0), &backend, &mut cache);
-        assert!(result.is_err(), "should reject overflowing L2 offset");
+        assert!(
+            matches!(result, Err(crate::error::Error::MetadataOffsetBeyondEof { .. })),
+            "should reject L2 offset beyond file, got {result:?}"
+        );
     }
 
     // ---- Write-support methods ----

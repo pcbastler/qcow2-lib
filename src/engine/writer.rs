@@ -260,10 +260,15 @@ impl<'a> Qcow2Writer<'a> {
             // Full cluster write — no need to read backing data
             self.backend.write_all_at(buf, new_offset.0)?;
         } else if let Some(ref mut backing) = self.backing_image {
-            // Partial write with backing: read full cluster from backing,
-            // then overlay the new data.
+            // Partial write with backing: read what's available from backing,
+            // zero-fill anything beyond the backing's virtual size.
             let mut cluster_buf = vec![0u8; cluster_size as usize];
-            backing.read_at(&mut cluster_buf, guest_cluster_offset)?;
+            let backing_vs = backing.virtual_size();
+            if guest_cluster_offset < backing_vs {
+                let available =
+                    (backing_vs - guest_cluster_offset).min(cluster_size) as usize;
+                backing.read_at(&mut cluster_buf[..available], guest_cluster_offset)?;
+            }
             let start = intra.0 as usize;
             cluster_buf[start..start + buf.len()].copy_from_slice(buf);
             self.backend.write_all_at(&cluster_buf, new_offset.0)?;
@@ -720,6 +725,11 @@ mod tests {
         let initial = vec![0xFF; CLUSTER_SIZE];
         s.backend.write_all_at(&initial, data_cluster).unwrap();
 
+        // Set refcount for cluster 5 to 1 (consistent with L2 pointing here)
+        s.refcount_manager
+            .set_refcount(data_cluster, 1, &s.backend, &mut s.cache)
+            .unwrap();
+
         // Partial write at offset 100 within the first guest cluster
         let patch = vec![0x42; 64];
         make_writer(&mut s).write_at(&patch, 100).unwrap();
@@ -885,14 +895,26 @@ mod tests {
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
         let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
 
-        assert!(matches!(
-            l2_table.get(L2Index(0)).unwrap(),
-            L2Entry::Standard { copied: true, .. }
-        ));
-        assert!(matches!(
-            l2_table.get(L2Index(1)).unwrap(),
-            L2Entry::Standard { copied: true, .. }
-        ));
+        let host0 = match l2_table.get(L2Index(0)).unwrap() {
+            L2Entry::Standard { host_offset, copied: true } => host_offset,
+            other => panic!("expected Standard+copied for cluster 0, got {other:?}"),
+        };
+        let host1 = match l2_table.get(L2Index(1)).unwrap() {
+            L2Entry::Standard { host_offset, copied: true } => host_offset,
+            other => panic!("expected Standard+copied for cluster 1, got {other:?}"),
+        };
+
+        // Verify data in cluster 0: last 100 bytes should be 0xEE
+        let mut tail = vec![0u8; 100];
+        s.backend
+            .read_exact_at(&mut tail, host0.0 + CLUSTER_SIZE as u64 - 100)
+            .unwrap();
+        assert!(tail.iter().all(|&b| b == 0xEE), "cluster 0 tail should be 0xEE");
+
+        // Verify data in cluster 1: first 156 bytes should be 0xEE
+        let mut head = vec![0u8; 156];
+        s.backend.read_exact_at(&mut head, host1.0).unwrap();
+        assert!(head.iter().all(|&b| b == 0xEE), "cluster 1 head should be 0xEE");
     }
 
     #[test]

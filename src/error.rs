@@ -68,6 +68,13 @@ pub enum Error {
         features: u64,
     },
 
+    /// The image uses a compression type that is not supported.
+    #[error("unsupported compression type {compression_type} (only deflate/0 is supported)")]
+    UnsupportedCompressionType {
+        /// The unsupported compression type value from the header.
+        compression_type: u8,
+    },
+
     // ---- Table errors ----
     /// An L1 table index is out of bounds.
     #[error("L1 index {index} out of bounds (table size: {table_size})")]
@@ -144,6 +151,17 @@ pub enum Error {
         /// Path of the missing backing file.
         path: String,
     },
+
+    /// The backing file chain contains a loop (a file references itself or an ancestor).
+    #[error("backing chain loop detected: {path} was already visited")]
+    BackingChainLoop {
+        /// Path of the file that was visited twice.
+        path: String,
+    },
+
+    /// Commit was attempted on an image without a backing file.
+    #[error("cannot commit: image has no backing file")]
+    CommitNoBacking,
 
     // ---- Snapshot ----
     /// A snapshot header is truncated (not enough data).
@@ -313,6 +331,23 @@ pub enum Error {
         /// Guest offset of the cluster.
         guest_offset: u64,
     },
+
+    // ---- Repair / shrink errors ----
+    /// Shrinking would cause data loss because allocated clusters exist beyond the new boundary.
+    #[error("shrink would lose data: cluster at offset 0x{cluster_offset:x} is still allocated ({context})")]
+    ShrinkDataLoss {
+        /// Host offset of the allocated cluster beyond the boundary.
+        cluster_offset: u64,
+        /// Which structure references this cluster.
+        context: &'static str,
+    },
+
+    /// A repair operation failed.
+    #[error("repair failed: {message}")]
+    RepairFailed {
+        /// Description of what went wrong.
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -364,14 +399,14 @@ mod tests {
     #[test]
     fn invalid_cluster_bits_displays_range() {
         let err = Error::InvalidClusterBits {
-            cluster_bits: 8,
-            min: 9,
-            max: 21,
+            cluster_bits: 42,
+            min: 100,
+            max: 200,
         };
         let msg = err.to_string();
-        assert!(msg.contains('8'), "should contain value: {msg}");
-        assert!(msg.contains('9'), "should contain min: {msg}");
-        assert!(msg.contains("21"), "should contain max: {msg}");
+        assert!(msg.contains("42"), "should contain value: {msg}");
+        assert!(msg.contains("100"), "should contain min: {msg}");
+        assert!(msg.contains("200"), "should contain max: {msg}");
     }
 
     #[test]
@@ -462,11 +497,21 @@ mod tests {
     }
 
     #[test]
-    fn invalid_refcount_order_displays_values() {
-        let err = Error::InvalidRefcountOrder { order: 7, max: 6 };
+    fn unsupported_compression_type_displays_value() {
+        let err = Error::UnsupportedCompressionType {
+            compression_type: 99,
+        };
         let msg = err.to_string();
-        assert!(msg.contains('7'), "should contain order: {msg}");
-        assert!(msg.contains('6'), "should contain max: {msg}");
+        assert!(msg.contains("99"), "should contain type value: {msg}");
+        assert!(msg.contains("deflate"), "should mention deflate: {msg}");
+    }
+
+    #[test]
+    fn invalid_refcount_order_displays_values() {
+        let err = Error::InvalidRefcountOrder { order: 42, max: 33 };
+        let msg = err.to_string();
+        assert!(msg.contains("42"), "should contain order: {msg}");
+        assert!(msg.contains("33"), "should contain max: {msg}");
     }
 
     #[test]
@@ -478,6 +523,26 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("1000"), "should contain index: {msg}");
         assert!(msg.contains("512"), "should contain block_size: {msg}");
+    }
+
+    #[test]
+    fn backing_chain_loop_displays_path() {
+        let err = Error::BackingChainLoop {
+            path: "/images/a.qcow2".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/images/a.qcow2"),
+            "should contain path: {msg}"
+        );
+        assert!(msg.contains("loop"), "should mention loop: {msg}");
+    }
+
+    #[test]
+    fn commit_no_backing_displays_message() {
+        let err = Error::CommitNoBacking;
+        let msg = err.to_string();
+        assert!(msg.contains("no backing"), "should mention no backing: {msg}");
     }
 
     #[test]
@@ -508,14 +573,14 @@ mod tests {
     #[test]
     fn extension_truncated_displays_context() {
         let err = Error::ExtensionTruncated {
-            offset: 0x80,
-            expected: 16,
-            actual: 4,
+            offset: 0x1234,
+            expected: 256,
+            actual: 37,
         };
         let msg = err.to_string();
-        assert!(msg.contains("80"), "should contain hex offset: {msg}");
-        assert!(msg.contains("16"), "should contain expected: {msg}");
-        assert!(msg.contains("4"), "should contain actual: {msg}");
+        assert!(msg.contains("1234"), "should contain hex offset: {msg}");
+        assert!(msg.contains("256"), "should contain expected: {msg}");
+        assert!(msg.contains("37"), "should contain actual: {msg}");
     }
 
     #[test]
@@ -539,6 +604,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("100000"), "should contain offset: {msg}");
+        assert!(msg.contains("65536"), "should contain size: {msg}");
         assert!(msg.contains("80000"), "should contain file_size: {msg}");
         assert!(msg.contains("L1 table"), "should contain context: {msg}");
     }
@@ -706,5 +772,33 @@ mod tests {
         assert!(msg.contains("70000"), "should contain compressed_size: {msg}");
         assert!(msg.contains("65536"), "should contain cluster_size: {msg}");
         assert!(msg.contains("100000"), "should contain hex offset: {msg}");
+    }
+
+    #[test]
+    fn shrink_data_loss_displays_context() {
+        let err = Error::ShrinkDataLoss {
+            cluster_offset: 0x5_0000,
+            context: "active L2 entry",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("50000"), "should contain hex offset: {msg}");
+        assert!(
+            msg.contains("active L2 entry"),
+            "should contain context: {msg}"
+        );
+        assert!(msg.contains("shrink"), "should mention shrink: {msg}");
+    }
+
+    #[test]
+    fn repair_failed_displays_message() {
+        let err = Error::RepairFailed {
+            message: "refcount table corrupted beyond repair".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refcount table corrupted beyond repair"),
+            "should contain message: {msg}"
+        );
+        assert!(msg.contains("repair failed"), "should mention repair: {msg}");
     }
 }

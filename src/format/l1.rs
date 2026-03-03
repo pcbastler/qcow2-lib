@@ -168,6 +168,20 @@ impl L1Table {
         self.entries.len()
     }
 
+    /// Shrink the table to `new_count` entries, discarding entries beyond the new size.
+    ///
+    /// Panics if `new_count` is greater than the current length
+    /// (use [`grow`](Self::grow) instead).
+    pub fn shrink(&mut self, new_count: u32) {
+        assert!(
+            new_count as usize <= self.entries.len(),
+            "shrink() cannot grow: {} -> {}",
+            self.entries.len(),
+            new_count
+        );
+        self.entries.truncate(new_count as usize);
+    }
+
     /// Extend the table to `new_count` entries, filling new entries as unallocated.
     ///
     /// Panics if `new_count` is less than the current length.
@@ -456,5 +470,34 @@ mod tests {
     fn grow_panics_on_shrink() {
         let mut table = L1Table::new_empty(8);
         table.grow(4);
+    }
+
+    // ---- shrink() tests ----
+
+    #[test]
+    fn shrink_truncates_entries() {
+        let mut table = L1Table::new_empty(8);
+        let entry = L1Entry::with_l2_offset(ClusterOffset(0x10000), true);
+        table.set(L1Index(1), entry).unwrap();
+        table.shrink(4);
+        assert_eq!(table.len(), 4);
+        // Preserved entry still accessible
+        assert_eq!(table.get(L1Index(1)).unwrap(), entry);
+        // Entry 4+ no longer accessible
+        assert!(table.get(L1Index(4)).is_err());
+    }
+
+    #[test]
+    fn shrink_same_size_is_noop() {
+        let mut table = L1Table::new_empty(4);
+        table.shrink(4);
+        assert_eq!(table.len(), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "shrink() cannot grow")]
+    fn shrink_panics_on_grow() {
+        let mut table = L1Table::new_empty(4);
+        table.shrink(8);
     }
 }
