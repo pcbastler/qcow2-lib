@@ -155,12 +155,17 @@ impl Header {
             let refcount_order = BigEndian::read_u32(&bytes[OFF_REFCOUNT_ORDER..]);
             let header_length = BigEndian::read_u32(&bytes[OFF_HEADER_LENGTH..]);
 
-            // Compression type is at byte 104, only present if header is long enough
-            let compression_type = if bytes.len() > OFF_COMPRESSION_TYPE {
-                bytes[OFF_COMPRESSION_TYPE]
-            } else {
-                COMPRESSION_DEFLATE
-            };
+            // Compression type is at byte 104, only present if both:
+            // - the header declares it extends past that offset (header_length > 104)
+            // - the buffer is actually large enough to read it
+            let compression_type =
+                if (header_length as usize) > OFF_COMPRESSION_TYPE
+                    && bytes.len() > OFF_COMPRESSION_TYPE
+                {
+                    bytes[OFF_COMPRESSION_TYPE]
+                } else {
+                    COMPRESSION_DEFLATE
+                };
 
             (
                 IncompatibleFeatures::from_bits_retain(incompat_bits),
