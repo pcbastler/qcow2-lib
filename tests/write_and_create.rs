@@ -95,10 +95,7 @@ fn qemu_io_reads_our_written_data() {
     drop(image);
 
     // Use qemu-io to read back and verify
-    let img = common::TestImage {
-        path: path.clone(),
-        _dir: dir,
-    };
+    let img = common::TestImage::wrap(path.clone(), dir);
     let data = img.read_via_qemu(0, 512);
     assert_eq!(data.len(), 512);
     assert!(

@@ -399,14 +399,14 @@ mod tests {
     #[test]
     fn invalid_cluster_bits_displays_range() {
         let err = Error::InvalidClusterBits {
-            cluster_bits: 8,
-            min: 9,
-            max: 21,
+            cluster_bits: 42,
+            min: 100,
+            max: 200,
         };
         let msg = err.to_string();
-        assert!(msg.contains('8'), "should contain value: {msg}");
-        assert!(msg.contains('9'), "should contain min: {msg}");
-        assert!(msg.contains("21"), "should contain max: {msg}");
+        assert!(msg.contains("42"), "should contain value: {msg}");
+        assert!(msg.contains("100"), "should contain min: {msg}");
+        assert!(msg.contains("200"), "should contain max: {msg}");
     }
 
     #[test]
@@ -508,10 +508,10 @@ mod tests {
 
     #[test]
     fn invalid_refcount_order_displays_values() {
-        let err = Error::InvalidRefcountOrder { order: 7, max: 6 };
+        let err = Error::InvalidRefcountOrder { order: 42, max: 33 };
         let msg = err.to_string();
-        assert!(msg.contains('7'), "should contain order: {msg}");
-        assert!(msg.contains('6'), "should contain max: {msg}");
+        assert!(msg.contains("42"), "should contain order: {msg}");
+        assert!(msg.contains("33"), "should contain max: {msg}");
     }
 
     #[test]
@@ -573,14 +573,14 @@ mod tests {
     #[test]
     fn extension_truncated_displays_context() {
         let err = Error::ExtensionTruncated {
-            offset: 0x80,
-            expected: 16,
-            actual: 4,
+            offset: 0x1234,
+            expected: 256,
+            actual: 37,
         };
         let msg = err.to_string();
-        assert!(msg.contains("80"), "should contain hex offset: {msg}");
-        assert!(msg.contains("16"), "should contain expected: {msg}");
-        assert!(msg.contains("4"), "should contain actual: {msg}");
+        assert!(msg.contains("1234"), "should contain hex offset: {msg}");
+        assert!(msg.contains("256"), "should contain expected: {msg}");
+        assert!(msg.contains("37"), "should contain actual: {msg}");
     }
 
     #[test]
@@ -604,6 +604,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("100000"), "should contain offset: {msg}");
+        assert!(msg.contains("65536"), "should contain size: {msg}");
         assert!(msg.contains("80000"), "should contain file_size: {msg}");
         assert!(msg.contains("L1 table"), "should contain context: {msg}");
     }

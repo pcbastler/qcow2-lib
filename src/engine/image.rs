@@ -2403,10 +2403,13 @@ mod tests {
     #[test]
     fn resize_reject_read_only() {
         let backend = build_test_image(&[], &[]);
-        let image = Qcow2Image::from_backend(Box::new(backend)).unwrap();
-        // Can't call resize on a read-only image — but from_backend is read-only
-        // We'd need from_backend_rw. Let's test via the error path.
+        let mut image = Qcow2Image::from_backend(Box::new(backend)).unwrap();
         assert!(!image.is_writable());
+        let result = image.resize(2 * 1024 * 1024);
+        assert!(
+            matches!(result, Err(Error::ReadOnly)),
+            "resize on read-only image should return ReadOnly, got {result:?}"
+        );
     }
 
     #[test]

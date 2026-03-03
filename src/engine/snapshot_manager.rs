@@ -805,10 +805,15 @@ mod tests {
         image.snapshot_create("alpha").unwrap();
         image.snapshot_create("beta").unwrap();
 
+        // Delete by name — exercises the find_snapshot() path
+        image.snapshot_delete("alpha").unwrap();
+
         let snapshots = image.snapshot_list().unwrap();
-        assert_eq!(snapshots.len(), 2);
-        assert_eq!(snapshots[0].name, "alpha");
-        assert_eq!(snapshots[1].name, "beta");
+        assert_eq!(snapshots.len(), 1, "alpha should be deleted");
+        assert_eq!(snapshots[0].name, "beta", "beta should remain");
+
+        // Apply by name — also exercises find_snapshot()
+        image.snapshot_apply("beta").unwrap();
     }
 
     #[test]

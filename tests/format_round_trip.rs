@@ -41,6 +41,13 @@ fn header_round_trip_preserves_data() {
     let reparsed = Header::read_from(&serialized).unwrap();
 
     assert_eq!(header, reparsed);
+
+    // Verify byte-level identity with qemu-img output
+    assert_eq!(
+        serialized,
+        &original[..serialized.len()],
+        "serialized header should be byte-identical to qemu-img output"
+    );
 }
 
 #[test]

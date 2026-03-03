@@ -258,19 +258,23 @@ fn heavy_scattered_writes_with_pattern_verification() {
     }
     image.flush().unwrap();
 
-    // Verify the last write to each offset is visible
-    // (later writes to the same offset overwrite earlier ones)
-    let mut latest: HashMap<u64, Vec<u8>> = HashMap::new();
+    // Build expected full-cluster state by replaying all writes in order.
+    // This catches residual data from earlier larger writes that a partial
+    // overwrite doesn't touch.
+    let mut cluster_state: HashMap<u64, Vec<u8>> = HashMap::new();
     for (offset, data) in &writes {
-        latest.insert(*offset, data.clone());
+        let state = cluster_state
+            .entry(*offset)
+            .or_insert_with(|| vec![0u8; cluster_size as usize]);
+        state[..data.len()].copy_from_slice(data);
     }
 
-    for (offset, expected) in &latest {
-        let mut buf = vec![0u8; expected.len()];
+    for (offset, expected) in &cluster_state {
+        let mut buf = vec![0u8; cluster_size as usize];
         image.read_at(&mut buf, *offset).unwrap();
         assert_eq!(
             &buf, expected,
-            "data mismatch at offset 0x{offset:x} after scattered writes"
+            "full cluster mismatch at offset 0x{offset:x} after scattered writes"
         );
     }
 
@@ -629,10 +633,7 @@ fn large_sequential_write_cross_validation() {
     }
 
     // Also verify with qemu-io for a sample of offsets
-    let test_img = common::TestImage {
-        path: path.clone(),
-        _dir: dir,
-    };
+    let test_img = common::TestImage::wrap(path.clone(), dir);
     for &idx in &[0u64, 25, 50, 75, 99] {
         let offset = idx * cluster_size;
         let qemu_data = test_img.read_via_qemu(offset, 512);

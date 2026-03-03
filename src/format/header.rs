@@ -464,7 +464,7 @@ impl Header {
         // Only deflate compression is supported
         if self.compression_type != COMPRESSION_DEFLATE {
             return Err(Error::UnsupportedCompressionType {
-                compression_type: self.compression_type as u8,
+                compression_type: self.compression_type,
             });
         }
 

@@ -158,13 +158,22 @@ fn repair_after_writes_produces_valid_image() {
         ],
     );
 
-    // Repair should be a no-op on a clean image
+    // Repair on a clean image should be a no-op — verify nothing breaks
     let mut image = Qcow2Image::open_rw(&path).unwrap();
     let report = image.check_and_repair(Some(RepairMode::Full)).unwrap();
     drop(image);
 
     assert!(report.is_clean(), "image with writes should already be clean");
+    assert_eq!(report.total_errors(), 0, "clean image should have zero errors");
     assert_qemu_check(&path);
+
+    // Verify data integrity after repair
+    let mut image = Qcow2Image::open(&path).unwrap();
+    let mut buf = vec![0u8; 65536];
+    image.read_at(&mut buf, 0).unwrap();
+    assert!(buf.iter().all(|&b| b == 0xAA), "data at offset 0 should survive repair");
+    image.read_at(&mut buf, 65536).unwrap();
+    assert!(buf.iter().all(|&b| b == 0xBB), "data at offset 65536 should survive repair");
 }
 
 // ---- 4. Repair after snapshot create+delete → valid ----
@@ -342,29 +351,41 @@ fn shrink_passes_qemu_check() {
 #[test]
 fn shrink_and_truncate_reduces_file_size() {
     let dir = tempfile::tempdir().unwrap();
-    // Create a large image with data only at the beginning
-    let path = create_image_with_data(
-        dir.path(),
-        "truncate.qcow2",
-        64 * 1024 * 1024, // 64 MB virtual
-        &[(0, &[0xBB; 4096])],
-    );
+    let path = dir.path().join("truncate.qcow2");
+
+    // Create image, write data, snapshot, delete snapshot → leaves freed clusters at end
+    {
+        let mut image = Qcow2Image::create(
+            &path,
+            CreateOptions {
+                virtual_size: 4 * 1024 * 1024,
+                cluster_bits: None,
+            },
+        )
+        .unwrap();
+        image.write_at(&[0xBB; 4096], 0).unwrap();
+        image.snapshot_create("temp").unwrap();
+        image.snapshot_delete("temp").unwrap();
+        image.flush().unwrap();
+    }
 
     let original_size = std::fs::metadata(&path).unwrap().len();
 
     let mut image = Qcow2Image::open_rw(&path).unwrap();
-    image.resize(2 * 1024 * 1024).unwrap();
-    let _saved = image.truncate_free_tail().unwrap();
+    let saved = image.truncate_free_tail().unwrap();
     image.flush().unwrap();
     drop(image);
 
     let new_size = std::fs::metadata(&path).unwrap().len();
     assert!(
-        new_size <= original_size,
-        "file should not grow: was {original_size}, now {new_size}"
+        new_size < original_size,
+        "file should shrink after truncate: was {original_size}, now {new_size}"
     );
-    // We may or may not save bytes depending on layout, but at least
-    // if we do, the file should still be valid
+    assert_eq!(
+        original_size - new_size,
+        saved,
+        "saved bytes should match actual size reduction"
+    );
     assert_qemu_check(&path);
 
     // Data preserved
