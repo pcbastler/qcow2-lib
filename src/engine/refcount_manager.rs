@@ -1,13 +1,14 @@
 //! Cluster allocation and refcount management.
 //!
 //! The [`RefcountManager`] tracks reference counts for every cluster in the
-//! image and allocates new clusters for the write path. It uses a pluggable
-//! [`AllocationStrategy`] to find free clusters.
+//! image and allocates new clusters for the write path. Two allocation modes
+//! are supported via [`AllocationMode`]:
 //!
-//! Phase 2 ships with [`AppendAllocator`], which always allocates at the end
-//! of the file. This is simple, correct, and avoids fragmentation during
-//! sequential writes. A future `ScanningAllocator` can reuse freed clusters.
-//! Use `qemu-img convert` for offline compaction in the meantime.
+//! - **Append** — always allocates at the end of the file. Simple, fast, no
+//!   fragmentation during sequential writes, but never reuses freed clusters.
+//! - **Scanning** (default) — scans refcount blocks for clusters with
+//!   refcount 0 before falling back to append. Reuses space freed by snapshot
+//!   deletes, bitmap removal, hash removal, and similar operations.
 
 use crate::engine::cache::MetadataCache;
 use crate::error::{Error, Result};
@@ -19,26 +20,21 @@ use crate::format::refcount::{
 use crate::format::types::ClusterOffset;
 use crate::io::IoBackend;
 
-/// Strategy for finding the next cluster to allocate.
-///
-/// Phase 2 ships with [`AppendAllocator`] (always appends at end of file).
-/// Future phases can add a `ScanningAllocator` that reuses freed clusters.
-pub trait AllocationStrategy: std::fmt::Debug + Send + Sync {
-    /// Find a free cluster offset. Returns `None` if no space is available.
-    fn find_free_cluster(&mut self, state: &RefcountManagerState) -> Option<u64>;
+/// Controls how the [`RefcountManager`] finds free clusters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocationMode {
+    /// Always allocate at the end of the file. Simple, fast, but never
+    /// reuses freed clusters — the image file only grows.
+    Append,
+    /// Scan refcount blocks for clusters with refcount 0 before falling
+    /// back to append. This reuses space freed by snapshot deletes, bitmap
+    /// removal, and similar operations.
+    Scanning,
 }
 
-/// Append-only allocator: always allocates at the end of the file.
-///
-/// Simple, fast, no fragmentation during sequential writes.
-/// Limitation: does not reuse freed clusters — the file only grows.
-/// Use `qemu-img convert` for offline compaction.
-#[derive(Debug)]
-pub struct AppendAllocator;
-
-impl AllocationStrategy for AppendAllocator {
-    fn find_free_cluster(&mut self, state: &RefcountManagerState) -> Option<u64> {
-        Some(state.next_cluster_offset)
+impl Default for AllocationMode {
+    fn default() -> Self {
+        Self::Scanning
     }
 }
 
@@ -58,32 +54,26 @@ pub struct RefcountManagerState {
 }
 
 /// Manages cluster reference counts and allocation.
+#[derive(Debug)]
 pub struct RefcountManager {
     state: RefcountManagerState,
-    allocator: Box<dyn AllocationStrategy>,
-}
-
-impl std::fmt::Debug for RefcountManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RefcountManager")
-            .field("state", &self.state)
-            .field("allocator", &self.allocator)
-            .finish()
-    }
+    mode: AllocationMode,
+    /// Cluster index where the scanning allocator starts looking next.
+    next_scan_index: u64,
 }
 
 impl RefcountManager {
     /// Load the refcount manager from an image header, using the default
-    /// [`AppendAllocator`].
+    /// [`AllocationMode::Scanning`].
     pub fn load(backend: &dyn IoBackend, header: &Header) -> Result<Self> {
-        Self::load_with_allocator(backend, header, Box::new(AppendAllocator))
+        Self::load_with_mode(backend, header, AllocationMode::default())
     }
 
-    /// Load the refcount manager with a custom allocation strategy.
-    pub fn load_with_allocator(
+    /// Load the refcount manager with a specific allocation mode.
+    pub fn load_with_mode(
         backend: &dyn IoBackend,
         header: &Header,
-        allocator: Box<dyn AllocationStrategy>,
+        mode: AllocationMode,
     ) -> Result<Self> {
         let cluster_size = 1u64 << header.cluster_bits;
         let table_byte_size =
@@ -107,20 +97,32 @@ impl RefcountManager {
                 cluster_bits: header.cluster_bits,
                 next_cluster_offset,
             },
-            allocator,
+            mode,
+            next_scan_index: 0,
         })
     }
 
+    /// The current allocation mode.
+    pub fn allocation_mode(&self) -> AllocationMode {
+        self.mode
+    }
+
     /// Allocate a new cluster: find free space, set refcount to 1, return offset.
+    ///
+    /// In [`AllocationMode::Scanning`], scans refcount blocks for freed clusters
+    /// before falling back to append. In [`AllocationMode::Append`], always
+    /// allocates at the end of the file.
     pub fn allocate_cluster(
         &mut self,
         backend: &dyn IoBackend,
         cache: &mut MetadataCache,
     ) -> Result<ClusterOffset> {
-        let offset = self
-            .allocator
-            .find_free_cluster(&self.state)
-            .ok_or(Error::RefcountTableFull)?;
+        let offset = match self.mode {
+            AllocationMode::Append => self.state.next_cluster_offset,
+            AllocationMode::Scanning => self
+                .scan_for_free_cluster(backend, cache)?
+                .unwrap_or(self.state.next_cluster_offset),
+        };
 
         // Ensure refcount coverage exists for this offset
         self.ensure_refcount_coverage(offset, backend, cache)?;
@@ -136,6 +138,46 @@ impl RefcountManager {
         }
 
         Ok(ClusterOffset(offset))
+    }
+
+    /// Allocate `count` contiguous clusters at the end of the file.
+    ///
+    /// Always uses append semantics (regardless of allocation mode) to
+    /// guarantee that the returned clusters are contiguous. Returns the
+    /// offset of the first cluster.
+    pub fn allocate_contiguous_clusters(
+        &mut self,
+        count: u64,
+        backend: &dyn IoBackend,
+        cache: &mut MetadataCache,
+    ) -> Result<ClusterOffset> {
+        assert!(count > 0, "must allocate at least one cluster");
+        let cluster_size = 1u64 << self.state.cluster_bits;
+
+        // Phase 1: Ensure refcount coverage for the entire range.
+        // This may allocate refcount blocks at the end, advancing
+        // next_cluster_offset. We must do this before reading
+        // first_offset to avoid interleaving data and metadata clusters.
+        for i in 0..count {
+            self.ensure_refcount_coverage(
+                self.state.next_cluster_offset + i * cluster_size,
+                backend,
+                cache,
+            )?;
+        }
+
+        // Phase 2: Allocate from the (possibly advanced) next_cluster_offset.
+        // The second ensure_refcount_coverage calls are no-ops since coverage
+        // was established in Phase 1.
+        let first_offset = self.state.next_cluster_offset;
+        for i in 0..count {
+            let offset = first_offset + i * cluster_size;
+            self.ensure_refcount_coverage(offset, backend, cache)?;
+            self.set_refcount_internal(offset, 1, backend, cache)?;
+        }
+        self.state.next_cluster_offset = first_offset + count * cluster_size;
+
+        Ok(ClusterOffset(first_offset))
     }
 
     /// Get the refcount for a cluster at the given host offset.
@@ -173,13 +215,18 @@ impl RefcountManager {
     }
 
     /// Free a cluster (set refcount to 0).
+    ///
+    /// In [`AllocationMode::Scanning`], the freed cluster may be reused by
+    /// a subsequent [`allocate_cluster`](Self::allocate_cluster) call.
     pub fn free_cluster(
         &mut self,
         cluster_offset: u64,
         backend: &dyn IoBackend,
         cache: &mut MetadataCache,
     ) -> Result<()> {
-        self.set_refcount(cluster_offset, 0, backend, cache)
+        self.set_refcount(cluster_offset, 0, backend, cache)?;
+        self.hint_freed_cluster(cluster_offset);
+        Ok(())
     }
 
     /// Increment the refcount for a cluster. Returns the new refcount value.
@@ -208,9 +255,8 @@ impl RefcountManager {
 
     /// Decrement the refcount for a cluster. Returns the new refcount value.
     ///
-    /// If the refcount reaches 0, the cluster is logically freed but not
-    /// reclaimed (the append allocator does not reuse freed clusters).
-    /// Use `qemu-img convert` for offline compaction.
+    /// If the refcount reaches 0, the cluster is logically freed and may be
+    /// reused by subsequent allocations in [`AllocationMode::Scanning`].
     ///
     /// Panics in debug mode if the current refcount is already 0.
     pub fn decrement_refcount(
@@ -226,6 +272,9 @@ impl RefcountManager {
         );
         let new_val = current.saturating_sub(1);
         self.set_refcount(cluster_offset, new_val, backend, cache)?;
+        if new_val == 0 {
+            self.hint_freed_cluster(cluster_offset);
+        }
         Ok(new_val)
     }
 
@@ -245,6 +294,43 @@ impl RefcountManager {
     }
 
     // ---- Internal helpers ----
+
+    /// Scan refcount blocks for a cluster with refcount 0, starting from
+    /// the saved scan cursor. Returns the host offset if found, or `None`
+    /// if all clusters up to `next_cluster_offset` are in use.
+    fn scan_for_free_cluster(
+        &mut self,
+        backend: &dyn IoBackend,
+        cache: &mut MetadataCache,
+    ) -> Result<Option<u64>> {
+        let cluster_size = 1u64 << self.state.cluster_bits;
+        let total_clusters = self.state.next_cluster_offset / cluster_size;
+
+        for cluster_index in self.next_scan_index..total_clusters {
+            let offset = cluster_index * cluster_size;
+            let rc = self.get_refcount(offset, backend, cache)?;
+            if rc == 0 {
+                self.next_scan_index = cluster_index + 1;
+                return Ok(Some(offset));
+            }
+        }
+
+        // No free cluster found in the scanned range.
+        self.next_scan_index = total_clusters;
+        Ok(None)
+    }
+
+    /// Move the scan cursor back if the freed cluster is before it,
+    /// so the scanner will find it on the next allocation.
+    fn hint_freed_cluster(&mut self, cluster_offset: u64) {
+        if self.mode == AllocationMode::Scanning {
+            let cluster_size = 1u64 << self.state.cluster_bits;
+            let freed_index = cluster_offset / cluster_size;
+            if freed_index < self.next_scan_index {
+                self.next_scan_index = freed_index;
+            }
+        }
+    }
 
     /// Map a host cluster offset to (refcount_table_index, block_entry_index).
     fn cluster_to_refcount_index(&self, cluster_offset: u64) -> (usize, u32) {
@@ -498,12 +584,12 @@ mod tests {
     }
 
     #[test]
-    fn allocate_cluster_returns_sequential_offsets() {
+    fn append_mode_returns_sequential_offsets() {
         let block_offset = 3 * CLUSTER_SIZE as u64;
         let header = make_header(1);
-        // Pre-populate refcount block covering the first clusters
         let backend = make_backend(1, &[(0, block_offset)]);
-        let mut mgr = RefcountManager::load(&backend, &header).unwrap();
+        let mut mgr =
+            RefcountManager::load_with_mode(&backend, &header, AllocationMode::Append).unwrap();
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let initial_end = mgr.state().next_cluster_offset;
@@ -622,38 +708,23 @@ mod tests {
     }
 
     #[test]
-    fn custom_allocator() {
-        /// Allocates sequentially from a starting offset.
-        #[derive(Debug)]
-        struct SequentialAllocator(u64);
-
-        impl AllocationStrategy for SequentialAllocator {
-            fn find_free_cluster(&mut self, _state: &RefcountManagerState) -> Option<u64> {
-                let offset = self.0;
-                self.0 += CLUSTER_SIZE as u64;
-                Some(offset)
-            }
-        }
-
+    fn load_with_append_mode() {
         let block_offset = 3 * CLUSTER_SIZE as u64;
         let header = make_header(1);
         let backend = make_backend(1, &[(0, block_offset)]);
-        let start_offset = 5 * CLUSTER_SIZE as u64;
-        let mut mgr = RefcountManager::load_with_allocator(
-            &backend,
-            &header,
-            Box::new(SequentialAllocator(start_offset)),
-        )
-        .unwrap();
+        let mut mgr =
+            RefcountManager::load_with_mode(&backend, &header, AllocationMode::Append).unwrap();
         let mut cache = MetadataCache::new(CacheConfig::default());
 
-        let c1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
-        assert_eq!(c1.0, start_offset);
+        assert_eq!(mgr.allocation_mode(), AllocationMode::Append);
 
-        // Second allocation must return a different cluster
+        let initial_end = mgr.state().next_cluster_offset;
+        let c1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        assert_eq!(c1.0, initial_end);
+
         let c2 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
         assert_ne!(c1, c2, "allocator must not return the same cluster twice");
-        assert_eq!(c2.0, start_offset + CLUSTER_SIZE as u64);
+        assert_eq!(c2.0, initial_end + CLUSTER_SIZE as u64);
     }
 
     #[test]
@@ -663,7 +734,7 @@ mod tests {
         let mgr = RefcountManager::load(&backend, &header).unwrap();
         let debug_str = format!("{mgr:?}");
         assert!(debug_str.contains("RefcountManager"));
-        assert!(debug_str.contains("AppendAllocator"));
+        assert!(debug_str.contains("Scanning"));
     }
 
     #[test]
@@ -803,5 +874,226 @@ mod tests {
         let mgr = RefcountManager::load(&backend, &header).unwrap();
         assert_eq!(mgr.state().refcount_order, 6);
         assert_eq!(mgr.max_refcount(), u64::MAX);
+    }
+
+    // ---- ScanningAllocator tests ----
+
+    #[test]
+    fn default_mode_is_scanning() {
+        let header = make_header(1);
+        let backend = make_backend(1, &[]);
+        let mgr = RefcountManager::load(&backend, &header).unwrap();
+        assert_eq!(mgr.allocation_mode(), AllocationMode::Scanning);
+    }
+
+    #[test]
+    fn scanning_reuses_freed_cluster() {
+        let block_offset = 3 * CLUSTER_SIZE as u64;
+        let header = make_header(1);
+        let backend = make_backend(1, &[(0, block_offset)]);
+        let mut mgr = RefcountManager::load(&backend, &header).unwrap();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // Allocate a cluster, then free it
+        let c1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        mgr.free_cluster(c1.0, &backend, &mut cache).unwrap();
+
+        // Next allocation should reuse the freed cluster
+        let c2 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        assert_eq!(c2.0, c1.0, "scanning allocator should reuse freed cluster");
+    }
+
+    #[test]
+    fn scanning_falls_back_to_append() {
+        let block_offset = 3 * CLUSTER_SIZE as u64;
+        let header = make_header(1);
+        let backend = make_backend(1, &[(0, block_offset)]);
+        let mut mgr = RefcountManager::load(&backend, &header).unwrap();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // Mark all clusters in the existing range as used so the scanner
+        // finds nothing free and falls back to append.
+        let cluster_count = mgr.state().next_cluster_offset / CLUSTER_SIZE as u64;
+        for i in 0..cluster_count {
+            mgr.set_refcount(i * CLUSTER_SIZE as u64, 1, &backend, &mut cache)
+                .unwrap();
+        }
+
+        let initial_end = mgr.state().next_cluster_offset;
+        let c = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        assert_eq!(c.0, initial_end, "should append at end when no free clusters");
+    }
+
+    #[test]
+    fn scanning_hint_moves_cursor_back() {
+        let block_offset = 3 * CLUSTER_SIZE as u64;
+        let header = make_header(1);
+        let backend = make_backend(1, &[(0, block_offset)]);
+        let mut mgr = RefcountManager::load(&backend, &header).unwrap();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // Set several clusters as used
+        mgr.set_refcount(0, 1, &backend, &mut cache).unwrap();
+        mgr.set_refcount(CLUSTER_SIZE as u64, 1, &backend, &mut cache)
+            .unwrap();
+        mgr.set_refcount(2 * CLUSTER_SIZE as u64, 1, &backend, &mut cache)
+            .unwrap();
+
+        // Allocate once to advance the scan cursor past all used clusters
+        let _ = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+
+        // Free cluster 1 — hint should move cursor back
+        mgr.free_cluster(CLUSTER_SIZE as u64, &backend, &mut cache)
+            .unwrap();
+        assert!(
+            mgr.next_scan_index <= 1,
+            "hint should move cursor back to freed cluster"
+        );
+
+        // Next allocation should find the freed cluster
+        let c = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        assert_eq!(
+            c.0,
+            CLUSTER_SIZE as u64,
+            "should allocate the freed cluster"
+        );
+    }
+
+    #[test]
+    fn append_mode_ignores_free_clusters() {
+        let block_offset = 3 * CLUSTER_SIZE as u64;
+        let header = make_header(1);
+        let backend = make_backend(1, &[(0, block_offset)]);
+        let mut mgr =
+            RefcountManager::load_with_mode(&backend, &header, AllocationMode::Append).unwrap();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // Allocate, free, then allocate again
+        let c1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        mgr.free_cluster(c1.0, &backend, &mut cache).unwrap();
+
+        // In append mode, the freed cluster should NOT be reused
+        let c2 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        assert_ne!(
+            c2.0, c1.0,
+            "append mode should not reuse freed clusters"
+        );
+        assert!(c2.0 > c1.0, "append mode should allocate at end");
+    }
+
+    #[test]
+    fn decrement_to_zero_hints_scanner() {
+        let block_offset = 3 * CLUSTER_SIZE as u64;
+        let header = make_header(1);
+        let backend = make_backend(1, &[(0, block_offset)]);
+        let mut mgr = RefcountManager::load(&backend, &header).unwrap();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // Set cluster 1 refcount to 2, advance scan cursor past it
+        let offset = CLUSTER_SIZE as u64;
+        mgr.set_refcount(offset, 2, &backend, &mut cache).unwrap();
+        // Allocate to advance cursor
+        let _ = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+
+        // Decrement from 2→1: no hint (still in use)
+        mgr.decrement_refcount(offset, &backend, &mut cache)
+            .unwrap();
+
+        // Decrement from 1→0: should hint
+        let saved_cursor = mgr.next_scan_index;
+        mgr.decrement_refcount(offset, &backend, &mut cache)
+            .unwrap();
+        assert!(
+            mgr.next_scan_index <= 1,
+            "cursor should move back after decrement to zero (was {saved_cursor})"
+        );
+    }
+
+    #[test]
+    fn scanning_after_multiple_frees() {
+        let block_offset = 3 * CLUSTER_SIZE as u64;
+        let header = make_header(1);
+        let backend = make_backend(1, &[(0, block_offset)]);
+        let mut mgr = RefcountManager::load(&backend, &header).unwrap();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // Allocate 3 clusters
+        let c1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        let c2 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        let c3 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+
+        // Free them (c1 first, then c3, then c2)
+        mgr.free_cluster(c1.0, &backend, &mut cache).unwrap();
+        mgr.free_cluster(c3.0, &backend, &mut cache).unwrap();
+        mgr.free_cluster(c2.0, &backend, &mut cache).unwrap();
+
+        // Allocate again — should reuse freed clusters
+        let r1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        let r2 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        let r3 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+
+        let mut reused: Vec<u64> = vec![r1.0, r2.0, r3.0];
+        reused.sort();
+        let mut original: Vec<u64> = vec![c1.0, c2.0, c3.0];
+        original.sort();
+        assert_eq!(
+            reused, original,
+            "all freed clusters should be reused"
+        );
+    }
+
+    // ---- allocate_contiguous_clusters tests ----
+
+    #[test]
+    fn allocate_contiguous_returns_sequential() {
+        let block_offset = 3 * CLUSTER_SIZE as u64;
+        let header = make_header(1);
+        let backend = make_backend(1, &[(0, block_offset)]);
+        let mut mgr = RefcountManager::load(&backend, &header).unwrap();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        let initial_end = mgr.state().next_cluster_offset;
+        let first = mgr
+            .allocate_contiguous_clusters(3, &backend, &mut cache)
+            .unwrap();
+
+        assert_eq!(first.0, initial_end);
+
+        // Verify all 3 clusters have refcount 1
+        for i in 0..3 {
+            let offset = first.0 + i * CLUSTER_SIZE as u64;
+            let rc = mgr.get_refcount(offset, &backend, &mut cache).unwrap();
+            assert_eq!(rc, 1, "cluster {i} should have refcount 1");
+        }
+
+        // next_cluster_offset should be past all 3
+        assert_eq!(
+            mgr.state().next_cluster_offset,
+            initial_end + 3 * CLUSTER_SIZE as u64
+        );
+    }
+
+    #[test]
+    fn allocate_contiguous_skips_free_gaps() {
+        let block_offset = 3 * CLUSTER_SIZE as u64;
+        let header = make_header(1);
+        let backend = make_backend(1, &[(0, block_offset)]);
+        let mut mgr = RefcountManager::load(&backend, &header).unwrap();
+        let mut cache = MetadataCache::new(CacheConfig::default());
+
+        // Allocate a cluster, then free it to create a gap
+        let gap = mgr.allocate_cluster(&backend, &mut cache).unwrap();
+        mgr.free_cluster(gap.0, &backend, &mut cache).unwrap();
+
+        // allocate_contiguous should ignore the gap and append at end
+        let end_before = mgr.state().next_cluster_offset;
+        let first = mgr
+            .allocate_contiguous_clusters(2, &backend, &mut cache)
+            .unwrap();
+
+        assert_eq!(
+            first.0, end_before,
+            "contiguous allocation should append at end, ignoring gaps"
+        );
     }
 }

@@ -121,14 +121,11 @@ impl<'a> SnapshotManager<'a> {
         let cluster_size = 1usize << self.cluster_bits;
         let clusters_needed = (table_bytes.len() + cluster_size - 1) / cluster_size;
 
-        // Allocate contiguous clusters (AppendAllocator guarantees contiguity)
-        let first_offset = self
-            .refcount_manager
-            .allocate_cluster(self.backend, self.cache)?;
-        for _ in 1..clusters_needed {
-            self.refcount_manager
-                .allocate_cluster(self.backend, self.cache)?;
-        }
+        let first_offset = self.refcount_manager.allocate_contiguous_clusters(
+            clusters_needed as u64,
+            self.backend,
+            self.cache,
+        )?;
 
         // Pad to full cluster boundary
         table_bytes.resize(clusters_needed * cluster_size, 0);
@@ -555,13 +552,11 @@ impl<'a> SnapshotManager<'a> {
         let clusters_needed = (l1_byte_size + cluster_size - 1) / cluster_size;
         let total_size = clusters_needed * cluster_size;
 
-        let first_offset = self
-            .refcount_manager
-            .allocate_cluster(self.backend, self.cache)?;
-        for _ in 1..clusters_needed {
-            self.refcount_manager
-                .allocate_cluster(self.backend, self.cache)?;
-        }
+        let first_offset = self.refcount_manager.allocate_contiguous_clusters(
+            clusters_needed as u64,
+            self.backend,
+            self.cache,
+        )?;
 
         let file_size = self.backend.file_size()?;
         self.mapper.set_file_size(file_size);
@@ -778,13 +773,11 @@ impl<'a> SnapshotManager<'a> {
         let table_clusters = (table_byte_size + cluster_size - 1) / cluster_size;
 
         // Allocate new clusters for the snapshot's hash table copy
-        let snap_table_offset = self
-            .refcount_manager
-            .allocate_cluster(self.backend, self.cache)?;
-        for _ in 1..table_clusters {
-            self.refcount_manager
-                .allocate_cluster(self.backend, self.cache)?;
-        }
+        let snap_table_offset = self.refcount_manager.allocate_contiguous_clusters(
+            table_clusters as u64,
+            self.backend,
+            self.cache,
+        )?;
 
         // Copy hash table data
         let total_size = table_clusters * cluster_size;
@@ -915,13 +908,11 @@ impl<'a> SnapshotManager<'a> {
         let table_clusters = (table_byte_size + cluster_size - 1) / cluster_size;
 
         // Allocate new clusters for the restored active hash table
-        let new_table_offset = self
-            .refcount_manager
-            .allocate_cluster(self.backend, self.cache)?;
-        for _ in 1..table_clusters {
-            self.refcount_manager
-                .allocate_cluster(self.backend, self.cache)?;
-        }
+        let new_table_offset = self.refcount_manager.allocate_contiguous_clusters(
+            table_clusters as u64,
+            self.backend,
+            self.cache,
+        )?;
 
         let file_size = self.backend.file_size()?;
         self.mapper.set_file_size(file_size);

@@ -132,23 +132,12 @@ impl<'a> BitmapManager<'a> {
     /// Allocate cluster(s) for a bitmap table and write it.
     fn allocate_and_write_bitmap_table(&mut self, table: &BitmapTable) -> Result<ClusterOffset> {
         let byte_count = table.len() as usize * BITMAP_TABLE_ENTRY_SIZE;
-        let clusters_needed = (byte_count as u64 + self.cluster_size() - 1) / self.cluster_size();
+        let clusters_needed =
+            ((byte_count as u64 + self.cluster_size() - 1) / self.cluster_size()).max(1);
 
         let first_offset = self
             .refcount_manager
-            .allocate_cluster(self.backend, self.cache)?;
-
-        for i in 1..clusters_needed {
-            let offset = self
-                .refcount_manager
-                .allocate_cluster(self.backend, self.cache)?;
-            // Ensure contiguous allocation
-            assert_eq!(
-                offset.0,
-                first_offset.0 + i * self.cluster_size(),
-                "bitmap table allocation must be contiguous"
-            );
-        }
+            .allocate_contiguous_clusters(clusters_needed, self.backend, self.cache)?;
 
         // Zero-fill the allocated space first
         let alloc_size = clusters_needed as usize * self.cluster_size() as usize;
@@ -165,22 +154,11 @@ impl<'a> BitmapManager<'a> {
     fn write_directory(&mut self, entries: &[BitmapDirectoryEntry]) -> Result<(ClusterOffset, u64)> {
         let dir_data = BitmapDirectoryEntry::write_directory(entries);
         let dir_size = dir_data.len() as u64;
-        let clusters_needed = (dir_size + self.cluster_size() - 1) / self.cluster_size();
+        let clusters_needed = ((dir_size + self.cluster_size() - 1) / self.cluster_size()).max(1);
 
         let first_offset = self
             .refcount_manager
-            .allocate_cluster(self.backend, self.cache)?;
-
-        for i in 1..clusters_needed {
-            let offset = self
-                .refcount_manager
-                .allocate_cluster(self.backend, self.cache)?;
-            assert_eq!(
-                offset.0,
-                first_offset.0 + i * self.cluster_size(),
-                "bitmap directory allocation must be contiguous"
-            );
-        }
+            .allocate_contiguous_clusters(clusters_needed, self.backend, self.cache)?;
 
         // Zero-fill then write
         let alloc_size = clusters_needed as usize * self.cluster_size() as usize;
