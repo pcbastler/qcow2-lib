@@ -17,7 +17,7 @@ fn qemu_check_our_created_image() {
         CreateOptions {
             virtual_size: 10 * 1024 * 1024, // 10 MB
             cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
         },
     )
     .unwrap();
@@ -48,7 +48,7 @@ fn qemu_check_our_created_image_after_writes() {
         CreateOptions {
             virtual_size: 10 * 1024 * 1024,
             cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
         },
     )
     .unwrap();
@@ -88,7 +88,7 @@ fn qemu_io_reads_our_written_data() {
         CreateOptions {
             virtual_size: 1 << 20,
             cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
         },
     )
     .unwrap();

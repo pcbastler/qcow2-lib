@@ -27,6 +27,7 @@ pub struct Qcow2Reader<'a> {
     cache: &'a mut MetadataCache,
     cluster_bits: u32,
     virtual_size: u64,
+    compression_type: u8,
     read_mode: ReadMode,
     warnings: &'a mut Vec<ReadWarning>,
     backing_image: Option<&'a mut crate::engine::image::Qcow2Image>,
@@ -41,6 +42,7 @@ impl<'a> Qcow2Reader<'a> {
         cache: &'a mut MetadataCache,
         cluster_bits: u32,
         virtual_size: u64,
+        compression_type: u8,
         read_mode: ReadMode,
         warnings: &'a mut Vec<ReadWarning>,
         backing_image: Option<&'a mut crate::engine::image::Qcow2Image>,
@@ -51,6 +53,7 @@ impl<'a> Qcow2Reader<'a> {
             cache,
             cluster_bits,
             virtual_size,
+            compression_type,
             read_mode,
             warnings,
             backing_image,
@@ -175,6 +178,7 @@ impl<'a> Qcow2Reader<'a> {
                     &compressed_data,
                     cluster_size,
                     guest_offset,
+                    self.compression_type,
                 ) {
                     Ok(decompressed) => {
                         let intra = intra_cluster_offset.0 as usize;
@@ -345,6 +349,7 @@ mod tests {
             cache,
             CLUSTER_BITS,
             virtual_size,
+            COMPRESSION_DEFLATE,
             ReadMode::Strict,
             warnings,
             None,
@@ -638,6 +643,7 @@ mod tests {
             cache,
             CLUSTER_BITS,
             virtual_size,
+            COMPRESSION_DEFLATE,
             ReadMode::Lenient,
             warnings,
             None,
@@ -951,7 +957,7 @@ mod tests {
             crate::engine::image::CreateOptions {
                 virtual_size: backing_vs,
                 cluster_bits: Some(CLUSTER_BITS),
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -976,6 +982,7 @@ mod tests {
             &mut cache,
             CLUSTER_BITS,
             virtual_size,
+            COMPRESSION_DEFLATE,
             ReadMode::Strict,
             &mut warnings,
             Some(&mut backing),
@@ -996,7 +1003,7 @@ mod tests {
             crate::engine::image::CreateOptions {
                 virtual_size: 256,
                 cluster_bits: Some(CLUSTER_BITS),
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -1013,6 +1020,7 @@ mod tests {
             &mut cache,
             CLUSTER_BITS,
             virtual_size,
+            COMPRESSION_DEFLATE,
             ReadMode::Strict,
             &mut warnings,
             Some(&mut backing),
@@ -1046,6 +1054,7 @@ mod tests {
             &mut cache,
             CLUSTER_BITS,
             virtual_size,
+            COMPRESSION_DEFLATE,
             ReadMode::Strict,
             &mut warnings,
             Some(&mut backing),

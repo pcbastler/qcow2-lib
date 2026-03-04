@@ -88,6 +88,8 @@ pub struct CreateOptions {
     /// Enable extended L2 entries (subclusters). Default: false.
     /// Requires cluster_bits >= 14.
     pub extended_l2: bool,
+    /// Compression type: `None` = deflate (default), `Some(COMPRESSION_ZSTD)` = zstandard.
+    pub compression_type: Option<u8>,
 }
 
 // ---- Core: open, read, accessors ----
@@ -263,6 +265,7 @@ impl Qcow2Image {
             &mut self.cache,
             self.header.cluster_bits,
             self.header.virtual_size,
+            self.header.compression_type,
             self.read_mode,
             &mut self.warnings,
             self.backing_image.as_deref_mut(),
@@ -406,6 +409,7 @@ impl Qcow2Image {
             refcount_manager,
             self.header.cluster_bits,
             self.header.virtual_size,
+            self.header.compression_type,
             self.backing_image.as_deref_mut(),
         );
         writer.write_at(buf, guest_offset)?;
@@ -440,6 +444,7 @@ impl Qcow2Image {
                 .as_mut()
                 .expect("writable image must have refcount_manager");
 
+            let compression_type = self.header.compression_type;
             let mut mgr = HashManager::new(
                 self.backend.as_ref(),
                 &mut self.cache,
@@ -449,6 +454,7 @@ impl Qcow2Image {
                 &self.mapper,
                 cluster_bits,
                 virtual_size,
+                compression_type,
             );
             mgr.update_hashes_for_range(guest_offset, buf.len() as u64)?;
         }
@@ -589,7 +595,7 @@ impl Qcow2Image {
         }
 
         let cluster_size = self.cluster_size() as usize;
-        match compression::compress_cluster(data, cluster_size)? {
+        match compression::compress_cluster(data, cluster_size, self.header.compression_type)? {
             Some(compressed) => self.write_compressed_at(&compressed, guest_offset),
             None => self.write_at(data, guest_offset),
         }
@@ -618,6 +624,7 @@ impl Qcow2Image {
             refcount_manager,
             self.header.cluster_bits,
             self.header.virtual_size,
+            self.header.compression_type,
             self.backing_image.as_deref_mut(),
         );
         writer.set_compressed_cursor(self.compressed_cursor);

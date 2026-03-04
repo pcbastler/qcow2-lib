@@ -342,7 +342,7 @@ mod tests {
             super::super::CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -360,7 +360,7 @@ mod tests {
             super::super::CreateOptions {
                 virtual_size: 4 * 1024 * 1024,
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -383,7 +383,7 @@ mod tests {
             super::super::CreateOptions {
                 virtual_size: 4 * 1024 * 1024,
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();

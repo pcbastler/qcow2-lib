@@ -509,8 +509,10 @@ impl Header {
             });
         }
 
-        // Only deflate compression is supported
-        if self.compression_type != COMPRESSION_DEFLATE {
+        // Only deflate and zstandard compression are supported
+        if self.compression_type != COMPRESSION_DEFLATE
+            && self.compression_type != COMPRESSION_ZSTD
+        {
             return Err(Error::UnsupportedCompressionType {
                 compression_type: self.compression_type,
             });
@@ -1066,5 +1068,12 @@ mod tests {
             Err(Error::UnsupportedCompressionType { compression_type: 99 }) => {}
             other => panic!("expected UnsupportedCompressionType, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn validate_zstd_compression_type_accepted() {
+        let mut h = make_test_header_v3();
+        h.compression_type = COMPRESSION_ZSTD;
+        h.validate_against_file(0x100_0000).unwrap();
     }
 }

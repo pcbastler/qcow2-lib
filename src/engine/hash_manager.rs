@@ -78,6 +78,7 @@ pub struct HashManager<'a> {
     mapper: &'a ClusterMapper,
     cluster_bits: u32,
     virtual_size: u64,
+    compression_type: u8,
 }
 
 impl<'a> HashManager<'a> {
@@ -92,6 +93,7 @@ impl<'a> HashManager<'a> {
         mapper: &'a ClusterMapper,
         cluster_bits: u32,
         virtual_size: u64,
+        compression_type: u8,
     ) -> Self {
         Self {
             backend,
@@ -102,6 +104,7 @@ impl<'a> HashManager<'a> {
             mapper,
             cluster_bits,
             virtual_size,
+            compression_type,
         }
     }
 
@@ -559,6 +562,7 @@ impl<'a> HashManager<'a> {
                         &comp_buf,
                         cluster_size as usize,
                         cluster_guest_off,
+                        self.compression_type,
                     )?;
                     let intra = intra_cluster_offset.0 as usize;
                     data[pos as usize..pos as usize + len]
