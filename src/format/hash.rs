@@ -60,12 +60,12 @@ impl Blake3Extension {
             });
         }
 
-        // Validate alignment (offset must be cluster-aligned, bits 0-8 must be 0)
-        if hash_table_offset != 0 && (hash_table_offset & 0x1FF) != 0 {
-            return Err(Error::HashTableMisaligned {
-                offset: hash_table_offset,
-            });
-        }
+        // Basic sanity check: offset bits 0-8 must be zero (minimum 512-byte alignment).
+        // Full cluster-alignment is validated at image open time with the actual cluster_bits.
+        debug_assert!(
+            hash_table_offset == 0 || (hash_table_offset & 0x1FF) == 0,
+            "hash_table_offset 0x{hash_table_offset:x} is not even 512-byte aligned"
+        );
 
         // Validate reserved fields are zero
         if data[14] != 0 || data[15] != 0 {
@@ -338,15 +338,15 @@ mod tests {
     }
 
     #[test]
-    fn extension_rejects_misaligned_offset() {
+    fn extension_parses_misaligned_offset() {
+        // read_from no longer rejects misaligned offsets — that's checked at image open.
+        // It should parse successfully so the caller can inspect the value.
         let mut data = vec![0u8; 24];
-        BigEndian::write_u64(&mut data[0..], 0x1_0001); // not aligned
+        BigEndian::write_u64(&mut data[0..], 0x1_0200); // 512-aligned but not cluster-aligned
         BigEndian::write_u32(&mut data[8..], 1);
         data[12] = 32;
-        assert!(matches!(
-            Blake3Extension::read_from(&data),
-            Err(Error::HashTableMisaligned { .. })
-        ));
+        let ext = Blake3Extension::read_from(&data).unwrap();
+        assert_eq!(ext.hash_table_offset, 0x1_0200);
     }
 
     #[test]

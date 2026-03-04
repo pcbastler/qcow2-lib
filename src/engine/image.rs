@@ -129,6 +129,20 @@ impl Qcow2Image {
             Vec::new()
         };
 
+        // Validate BLAKE3 hash table offset is cluster-aligned
+        for ext in &extensions {
+            if let HeaderExtension::Blake3Hashes(blake3) = ext {
+                if blake3.hash_table_offset != 0
+                    && !ClusterOffset(blake3.hash_table_offset)
+                        .is_cluster_aligned(header.cluster_bits)
+                {
+                    return Err(Error::HashTableMisaligned {
+                        offset: blake3.hash_table_offset,
+                    });
+                }
+            }
+        }
+
         // Read L1 table (with checked arithmetic for allocation size)
         let l1_size = (header.l1_table_entries as usize)
             .checked_mul(crate::format::constants::L1_ENTRY_SIZE)

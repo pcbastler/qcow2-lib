@@ -487,3 +487,53 @@ fn hash_with_small_clusters() {
     let mismatches = image.hash_verify().unwrap();
     assert!(mismatches.is_empty());
 }
+
+#[test]
+fn open_rejects_misaligned_hash_table_offset() {
+    use qcow2_lib::io::MemoryBackend;
+
+    // Create a valid image with hashes, then corrupt the hash_table_offset
+    // to be 512-aligned but not cluster-aligned (cluster_bits=16 → 64KB alignment).
+    let mut image = create_test_image(1 << 20);
+    image.hash_init(None, None).unwrap();
+    image.flush().unwrap();
+
+    // Extract raw image data and find the BLAKE3 extension to corrupt it
+    let data = {
+        let size = image.backend().file_size().unwrap() as usize;
+        let mut buf = vec![0u8; size];
+        image.backend().read_exact_at(&mut buf, 0).unwrap();
+        buf
+    };
+    drop(image);
+
+    // Find the BLAKE3 extension magic (0x434C4233) in the header area
+    let ext_magic = 0x434C4233u32.to_be_bytes();
+    let ext_pos = data.windows(4).position(|w| w == ext_magic).unwrap();
+    // Extension data starts 8 bytes after the type field (4 bytes type + 4 bytes length)
+    let offset_pos = ext_pos + 8; // first 8 bytes of extension data = hash_table_offset
+
+    let mut corrupted = data.clone();
+    // Set hash_table_offset to 0x10200 (512-aligned but not 64KB-aligned)
+    corrupted[offset_pos..offset_pos + 8].copy_from_slice(&0x10200u64.to_be_bytes());
+
+    let backend = Box::new(MemoryBackend::new(corrupted));
+    let result = Qcow2Image::from_backend(backend);
+    assert!(
+        result.is_err(),
+        "should reject non-cluster-aligned hash_table_offset"
+    );
+}
+
+#[test]
+fn zero_length_write_does_not_panic_with_hashes() {
+    let mut image = create_test_image(1 << 20); // 1 MB
+    image.hash_init(None, None).unwrap();
+
+    // Empty write must not panic (previously caused u64 underflow in update_hashes_for_range)
+    image.write_at(&[], 0).unwrap();
+    image.flush().unwrap();
+
+    let mismatches = image.hash_verify().unwrap();
+    assert!(mismatches.is_empty());
+}

@@ -279,6 +279,10 @@ impl<'a> HashManager<'a> {
 
     /// Update hashes for all hash chunks touched by a write at [guest_offset, guest_offset+len).
     pub fn update_hashes_for_range(&mut self, guest_offset: u64, len: u64) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
         let ext = match self.find_extension() {
             Some(ext) => ext.clone(),
             None => return Ok(()),
@@ -435,16 +439,23 @@ impl<'a> HashManager<'a> {
         let null_hash = vec![0u8; hash_size];
         let mut entries = Vec::new();
 
+        // Cache the current hash data cluster to avoid re-reading it for every chunk
+        let mut cached_table_idx: Option<u32> = None;
+        let mut cached_data = vec![0u8; cluster_size as usize];
+
         for chunk_idx in start_chunk..end_chunk.min(total_hash_chunks) {
             let table_idx = (chunk_idx / hashes_per_data_cluster as u64) as u32;
             let hash_idx = (chunk_idx % hashes_per_data_cluster as u64) as usize;
 
             let hash = if let Some(entry) = table.get(table_idx) {
                 if let Some(data_offset) = entry.data_offset() {
-                    let mut hash_data = vec![0u8; cluster_size as usize];
-                    self.backend.read_exact_at(&mut hash_data, data_offset)?;
+                    if cached_table_idx != Some(table_idx) {
+                        self.backend
+                            .read_exact_at(&mut cached_data, data_offset)?;
+                        cached_table_idx = Some(table_idx);
+                    }
                     let start = hash_idx * hash_size;
-                    hash_data[start..start + hash_size].to_vec()
+                    cached_data[start..start + hash_size].to_vec()
                 } else {
                     null_hash.clone()
                 }
