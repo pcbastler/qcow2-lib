@@ -421,6 +421,26 @@ pub enum Error {
         offset: u64,
     },
 
+    // ---- Extended L2 errors ----
+
+    /// Extended L2 requires cluster_bits >= 14.
+    #[error("extended L2 requires cluster_bits >= {min}, got {cluster_bits}")]
+    ExtendedL2ClusterBitsTooSmall {
+        /// The actual cluster_bits value.
+        cluster_bits: u32,
+        /// Minimum required value (14).
+        min: u32,
+    },
+
+    /// A subcluster bitmap has an invalid state (alloc and zero both set).
+    #[error("invalid subcluster bitmap at L2 index {l2_index}: subcluster {subcluster_index} has both alloc and zero bits set")]
+    InvalidSubclusterBitmap {
+        /// L2 table index of the entry.
+        l2_index: u32,
+        /// Subcluster index with the invalid state.
+        subcluster_index: u32,
+    },
+
     // ---- BLAKE3 hash errors ----
 
     /// The BLAKE3 hash extension header is invalid.

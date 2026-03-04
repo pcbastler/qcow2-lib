@@ -161,6 +161,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -186,6 +187,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -218,6 +220,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();

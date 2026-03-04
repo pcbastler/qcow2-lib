@@ -43,6 +43,7 @@ fn create_base(dir: &Path, name: &str, size: u64, data: &[(u64, &[u8])]) -> std:
         CreateOptions {
             virtual_size: size,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -421,6 +422,7 @@ fn commit_without_backing_fails() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();

@@ -93,6 +93,7 @@ fuzz_target!(|input: FuzzInput| {
         CreateOptions {
             virtual_size,
             cluster_bits: Some(input.config.cluster_bits()),
+            extended_l2: false,
         },
     ) {
         Ok(img) => img,

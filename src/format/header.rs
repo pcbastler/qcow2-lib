@@ -286,11 +286,38 @@ impl Header {
         1u64 << self.cluster_bits
     }
 
-    /// Number of L2 entries per table: `cluster_size / 8`.
+    /// Number of L2 entries per table.
     ///
-    /// Each L2 entry is 8 bytes, and one L2 table occupies exactly one cluster.
+    /// Standard mode: `cluster_size / 8` (8-byte entries).
+    /// Extended L2 mode: `cluster_size / 16` (16-byte entries).
     pub fn l2_entries_per_table(&self) -> u64 {
-        self.cluster_size() / L2_ENTRY_SIZE as u64
+        self.cluster_size() / self.l2_entry_size() as u64
+    }
+
+    /// Whether extended L2 entries (subclusters) are enabled.
+    pub fn has_extended_l2(&self) -> bool {
+        self.incompatible_features
+            .contains(IncompatibleFeatures::EXTENDED_L2)
+    }
+
+    /// Size of each L2 entry in bytes (8 for standard, 16 for extended).
+    pub fn l2_entry_size(&self) -> usize {
+        if self.has_extended_l2() {
+            L2_ENTRY_SIZE_EXTENDED
+        } else {
+            L2_ENTRY_SIZE
+        }
+    }
+
+    /// Subcluster size in bytes, if extended L2 is enabled.
+    ///
+    /// Returns `Some(cluster_size / 32)` for extended L2, `None` otherwise.
+    pub fn subcluster_size(&self) -> Option<u64> {
+        if self.has_extended_l2() {
+            Some(self.cluster_size() / SUBCLUSTERS_PER_CLUSTER as u64)
+        } else {
+            None
+        }
     }
 
     /// Refcount bit width: `1 << refcount_order`.
@@ -336,6 +363,14 @@ impl Header {
             if unknown != 0 {
                 return Err(Error::UnsupportedIncompatibleFeatures { features: unknown });
             }
+        }
+
+        // Extended L2 requires cluster_bits >= 14
+        if self.has_extended_l2() && self.cluster_bits < MIN_CLUSTER_BITS_EXTENDED_L2 {
+            return Err(Error::ExtendedL2ClusterBitsTooSmall {
+                cluster_bits: self.cluster_bits,
+                min: MIN_CLUSTER_BITS_EXTENDED_L2,
+            });
         }
 
         // L1 table offset alignment (must be cluster-aligned if non-zero)

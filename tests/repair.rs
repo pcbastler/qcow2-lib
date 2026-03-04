@@ -40,6 +40,7 @@ fn create_image_with_data(
         CreateOptions {
             virtual_size,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -360,6 +361,7 @@ fn shrink_and_truncate_reduces_file_size() {
             CreateOptions {
                 virtual_size: 4 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();

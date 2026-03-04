@@ -18,6 +18,7 @@ fn library_create_bitmap_qemu_reads() {
         CreateOptions {
             virtual_size: 10 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -107,6 +108,7 @@ fn multiple_bitmaps_library_to_qemu() {
         CreateOptions {
             virtual_size: 10 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -151,6 +153,7 @@ fn delete_bitmap_qemu_confirms() {
         CreateOptions {
             virtual_size: 10 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -200,6 +203,7 @@ fn bitmap_image_integrity_clean() {
         CreateOptions {
             virtual_size: 10 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -230,6 +234,7 @@ fn set_dirty_and_check() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -277,6 +282,7 @@ fn auto_tracking_sets_dirty_on_write() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -360,6 +366,7 @@ fn min_granularity_bitmap() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -397,6 +404,7 @@ fn large_granularity_bitmap() {
         CreateOptions {
             virtual_size: 64 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -433,6 +441,7 @@ fn bitmap_lifecycle_integrity() {
         CreateOptions {
             virtual_size: 4 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -489,6 +498,7 @@ fn dirty_bits_persist_across_reopen() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -519,6 +529,7 @@ fn cleared_bitmap_stays_clean_after_reopen() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -544,6 +555,7 @@ fn multiple_bitmaps_survive_reopen() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -581,6 +593,7 @@ fn auto_tracking_write_at_last_byte() {
         CreateOptions {
             virtual_size: vsize,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -611,6 +624,7 @@ fn auto_tracking_write_spanning_granules() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -643,6 +657,7 @@ fn auto_tracking_multiple_writes_accumulate() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -676,6 +691,7 @@ fn integrity_clean_after_writes_with_auto_bitmap() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -710,6 +726,7 @@ fn integrity_clean_with_multiple_dirty_bitmaps() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -743,6 +760,7 @@ fn integrity_clean_after_delete_recreate_cycle() {
         CreateOptions {
             virtual_size: 4 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -800,6 +818,7 @@ fn bitmap_on_zero_size_image() {
         CreateOptions {
             virtual_size: 0,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -824,6 +843,7 @@ fn bitmap_with_custom_cluster_size() {
         CreateOptions {
             virtual_size: 4 * 1024 * 1024,
             cluster_bits: Some(17), // 128K clusters
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -855,6 +875,7 @@ fn bitmap_survives_unrelated_flush() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -883,6 +904,7 @@ fn read_does_not_affect_bitmap() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -911,6 +933,7 @@ fn qemu_check_after_set_dirty() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -951,6 +974,7 @@ fn qemu_check_min_granularity_with_dirty() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -986,6 +1010,7 @@ fn qemu_validates_auto_tracked_bitmap() {
         CreateOptions {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();

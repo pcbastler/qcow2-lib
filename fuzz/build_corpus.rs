@@ -30,6 +30,7 @@ fn build_image_open_corpus() {
         CreateOptions {
             virtual_size: 1 << 20, // 1 MB
             cluster_bits: Some(12), // 4KB clusters
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -44,6 +45,7 @@ fn build_image_open_corpus() {
         CreateOptions {
             virtual_size: 1 << 20,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();

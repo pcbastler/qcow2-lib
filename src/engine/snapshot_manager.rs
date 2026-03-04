@@ -421,7 +421,7 @@ impl<'a> SnapshotManager<'a> {
                 // Load L2 table and clear COPIED flags on its entries
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits)?;
+                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits, self.header.has_extended_l2())?;
 
                 let mut modified = false;
                 for j in 0..l2_table.len() {
@@ -429,13 +429,16 @@ impl<'a> SnapshotManager<'a> {
                     if let L2Entry::Standard {
                         host_offset,
                         copied: true,
+                        subclusters,
                     } = l2_entry
                     {
                         let cleared = L2Entry::Standard {
                             host_offset,
                             copied: false,
+                            subclusters,
                         };
-                        let entry_offset = l2_offset.0 + (j as u64 * 8);
+                        let l2_entry_size = self.header.l2_entry_size();
+                        let entry_offset = l2_offset.0 + (j as u64 * l2_entry_size as u64);
                         let mut entry_buf = [0u8; 8];
                         BigEndian::write_u64(
                             &mut entry_buf,
@@ -488,7 +491,7 @@ impl<'a> SnapshotManager<'a> {
                 // Load L2 table and restore COPIED flags on data entries
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits)?;
+                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits, self.header.has_extended_l2())?;
 
                 let mut l2_modified = false;
                 for j in 0..l2_table.len() {
@@ -496,6 +499,7 @@ impl<'a> SnapshotManager<'a> {
                     if let L2Entry::Standard {
                         host_offset,
                         copied: false,
+                        subclusters,
                     } = l2_entry
                     {
                         let rc = self.refcount_manager.get_refcount(
@@ -507,8 +511,10 @@ impl<'a> SnapshotManager<'a> {
                             let restored = L2Entry::Standard {
                                 host_offset,
                                 copied: true,
+                                subclusters,
                             };
-                            let entry_offset = l2_offset.0 + (j as u64 * 8);
+                            let l2_entry_size = self.header.l2_entry_size();
+                            let entry_offset = l2_offset.0 + (j as u64 * l2_entry_size as u64);
                             let mut entry_buf = [0u8; 8];
                             BigEndian::write_u64(
                                 &mut entry_buf,
@@ -592,7 +598,7 @@ impl<'a> SnapshotManager<'a> {
                 // Load L2 table and increment refcounts for data clusters
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits)?;
+                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits, self.header.has_extended_l2())?;
 
                 for entry in l2_table.iter() {
                     self.increment_refcount_for_l2_entry(entry)?;
@@ -614,7 +620,7 @@ impl<'a> SnapshotManager<'a> {
                 )?;
             }
             L2Entry::Zero {
-                preallocated_offset: Some(offset),
+                preallocated_offset: Some(offset), ..
             } => {
                 self.refcount_manager.increment_refcount(
                     offset.0,
@@ -631,7 +637,7 @@ impl<'a> SnapshotManager<'a> {
                     )?;
                 }
             }
-            L2Entry::Unallocated | L2Entry::Zero { preallocated_offset: None } => {}
+            L2Entry::Unallocated | L2Entry::Zero { preallocated_offset: None, .. } => {}
         }
         Ok(())
     }
@@ -648,7 +654,7 @@ impl<'a> SnapshotManager<'a> {
                 // Load L2 and decrement data cluster refcounts
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits)?;
+                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits, self.header.has_extended_l2())?;
 
                 for entry in l2_table.iter() {
                     self.decrement_refcount_for_l2_entry(entry)?;
@@ -677,7 +683,7 @@ impl<'a> SnapshotManager<'a> {
                 // Load L2 and decrement data cluster refcounts
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits)?;
+                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits, self.header.has_extended_l2())?;
 
                 for l2_entry in l2_table.iter() {
                     self.decrement_refcount_for_l2_entry(l2_entry)?;
@@ -705,7 +711,7 @@ impl<'a> SnapshotManager<'a> {
                 )?;
             }
             L2Entry::Zero {
-                preallocated_offset: Some(offset),
+                preallocated_offset: Some(offset), ..
             } => {
                 self.refcount_manager.decrement_refcount(
                     offset.0,
@@ -722,7 +728,7 @@ impl<'a> SnapshotManager<'a> {
                     )?;
                 }
             }
-            L2Entry::Unallocated | L2Entry::Zero { preallocated_offset: None } => {}
+            L2Entry::Unallocated | L2Entry::Zero { preallocated_offset: None, .. } => {}
         }
         Ok(())
     }
@@ -1021,6 +1027,7 @@ mod tests {
             CreateOptions {
                 virtual_size,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap()

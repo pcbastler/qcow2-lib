@@ -8,7 +8,7 @@ use crate::engine::cache::MetadataCache;
 use crate::error::Result;
 use crate::format::compressed::CompressedClusterDescriptor;
 use crate::format::l1::L1Table;
-use crate::format::l2::{L2Entry, L2Table};
+use crate::format::l2::{L2Entry, L2Table, SubclusterBitmap};
 use crate::format::types::*;
 use crate::io::IoBackend;
 
@@ -24,6 +24,8 @@ pub enum ClusterResolution {
         host_offset: ClusterOffset,
         /// Byte offset within the cluster where the requested data starts.
         intra_cluster_offset: IntraClusterOffset,
+        /// Subcluster bitmap (present only with extended L2 entries).
+        subclusters: Option<SubclusterBitmap>,
     },
 
     /// The cluster reads as all zeros.
@@ -31,6 +33,17 @@ pub enum ClusterResolution {
 
     /// The cluster is not allocated in this image; check the backing file.
     Unallocated,
+
+    /// Extended L2: subclusters have mixed zero/unallocated state without
+    /// a host cluster.  The reader must check each subcluster individually:
+    /// zero-flagged subclusters read as zeros, unallocated ones fall to
+    /// the backing file or zeros.
+    ZeroSubclustered {
+        /// Subcluster bitmap (only zero and unallocated bits will be set).
+        bitmap: SubclusterBitmap,
+        /// Byte offset within the cluster where the requested data starts.
+        intra_cluster_offset: IntraClusterOffset,
+    },
 
     /// The cluster data is compressed.
     Compressed {
@@ -49,15 +62,17 @@ pub struct ClusterMapper {
     l1_table: L1Table,
     cluster_bits: u32,
     file_size: u64,
+    extended_l2: bool,
 }
 
 impl ClusterMapper {
     /// Create a new cluster mapper.
-    pub fn new(l1_table: L1Table, cluster_bits: u32, file_size: u64) -> Self {
+    pub fn new(l1_table: L1Table, cluster_bits: u32, file_size: u64, extended_l2: bool) -> Self {
         Self {
             l1_table,
             cluster_bits,
             file_size,
+            extended_l2,
         }
     }
 
@@ -70,7 +85,7 @@ impl ClusterMapper {
         backend: &dyn IoBackend,
         cache: &mut MetadataCache,
     ) -> Result<ClusterResolution> {
-        let (l1_index, l2_index, intra) = guest_offset.split(self.cluster_bits);
+        let (l1_index, l2_index, intra) = guest_offset.split(self.cluster_bits, self.extended_l2);
 
         // Step 1: L1 lookup
         let l1_entry = self.l1_table.get(l1_index)?;
@@ -88,11 +103,38 @@ impl ClusterMapper {
         // Step 4: Map L2Entry to ClusterResolution
         match l2_entry {
             L2Entry::Unallocated => Ok(ClusterResolution::Unallocated),
-            L2Entry::Zero { .. } => Ok(ClusterResolution::Zero),
-            L2Entry::Standard { host_offset, .. } => Ok(ClusterResolution::Allocated {
-                host_offset,
-                intra_cluster_offset: intra,
-            }),
+            L2Entry::Zero { subclusters: None, .. } => Ok(ClusterResolution::Zero),
+            L2Entry::Zero { preallocated_offset: Some(host_offset), subclusters: Some(bitmap) } => {
+                // Extended L2 zero entry with preallocated host cluster:
+                // treat as Allocated so the reader can dispatch per-subcluster.
+                Ok(ClusterResolution::Allocated {
+                    host_offset,
+                    intra_cluster_offset: intra,
+                    subclusters: Some(bitmap),
+                })
+            }
+            L2Entry::Zero { preallocated_offset: None, subclusters: Some(bitmap) } => {
+                if bitmap.zero_mask() == 0xFFFF_FFFF {
+                    // All 32 subclusters are explicitly zero.
+                    Ok(ClusterResolution::Zero)
+                } else if bitmap.is_all_unallocated() {
+                    // All zero and unallocated bits are 0 → treat as unallocated.
+                    Ok(ClusterResolution::Unallocated)
+                } else {
+                    // Mixed zero/unallocated subclusters without a host cluster.
+                    Ok(ClusterResolution::ZeroSubclustered {
+                        bitmap,
+                        intra_cluster_offset: intra,
+                    })
+                }
+            }
+            L2Entry::Standard { host_offset, subclusters, .. } => {
+                Ok(ClusterResolution::Allocated {
+                    host_offset,
+                    intra_cluster_offset: intra,
+                    subclusters,
+                })
+            }
             L2Entry::Compressed(descriptor) => Ok(ClusterResolution::Compressed {
                 descriptor,
                 intra_cluster_offset: intra,
@@ -130,7 +172,7 @@ impl ClusterMapper {
         // Cache miss: read from backend
         let mut buf = vec![0u8; cluster_size as usize];
         backend.read_exact_at(&mut buf, offset.0)?;
-        let table = L2Table::read_from(&buf, self.cluster_bits)?;
+        let table = L2Table::read_from(&buf, self.cluster_bits, self.extended_l2)?;
 
         // Insert into cache
         cache.insert_l2_table(offset, table.clone());
@@ -145,6 +187,11 @@ impl ClusterMapper {
     /// The cluster_bits value used for address decomposition.
     pub fn cluster_bits(&self) -> u32 {
         self.cluster_bits
+    }
+
+    /// Whether this mapper uses extended L2 entries.
+    pub fn extended_l2(&self) -> bool {
+        self.extended_l2
     }
 
     /// Read an L1 entry by index.
@@ -228,7 +275,7 @@ mod tests {
         // L1 entry is zero (unallocated)
         let l1_buf = vec![0u8; L1_ENTRY_SIZE];
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let backend = MemoryBackend::zeroed(CLUSTER_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
@@ -243,7 +290,7 @@ mod tests {
         let data_cluster_offset = 3 * CLUSTER_SIZE as u64;
         let l2_raw = data_cluster_offset | L2_COPIED_FLAG;
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result = mapper
@@ -254,6 +301,7 @@ mod tests {
             ClusterResolution::Allocated {
                 host_offset: ClusterOffset(data_cluster_offset),
                 intra_cluster_offset: IntraClusterOffset(42),
+                subclusters: None,
             }
         );
     }
@@ -262,7 +310,7 @@ mod tests {
     fn resolve_zero_cluster() {
         let l2_raw = L2_ZERO_FLAG;
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result = mapper
@@ -274,7 +322,7 @@ mod tests {
     #[test]
     fn resolve_unallocated_l2() {
         let (backend, l1_table) = build_test_image(&[]); // All L2 entries are 0
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result = mapper
@@ -291,7 +339,7 @@ mod tests {
         };
         let l2_raw = L2_COMPRESSED_FLAG | desc.encode(CLUSTER_BITS);
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result = mapper
@@ -311,7 +359,7 @@ mod tests {
         let data_offset = 3 * CLUSTER_SIZE as u64;
         let l2_raw = data_offset | L2_COPIED_FLAG;
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         // First resolve: cache miss
@@ -336,7 +384,7 @@ mod tests {
         // should fail.
         let l1_buf = vec![0u8; L1_ENTRY_SIZE];
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let backend = MemoryBackend::zeroed(10 * CLUSTER_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
@@ -353,7 +401,7 @@ mod tests {
         let data_offset = 3 * CLUSTER_SIZE as u64;
         let l2_raw = data_offset | L2_COPIED_FLAG;
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let result1 = mapper
@@ -372,7 +420,7 @@ mod tests {
         let data_offset = 3 * CLUSTER_SIZE as u64;
         let l2_raw = data_offset | L2_COPIED_FLAG;
         let (backend, l1_table) = build_test_image(&[(0, l2_raw)]);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         // Guest offset 12345 → intra = 12345 (within first cluster)
@@ -384,6 +432,7 @@ mod tests {
             ClusterResolution::Allocated {
                 host_offset: ClusterOffset(data_offset),
                 intra_cluster_offset: IntraClusterOffset(12345),
+                subclusters: None,
             }
         );
     }
@@ -399,7 +448,7 @@ mod tests {
         BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
 
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let backend = MemoryBackend::zeroed(IMAGE_SIZE as usize);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
@@ -422,7 +471,7 @@ mod tests {
         BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
 
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let backend = MemoryBackend::zeroed(IMAGE_SIZE as usize);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
@@ -441,7 +490,7 @@ mod tests {
         let mut l1_buf = vec![0u8; 2 * L1_ENTRY_SIZE];
         BigEndian::write_u64(&mut l1_buf[L1_ENTRY_SIZE..], entry.raw());
         let l1_table = L1Table::read_from(&l1_buf, 2).unwrap();
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
 
         assert!(mapper.l1_entry(L1Index(0)).unwrap().is_unallocated());
         assert_eq!(mapper.l1_entry(L1Index(1)).unwrap(), entry);
@@ -450,7 +499,7 @@ mod tests {
     #[test]
     fn set_l1_entry_updates_table() {
         let l1_table = L1Table::new_empty(4);
-        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
 
         let entry = L1Entry::with_l2_offset(ClusterOffset(0x30000), true);
         mapper.set_l1_entry(L1Index(2), entry).unwrap();
@@ -465,7 +514,7 @@ mod tests {
         BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
 
-        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let backend = MemoryBackend::zeroed(20 * CLUSTER_SIZE);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
@@ -488,7 +537,7 @@ mod tests {
         BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
 
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
         let backend = MemoryBackend::zeroed(IMAGE_SIZE as usize);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
@@ -500,7 +549,7 @@ mod tests {
     #[test]
     fn replace_l1_table_updates_mapping() {
         let l1_table = L1Table::new_empty(1);
-        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
 
         // Start with empty table
         assert!(mapper.l1_entry(L1Index(0)).unwrap().is_unallocated());
@@ -518,7 +567,7 @@ mod tests {
     #[test]
     fn l1_table_mut_allows_in_place_grow() {
         let l1_table = L1Table::new_empty(2);
-        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE);
+        let mut mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, IMAGE_SIZE, false);
 
         mapper.l1_table_mut().grow(4);
         assert_eq!(mapper.l1_table().len(), 4);

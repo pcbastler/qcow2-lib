@@ -68,6 +68,7 @@ pub fn convert_from_raw(input_path: &Path, output_path: &Path, compress: bool) -
         CreateOptions {
             virtual_size: input_size,
             cluster_bits: None,
+            extended_l2: false,
         },
     )?;
 
@@ -115,6 +116,7 @@ pub fn convert_qcow2_to_qcow2(
         CreateOptions {
             virtual_size,
             cluster_bits: Some(source.cluster_bits()),
+            extended_l2: source.header().has_extended_l2(),
         },
     )?;
 
@@ -158,6 +160,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1024 * 1024, // 1 MB
                 cluster_bits: None,
+                extended_l2: false,
             },
         )
         .unwrap();

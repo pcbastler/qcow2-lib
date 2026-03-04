@@ -8,7 +8,9 @@ use crate::engine::cluster_mapping::{ClusterMapper, ClusterResolution};
 use crate::engine::compression;
 use crate::engine::read_mode::{ReadMode, ReadWarning};
 use crate::error::{Error, Result};
-use crate::format::types::GuestOffset;
+use crate::format::constants::SUBCLUSTERS_PER_CLUSTER;
+use crate::format::l2::{SubclusterBitmap, SubclusterState};
+use crate::format::types::{ClusterOffset, GuestOffset, IntraClusterOffset};
 use crate::io::IoBackend;
 
 /// Reads guest data from a QCOW2 image, handling all cluster types.
@@ -108,6 +110,14 @@ impl<'a> Qcow2Reader<'a> {
             ClusterResolution::Allocated {
                 host_offset,
                 intra_cluster_offset,
+                subclusters: Some(bitmap),
+            } => {
+                self.read_subclustered(buf, guest_offset, host_offset, intra_cluster_offset, bitmap)
+            }
+            ClusterResolution::Allocated {
+                host_offset,
+                intra_cluster_offset,
+                subclusters: None,
             } => {
                 let read_offset = host_offset.0 + intra_cluster_offset.0 as u64;
                 match self.backend.read_exact_at(buf, read_offset) {
@@ -120,26 +130,13 @@ impl<'a> Qcow2Reader<'a> {
                 Ok(())
             }
             ClusterResolution::Unallocated => {
-                if let Some(ref mut backing) = self.backing_image {
-                    let backing_vs = backing.virtual_size();
-                    let read_end = guest_offset + buf.len() as u64;
-                    if guest_offset >= backing_vs {
-                        // Entirely beyond backing — zeros
-                        buf.fill(0);
-                        Ok(())
-                    } else if read_end > backing_vs {
-                        // Partial overlap: read what's available, zero the rest
-                        let available = (backing_vs - guest_offset) as usize;
-                        backing.read_at(&mut buf[..available], guest_offset)?;
-                        buf[available..].fill(0);
-                        Ok(())
-                    } else {
-                        backing.read_at(buf, guest_offset)
-                    }
-                } else {
-                    buf.fill(0);
-                    Ok(())
-                }
+                self.read_from_backing_or_zero(buf, guest_offset)
+            }
+            ClusterResolution::ZeroSubclustered {
+                bitmap,
+                intra_cluster_offset,
+            } => {
+                self.read_zero_subclustered(buf, guest_offset, intra_cluster_offset, bitmap)
             }
             ClusterResolution::Compressed {
                 descriptor,
@@ -188,6 +185,148 @@ impl<'a> Qcow2Reader<'a> {
                 }
             }
         }
+    }
+
+    /// Read from a cluster with extended L2 subclusters (has a host cluster).
+    ///
+    /// Each subcluster within the read range is dispatched independently:
+    /// - `Allocated`: read from host at `host_offset + subcluster_offset`
+    /// - `Zero`: fill with zeros
+    /// - `Unallocated`: read from backing file or fill with zeros
+    /// - `Invalid`: error
+    fn read_subclustered(
+        &mut self,
+        buf: &mut [u8],
+        guest_offset: u64,
+        host_offset: ClusterOffset,
+        intra_cluster_offset: IntraClusterOffset,
+        bitmap: SubclusterBitmap,
+    ) -> Result<()> {
+        let cluster_size = 1u64 << self.cluster_bits;
+        let sc_size = cluster_size / SUBCLUSTERS_PER_CLUSTER as u64;
+        let intra = intra_cluster_offset.0 as u64;
+
+        let mut buf_pos = 0usize;
+        let mut cluster_pos = intra;
+
+        while buf_pos < buf.len() {
+            let sc_index = (cluster_pos / sc_size) as u32;
+            debug_assert!(sc_index < SUBCLUSTERS_PER_CLUSTER);
+
+            // How many bytes remain in this subcluster?
+            let sc_end = (sc_index as u64 + 1) * sc_size;
+            let bytes_in_sc = (sc_end - cluster_pos) as usize;
+            let chunk_len = bytes_in_sc.min(buf.len() - buf_pos);
+
+            let state = bitmap.get(sc_index);
+            match state {
+                SubclusterState::Allocated => {
+                    let read_offset = host_offset.0 + cluster_pos;
+                    match self.backend.read_exact_at(
+                        &mut buf[buf_pos..buf_pos + chunk_len],
+                        read_offset,
+                    ) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            return self.handle_read_error(buf, guest_offset, e);
+                        }
+                    }
+                }
+                SubclusterState::Zero => {
+                    buf[buf_pos..buf_pos + chunk_len].fill(0);
+                }
+                SubclusterState::Unallocated => {
+                    self.read_from_backing_or_zero(
+                        &mut buf[buf_pos..buf_pos + chunk_len],
+                        guest_offset + buf_pos as u64,
+                    )?;
+                }
+                SubclusterState::Invalid => {
+                    return Err(Error::InvalidSubclusterBitmap {
+                        l2_index: 0, // we don't have the L2 index here
+                        subcluster_index: sc_index,
+                    });
+                }
+            }
+
+            buf_pos += chunk_len;
+            cluster_pos += chunk_len as u64;
+        }
+
+        Ok(())
+    }
+
+    /// Read from a zero-entry cluster with per-subcluster state (no host cluster).
+    ///
+    /// Subclusters are either `Zero` (read as zeros) or `Unallocated`
+    /// (read from backing or zeros). No `Allocated` subclusters are possible
+    /// because there is no host cluster.
+    fn read_zero_subclustered(
+        &mut self,
+        buf: &mut [u8],
+        guest_offset: u64,
+        intra_cluster_offset: IntraClusterOffset,
+        bitmap: SubclusterBitmap,
+    ) -> Result<()> {
+        let cluster_size = 1u64 << self.cluster_bits;
+        let sc_size = cluster_size / SUBCLUSTERS_PER_CLUSTER as u64;
+        let intra = intra_cluster_offset.0 as u64;
+
+        let mut buf_pos = 0usize;
+        let mut cluster_pos = intra;
+
+        while buf_pos < buf.len() {
+            let sc_index = (cluster_pos / sc_size) as u32;
+            let sc_end = (sc_index as u64 + 1) * sc_size;
+            let bytes_in_sc = (sc_end - cluster_pos) as usize;
+            let chunk_len = bytes_in_sc.min(buf.len() - buf_pos);
+
+            match bitmap.get(sc_index) {
+                SubclusterState::Zero => {
+                    buf[buf_pos..buf_pos + chunk_len].fill(0);
+                }
+                SubclusterState::Unallocated => {
+                    self.read_from_backing_or_zero(
+                        &mut buf[buf_pos..buf_pos + chunk_len],
+                        guest_offset + buf_pos as u64,
+                    )?;
+                }
+                _ => {
+                    // Allocated or Invalid in a zero entry without host cluster
+                    // shouldn't happen; treat as zero.
+                    buf[buf_pos..buf_pos + chunk_len].fill(0);
+                }
+            }
+
+            buf_pos += chunk_len;
+            cluster_pos += chunk_len as u64;
+        }
+
+        Ok(())
+    }
+
+    /// Read from the backing image or fill with zeros if no backing.
+    fn read_from_backing_or_zero(
+        &mut self,
+        buf: &mut [u8],
+        guest_offset: u64,
+    ) -> Result<()> {
+        if let Some(ref mut backing) = self.backing_image {
+            let backing_vs = backing.virtual_size();
+            let read_end = guest_offset + buf.len() as u64;
+            if guest_offset >= backing_vs {
+                buf.fill(0);
+            } else if read_end > backing_vs {
+                let available = (backing_vs - guest_offset) as usize;
+                backing.read_at(&mut buf[..available], guest_offset)?;
+                buf[available..].fill(0);
+            } else {
+                backing.read_at(buf, guest_offset)?;
+            }
+        } else {
+            buf.fill(0);
+        }
+        Ok(())
     }
 
     /// Handle a read error according to the current read mode.
@@ -285,7 +424,7 @@ mod tests {
         }
 
         let backend = MemoryBackend::new(image_data);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64, false);
         (backend, mapper)
     }
 
@@ -398,7 +537,7 @@ mod tests {
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
 
         let backend = MemoryBackend::new(image_data);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64, false);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let mut warnings = vec![];
@@ -553,7 +692,7 @@ mod tests {
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
         let image_size = 10 * CLUSTER_SIZE;
         let backend = MemoryBackend::zeroed(image_size);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64, false);
         (backend, mapper)
     }
 
@@ -567,7 +706,7 @@ mod tests {
 
         let image_size = 10 * CLUSTER_SIZE;
         let backend = MemoryBackend::zeroed(image_size);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64, false);
         (backend, mapper)
     }
 
@@ -852,6 +991,7 @@ mod tests {
             crate::engine::image::CreateOptions {
                 virtual_size: backing_vs,
                 cluster_bits: Some(CLUSTER_BITS),
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -896,6 +1036,7 @@ mod tests {
             crate::engine::image::CreateOptions {
                 virtual_size: 256,
                 cluster_bits: Some(CLUSTER_BITS),
+            extended_l2: false,
             },
         )
         .unwrap();

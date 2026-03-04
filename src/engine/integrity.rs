@@ -143,6 +143,7 @@ pub fn build_reference_map(
         header.l1_table_entries,
         header.cluster_bits,
         cluster_size,
+        header.has_extended_l2(),
         &mut refs,
         &mut stats,
     )?;
@@ -184,6 +185,7 @@ pub fn build_reference_map(
                 snap.l1_table_entries,
                 header.cluster_bits,
                 cluster_size,
+                header.has_extended_l2(),
                 &mut refs,
                 &mut stats,
             )?;
@@ -388,8 +390,10 @@ fn fix_copied_flags(
         // Fix L2 COPIED flags
         let mut l2_buf = vec![0u8; cluster_size as usize];
         backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-        let l2_table = L2Table::read_from(&l2_buf, header.cluster_bits)?;
-        let entries_per_l2 = cluster_size as usize / L2_ENTRY_SIZE;
+        let extended_l2 = header.has_extended_l2();
+        let l2_entry_size = header.l2_entry_size();
+        let l2_table = L2Table::read_from(&l2_buf, header.cluster_bits, extended_l2)?;
+        let entries_per_l2 = cluster_size as usize / l2_entry_size;
         let mut l2_modified = false;
 
         for l2_idx in 0..entries_per_l2 {
@@ -397,6 +401,7 @@ fn fix_copied_flags(
             if let L2Entry::Standard {
                 host_offset,
                 copied,
+                subclusters,
             } = entry
             {
                 let data_rc =
@@ -406,6 +411,7 @@ fn fix_copied_flags(
                     let fixed = L2Entry::Standard {
                         host_offset,
                         copied: should_be_copied,
+                        subclusters,
                     };
                     let entry_offset =
                         l2_offset.0 + (l2_idx as u64 * L2_ENTRY_SIZE as u64);
@@ -445,6 +451,7 @@ fn walk_l1_l2(
     l1_entries: u32,
     cluster_bits: u32,
     cluster_size: u64,
+    extended_l2: bool,
     refs: &mut HashMap<u64, u64>,
     stats: &mut ClusterStats,
 ) -> Result<()> {
@@ -456,7 +463,8 @@ fn walk_l1_l2(
     let mut l1_buf = vec![0u8; l1_byte_size];
     backend.read_exact_at(&mut l1_buf, l1_offset)?;
 
-    let entries_per_l2 = cluster_size as usize / L2_ENTRY_SIZE;
+    let l2_entry_size = if extended_l2 { crate::format::constants::L2_ENTRY_SIZE_EXTENDED } else { L2_ENTRY_SIZE };
+    let entries_per_l2 = cluster_size as usize / l2_entry_size;
 
     for l1_idx in 0..l1_entries as usize {
         let raw = BigEndian::read_u64(&l1_buf[l1_idx * L1_ENTRY_SIZE..]);
@@ -474,7 +482,7 @@ fn walk_l1_l2(
         // Read and walk L2 table
         let mut l2_buf = vec![0u8; cluster_size as usize];
         backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-        let l2_table = L2Table::read_from(&l2_buf, cluster_bits)?;
+        let l2_table = L2Table::read_from(&l2_buf, cluster_bits, extended_l2)?;
 
         for l2_idx in 0..entries_per_l2 {
             let entry = l2_table
@@ -485,7 +493,7 @@ fn walk_l1_l2(
                     stats.unallocated_entries += 1;
                 }
                 L2Entry::Zero {
-                    preallocated_offset,
+                    preallocated_offset, ..
                 } => {
                     stats.zero_clusters += 1;
                     if let Some(offset) = preallocated_offset {
@@ -704,6 +712,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -728,6 +737,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -756,6 +766,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -783,6 +794,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -812,6 +824,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -842,6 +855,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -898,6 +912,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -981,6 +996,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -1035,6 +1051,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -1087,6 +1104,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -1134,6 +1152,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -1168,6 +1187,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -1189,7 +1209,7 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; header.cluster_size() as usize];
         image.backend().read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, header.cluster_bits).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, header.cluster_bits, false).unwrap();
         let entry = l2_table.get(crate::format::types::L2Index(0)).unwrap();
         let data_offset = match entry {
             L2Entry::Standard { host_offset, .. } => host_offset.0,
@@ -1211,7 +1231,7 @@ mod tests {
         // Read the L2 entry and check COPIED flag
         let mut l2_buf2 = vec![0u8; image.cluster_size() as usize];
         image.backend().read_exact_at(&mut l2_buf2, l2_offset.0).unwrap();
-        let l2_table2 = L2Table::read_from(&l2_buf2, image.header().cluster_bits).unwrap();
+        let l2_table2 = L2Table::read_from(&l2_buf2, image.header().cluster_bits, false).unwrap();
         let entry2 = l2_table2.get(crate::format::types::L2Index(0)).unwrap();
         match entry2 {
             L2Entry::Standard { copied, .. } => {

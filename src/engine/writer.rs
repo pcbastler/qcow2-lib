@@ -12,9 +12,9 @@ use crate::engine::cluster_mapping::ClusterMapper;
 use crate::engine::compression;
 use crate::engine::refcount_manager::RefcountManager;
 use crate::error::{Error, Result};
-use crate::format::constants::L2_ENTRY_SIZE;
+use crate::format::constants::{L2_ENTRY_SIZE, L2_ENTRY_SIZE_EXTENDED, SUBCLUSTERS_PER_CLUSTER};
 use crate::format::l1::L1Entry;
-use crate::format::l2::{L2Entry, L2Table};
+use crate::format::l2::{L2Entry, L2Table, SubclusterBitmap, SubclusterState};
 use crate::format::types::*;
 use crate::io::IoBackend;
 
@@ -116,7 +116,8 @@ impl<'a> Qcow2Writer<'a> {
 
     /// Write a chunk of data to a single cluster.
     fn write_cluster_chunk(&mut self, buf: &[u8], guest_offset: u64) -> Result<()> {
-        let (l1_index, l2_index, intra) = GuestOffset(guest_offset).split(self.cluster_bits);
+        let extended_l2 = self.mapper.extended_l2();
+        let (l1_index, l2_index, intra) = GuestOffset(guest_offset).split(self.cluster_bits, extended_l2);
         let cluster_size = 1u64 << self.cluster_bits;
 
         // Step 1: Ensure L2 table exists
@@ -128,20 +129,24 @@ impl<'a> Qcow2Writer<'a> {
 
         // Step 3: Dispatch on L2 entry type
         let guest_cluster_offset = guest_offset - intra.0 as u64;
-        let new_l2_entry = match l2_entry {
-            L2Entry::Unallocated | L2Entry::Zero { .. } => {
-                self.write_to_new_cluster(buf, intra, cluster_size, guest_cluster_offset)?
-            }
-            L2Entry::Standard { host_offset, copied } => {
-                if copied {
-                    self.write_in_place(buf, host_offset, intra, cluster_size)?;
-                    l2_entry // No change to L2 entry
-                } else {
-                    self.cow_data_cluster(buf, host_offset, intra, cluster_size)?
+        let new_l2_entry = if extended_l2 {
+            self.write_cluster_chunk_extended(buf, intra, cluster_size, guest_cluster_offset, l2_entry)?
+        } else {
+            match l2_entry {
+                L2Entry::Unallocated | L2Entry::Zero { .. } => {
+                    self.write_to_new_cluster(buf, intra, cluster_size, guest_cluster_offset)?
                 }
-            }
-            L2Entry::Compressed(descriptor) => {
-                self.write_to_compressed_cluster(buf, descriptor, intra, cluster_size)?
+                L2Entry::Standard { host_offset, copied, .. } => {
+                    if copied {
+                        self.write_in_place(buf, host_offset, intra, cluster_size)?;
+                        l2_entry // No change to L2 entry
+                    } else {
+                        self.cow_data_cluster(buf, host_offset, intra, cluster_size)?
+                    }
+                }
+                L2Entry::Compressed(descriptor) => {
+                    self.write_to_compressed_cluster(buf, descriptor, intra, cluster_size)?
+                }
             }
         };
 
@@ -283,6 +288,7 @@ impl<'a> Qcow2Writer<'a> {
         Ok(L2Entry::Standard {
             host_offset: new_offset,
             copied: true,
+            subclusters: None,
         })
     }
 
@@ -341,6 +347,7 @@ impl<'a> Qcow2Writer<'a> {
         Ok(L2Entry::Standard {
             host_offset: new_offset,
             copied: true,
+            subclusters: None,
         })
     }
 
@@ -382,6 +389,307 @@ impl<'a> Qcow2Writer<'a> {
         Ok(L2Entry::Standard {
             host_offset: new_offset,
             copied: true,
+            subclusters: None,
+        })
+    }
+
+    // ---- Extended L2 (subcluster-granular) write methods ----
+
+    /// Dispatch a single-cluster write in extended L2 mode.
+    fn write_cluster_chunk_extended(
+        &mut self,
+        buf: &[u8],
+        intra: IntraClusterOffset,
+        cluster_size: u64,
+        guest_cluster_offset: u64,
+        l2_entry: L2Entry,
+    ) -> Result<L2Entry> {
+        match l2_entry {
+            L2Entry::Unallocated => {
+                self.write_to_new_cluster_extended(
+                    buf, intra, cluster_size, guest_cluster_offset, None,
+                )
+            }
+            L2Entry::Zero { preallocated_offset, subclusters } => {
+                // Zero entry: allocate a new cluster.  Preserve zero-bits for
+                // non-written subclusters so they don't fall to backing.
+                let result = self.write_to_new_cluster_extended(
+                    buf, intra, cluster_size, guest_cluster_offset, subclusters,
+                )?;
+                // Decrement refcount of the preallocated cluster if it existed
+                if let Some(prealloc) = preallocated_offset {
+                    self.refcount_manager.decrement_refcount(
+                        prealloc.0,
+                        self.backend,
+                        self.cache,
+                    )?;
+                }
+                Ok(result)
+            }
+            L2Entry::Standard { host_offset, copied, subclusters } => {
+                let bitmap = subclusters.unwrap_or_else(SubclusterBitmap::all_allocated);
+                if copied {
+                    self.write_in_place_extended(buf, host_offset, intra, cluster_size, bitmap)
+                } else {
+                    self.cow_data_cluster_extended(
+                        buf, host_offset, intra, cluster_size, bitmap,
+                    )
+                }
+            }
+            L2Entry::Compressed(descriptor) => {
+                self.write_to_compressed_cluster_extended(buf, descriptor, intra, cluster_size)
+            }
+        }
+    }
+
+    /// Allocate a new cluster and write data with subcluster-granular bitmap.
+    ///
+    /// For extended L2: only the written bytes go to the host cluster.
+    /// The bitmap marks written subclusters as Allocated; zero-bits from
+    /// a previous `Zero` entry are preserved so those subclusters don't
+    /// fall through to backing.
+    fn write_to_new_cluster_extended(
+        &mut self,
+        buf: &[u8],
+        intra: IntraClusterOffset,
+        cluster_size: u64,
+        guest_cluster_offset: u64,
+        old_subclusters: Option<SubclusterBitmap>,
+    ) -> Result<L2Entry> {
+        let new_offset = self.refcount_manager.allocate_cluster(
+            self.backend,
+            self.cache,
+        )?;
+        let file_size = self.backend.file_size()?;
+        self.mapper.set_file_size(file_size);
+
+        let sc_size = cluster_size / SUBCLUSTERS_PER_CLUSTER as u64;
+        let start = intra.0 as u64;
+        let end = start + buf.len() as u64;
+
+        // Compute the range of subclusters we're writing to.
+        let first_sc = (start / sc_size) as u32;
+        let last_sc = ((end - 1) / sc_size) as u32;
+
+        // Build the new bitmap: start from old (preserves zero-bits) or empty.
+        let mut bitmap = old_subclusters.unwrap_or_else(SubclusterBitmap::all_unallocated);
+
+        // For subclusters that are Unallocated in the old bitmap and overlap
+        // with our write, we need to read backing data for the non-written
+        // parts of those subclusters.  Build the full cluster buffer.
+        let mut cluster_buf = vec![0u8; cluster_size as usize];
+
+        // Copy data from backing for Unallocated subclusters within the write
+        // range that are only partially covered by the write.
+        if let Some(ref mut backing) = self.backing_image {
+            let backing_vs = backing.virtual_size();
+            for sc in first_sc..=last_sc {
+                if matches!(bitmap.get(sc), SubclusterState::Unallocated) {
+                    let sc_start = sc as u64 * sc_size;
+                    let sc_end = sc_start + sc_size;
+                    let write_covers_sc = start <= sc_start && end >= sc_end;
+                    if !write_covers_sc && guest_cluster_offset + sc_start < backing_vs {
+                        let guest_sc = guest_cluster_offset + sc_start;
+                        let avail = (backing_vs - guest_sc).min(sc_size) as usize;
+                        backing.read_at(
+                            &mut cluster_buf[sc_start as usize..sc_start as usize + avail],
+                            guest_sc,
+                        )?;
+                    }
+                }
+            }
+        }
+
+        // Overlay the write data
+        cluster_buf[start as usize..end as usize].copy_from_slice(buf);
+
+        // Write only the affected subclusters to the host cluster.
+        for sc in first_sc..=last_sc {
+            let sc_start = sc as u64 * sc_size;
+            self.backend.write_all_at(
+                &cluster_buf[sc_start as usize..(sc_start + sc_size) as usize],
+                new_offset.0 + sc_start,
+            )?;
+            bitmap.set(sc, SubclusterState::Allocated);
+        }
+
+        Ok(L2Entry::Standard {
+            host_offset: new_offset,
+            copied: true,
+            subclusters: Some(bitmap),
+        })
+    }
+
+    /// Write in-place to an existing copied cluster (extended L2).
+    ///
+    /// Updates the subcluster bitmap to mark written subclusters as Allocated.
+    /// For subclusters that were previously Zero or Unallocated and are only
+    /// partially covered by the write, we must initialize the unwritten part
+    /// (zeros for Zero state, existing host data for Allocated).
+    fn write_in_place_extended(
+        &mut self,
+        buf: &[u8],
+        host_offset: ClusterOffset,
+        intra: IntraClusterOffset,
+        cluster_size: u64,
+        mut bitmap: SubclusterBitmap,
+    ) -> Result<L2Entry> {
+        let sc_size = cluster_size / SUBCLUSTERS_PER_CLUSTER as u64;
+        let start = intra.0 as u64;
+        let end = start + buf.len() as u64;
+        let first_sc = (start / sc_size) as u32;
+        let last_sc = ((end - 1) / sc_size) as u32;
+
+        // For partially-covered subclusters that were Zero, we must write
+        // zeros to the host for the non-written part before overlaying.
+        for sc in first_sc..=last_sc {
+            let state = bitmap.get(sc);
+            let sc_start = sc as u64 * sc_size;
+            let sc_end = sc_start + sc_size;
+            let write_covers_sc = start <= sc_start && end >= sc_end;
+
+            if !write_covers_sc && matches!(state, SubclusterState::Zero | SubclusterState::Unallocated) {
+                // Build the subcluster from zeros, overlay write data, write whole SC
+                let mut sc_buf = vec![0u8; sc_size as usize];
+                let overlap_start = start.max(sc_start);
+                let overlap_end = end.min(sc_end);
+                let buf_off = (overlap_start - start) as usize;
+                let sc_off = (overlap_start - sc_start) as usize;
+                let overlap_len = (overlap_end - overlap_start) as usize;
+                sc_buf[sc_off..sc_off + overlap_len]
+                    .copy_from_slice(&buf[buf_off..buf_off + overlap_len]);
+                self.backend.write_all_at(&sc_buf, host_offset.0 + sc_start)?;
+            }
+        }
+
+        // Write the user data (for fully-covered SCs and the non-edge parts)
+        self.backend
+            .write_all_at(buf, host_offset.0 + intra.0 as u64)?;
+
+        // Mark written subclusters as Allocated
+        for sc in first_sc..=last_sc {
+            bitmap.set(sc, SubclusterState::Allocated);
+        }
+
+        Ok(L2Entry::Standard {
+            host_offset,
+            copied: true,
+            subclusters: Some(bitmap),
+        })
+    }
+
+    /// COW a shared data cluster in extended L2 mode.
+    ///
+    /// Only copies subclusters that were Allocated; preserves Zero-bits.
+    /// Writes the new user data and updates the bitmap accordingly.
+    fn cow_data_cluster_extended(
+        &mut self,
+        buf: &[u8],
+        old_host_offset: ClusterOffset,
+        intra: IntraClusterOffset,
+        cluster_size: u64,
+        old_bitmap: SubclusterBitmap,
+    ) -> Result<L2Entry> {
+        let sc_size = cluster_size / SUBCLUSTERS_PER_CLUSTER as u64;
+        let start = intra.0 as u64;
+        let end = start + buf.len() as u64;
+        let first_sc = (start / sc_size) as u32;
+        let last_sc = ((end - 1) / sc_size) as u32;
+
+        // Allocate new cluster
+        let new_offset = self.refcount_manager.allocate_cluster(
+            self.backend,
+            self.cache,
+        )?;
+        let file_size = self.backend.file_size()?;
+        self.mapper.set_file_size(file_size);
+
+        // Build new bitmap from old, copying only Allocated subclusters
+        let mut new_bitmap = SubclusterBitmap::all_unallocated();
+        for sc in 0..SUBCLUSTERS_PER_CLUSTER {
+            match old_bitmap.get(sc) {
+                SubclusterState::Allocated => {
+                    // Copy this subcluster's data from old to new
+                    let sc_start = sc as u64 * sc_size;
+                    let mut sc_buf = vec![0u8; sc_size as usize];
+                    self.backend.read_exact_at(&mut sc_buf, old_host_offset.0 + sc_start)?;
+                    self.backend.write_all_at(&sc_buf, new_offset.0 + sc_start)?;
+                    new_bitmap.set(sc, SubclusterState::Allocated);
+                }
+                SubclusterState::Zero => {
+                    // Preserve zero-bit — don't copy data, don't fall to backing
+                    new_bitmap.set(sc, SubclusterState::Zero);
+                }
+                SubclusterState::Unallocated => {
+                    // Stays unallocated — falls to backing on read
+                }
+                SubclusterState::Invalid => {
+                    // Shouldn't happen; treat as unallocated
+                }
+            }
+        }
+
+        // Write the user data
+        self.backend
+            .write_all_at(buf, new_offset.0 + start)?;
+
+        // Mark written subclusters as Allocated
+        for sc in first_sc..=last_sc {
+            new_bitmap.set(sc, SubclusterState::Allocated);
+        }
+
+        // Decrement refcount of old cluster
+        self.refcount_manager.decrement_refcount(
+            old_host_offset.0,
+            self.backend,
+            self.cache,
+        )?;
+
+        Ok(L2Entry::Standard {
+            host_offset: new_offset,
+            copied: true,
+            subclusters: Some(new_bitmap),
+        })
+    }
+
+    /// Handle writing to a compressed cluster in extended L2 mode.
+    ///
+    /// Decompresses, applies write, allocates new cluster.
+    /// All subclusters become Allocated since we have the full decompressed data.
+    fn write_to_compressed_cluster_extended(
+        &mut self,
+        buf: &[u8],
+        descriptor: crate::format::compressed::CompressedClusterDescriptor,
+        intra: IntraClusterOffset,
+        cluster_size: u64,
+    ) -> Result<L2Entry> {
+        let compressed_size = descriptor.compressed_size as usize;
+        let mut compressed_buf = vec![0u8; compressed_size];
+        self.backend
+            .read_exact_at(&mut compressed_buf, descriptor.host_offset)?;
+
+        let mut decompressed = compression::decompress_cluster(
+            &compressed_buf,
+            cluster_size as usize,
+            0,
+        )?;
+
+        let start = intra.0 as usize;
+        decompressed[start..start + buf.len()].copy_from_slice(buf);
+
+        let new_offset = self.refcount_manager.allocate_cluster(
+            self.backend,
+            self.cache,
+        )?;
+        let file_size = self.backend.file_size()?;
+        self.mapper.set_file_size(file_size);
+
+        self.backend.write_all_at(&decompressed, new_offset.0)?;
+
+        Ok(L2Entry::Standard {
+            host_offset: new_offset,
+            copied: true,
+            subclusters: Some(SubclusterBitmap::all_allocated()),
         })
     }
 
@@ -401,10 +709,24 @@ impl<'a> Qcow2Writer<'a> {
         index: L2Index,
         entry: L2Entry,
     ) -> Result<()> {
-        let offset = l2_table_offset.0 + (index.0 as u64 * L2_ENTRY_SIZE as u64);
-        let mut buf = [0u8; L2_ENTRY_SIZE];
-        BigEndian::write_u64(&mut buf, entry.encode(self.cluster_bits));
-        self.backend.write_all_at(&buf, offset)?;
+        if self.mapper.extended_l2() {
+            let entry_size = L2_ENTRY_SIZE_EXTENDED as u64;
+            let offset = l2_table_offset.0 + (index.0 as u64 * entry_size);
+            let mut buf = [0u8; L2_ENTRY_SIZE_EXTENDED];
+            let encoded = entry.encode(self.cluster_bits);
+            // In extended mode, bit 0 of the first word must be 0
+            BigEndian::write_u64(&mut buf[..8], encoded & !1);
+            BigEndian::write_u64(
+                &mut buf[8..],
+                entry.subclusters().map_or(0, |b| b.0),
+            );
+            self.backend.write_all_at(&buf, offset)?;
+        } else {
+            let offset = l2_table_offset.0 + (index.0 as u64 * L2_ENTRY_SIZE as u64);
+            let mut buf = [0u8; L2_ENTRY_SIZE];
+            BigEndian::write_u64(&mut buf, entry.encode(self.cluster_bits));
+            self.backend.write_all_at(&buf, offset)?;
+        }
 
         // Evict so next read reloads the updated table
         self.cache.evict_l2_table(l2_table_offset);
@@ -420,7 +742,7 @@ impl<'a> Qcow2Writer<'a> {
         let cluster_size = 1usize << self.cluster_bits;
         let mut buf = vec![0u8; cluster_size];
         self.backend.read_exact_at(&mut buf, offset.0)?;
-        let table = L2Table::read_from(&buf, self.cluster_bits)?;
+        let table = L2Table::read_from(&buf, self.cluster_bits, self.mapper.extended_l2())?;
 
         self.cache.insert_l2_table(offset, table.clone());
         Ok(table)
@@ -440,7 +762,7 @@ impl<'a> Qcow2Writer<'a> {
     ) -> Result<()> {
         let cluster_size = 1u64 << self.cluster_bits;
         let (l1_index, l2_index, _intra) =
-            GuestOffset(guest_offset).split(self.cluster_bits);
+            GuestOffset(guest_offset).split(self.cluster_bits, self.mapper.extended_l2());
 
         // Ensure L2 table exists
         let l2_table_offset = self.ensure_l2_table(l1_index)?;
@@ -628,7 +950,7 @@ mod tests {
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
 
         let file_size = backend.file_size().unwrap();
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, file_size);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, file_size, false);
 
         let header = make_header();
         let refcount_manager = RefcountManager::load(&backend, &header).unwrap();
@@ -673,10 +995,10 @@ mod tests {
 
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
         let l2_entry = l2_table.get(L2Index(0)).unwrap();
 
-        if let L2Entry::Standard { host_offset, copied } = l2_entry {
+        if let L2Entry::Standard { host_offset, copied, .. } = l2_entry {
             assert!(copied);
             let mut read_back = vec![0u8; 512];
             s.backend
@@ -699,7 +1021,7 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
 
         if let L2Entry::Standard { host_offset, .. } = l2_table.get(L2Index(0)).unwrap() {
             let mut read_back = vec![0u8; CLUSTER_SIZE];
@@ -718,6 +1040,7 @@ mod tests {
         let l2_entry = L2Entry::Standard {
             host_offset: ClusterOffset(data_cluster),
             copied: true,
+            subclusters: None,
         };
         let mut s = setup_with_l2(Some(&[(0, l2_entry)]));
 
@@ -748,6 +1071,7 @@ mod tests {
     fn write_to_zero_cluster_allocates_new() {
         let l2_entry = L2Entry::Zero {
             preallocated_offset: None,
+            subclusters: None,
         };
         let mut s = setup_with_l2(Some(&[(0, l2_entry)]));
 
@@ -759,10 +1083,10 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
 
         match l2_table.get(L2Index(0)).unwrap() {
-            L2Entry::Standard { host_offset, copied } => {
+            L2Entry::Standard { host_offset, copied, .. } => {
                 assert!(copied);
                 let mut read_back = vec![0u8; CLUSTER_SIZE];
                 s.backend
@@ -809,6 +1133,7 @@ mod tests {
         let l2_entry = L2Entry::Standard {
             host_offset: ClusterOffset(data_offset as u64),
             copied: false,
+            subclusters: None,
         };
         BigEndian::write_u64(
             &mut data[l2_offset..],
@@ -822,7 +1147,7 @@ mod tests {
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
 
         let file_size = backend.file_size().unwrap();
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, file_size);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, file_size, false);
 
         let header = make_header();
         let refcount_manager =
@@ -893,14 +1218,14 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
 
         let host0 = match l2_table.get(L2Index(0)).unwrap() {
-            L2Entry::Standard { host_offset, copied: true } => host_offset,
+            L2Entry::Standard { host_offset, copied: true, .. } => host_offset,
             other => panic!("expected Standard+copied for cluster 0, got {other:?}"),
         };
         let host1 = match l2_table.get(L2Index(1)).unwrap() {
-            L2Entry::Standard { host_offset, copied: true } => host_offset,
+            L2Entry::Standard { host_offset, copied: true, .. } => host_offset,
             other => panic!("expected Standard+copied for cluster 1, got {other:?}"),
         };
 
@@ -936,7 +1261,7 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
 
         if let L2Entry::Standard { host_offset, .. } = l2_table.get(L2Index(0)).unwrap() {
             let mut cluster_data = vec![0u8; CLUSTER_SIZE];
@@ -1020,7 +1345,7 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
         let first_host_offset = match l2_table.get(L2Index(0)).unwrap() {
             L2Entry::Standard { host_offset, .. } => host_offset,
             other => panic!("expected Standard, got {other:?}"),
@@ -1032,7 +1357,7 @@ mod tests {
 
         // Verify same data cluster offset
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
         let second_host_offset = match l2_table.get(L2Index(0)).unwrap() {
             L2Entry::Standard { host_offset, .. } => host_offset,
             other => panic!("expected Standard, got {other:?}"),
@@ -1063,7 +1388,7 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
 
         let new_host = match l2_table.get(L2Index(0)).unwrap() {
             L2Entry::Standard { host_offset, .. } => host_offset,
@@ -1096,7 +1421,7 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
 
         match l2_table.get(L2Index(0)).unwrap() {
             L2Entry::Standard { copied: true, .. } => {}
@@ -1124,7 +1449,7 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
 
         if let L2Entry::Standard { host_offset, .. } = l2_table.get(L2Index(0)).unwrap() {
             let mut cluster_data = vec![0u8; CLUSTER_SIZE];
@@ -1145,9 +1470,9 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
         let first_host = match l2_table.get(L2Index(0)).unwrap() {
-            L2Entry::Standard { host_offset, copied } => {
+            L2Entry::Standard { host_offset, copied, .. } => {
                 assert!(copied, "should be copied after COW");
                 host_offset
             }
@@ -1158,7 +1483,7 @@ mod tests {
         make_writer(&mut s).write_at(&[0x55; 64], 100).unwrap();
 
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
         let second_host = match l2_table.get(L2Index(0)).unwrap() {
             L2Entry::Standard { host_offset, .. } => host_offset,
             other => panic!("expected Standard, got {other:?}"),
@@ -1197,7 +1522,7 @@ mod tests {
         BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
         let file_size = backend.file_size().unwrap();
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, file_size);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, file_size, false);
         let header = make_header();
         let refcount_manager = RefcountManager::load(&backend, &header).unwrap();
         let cache = MetadataCache::new(CacheConfig::default());
@@ -1259,6 +1584,7 @@ mod tests {
         let l2_entry = L2Entry::Standard {
             host_offset: ClusterOffset(data_offset as u64),
             copied: false,
+            subclusters: None,
         };
         BigEndian::write_u64(
             &mut data[l2_offset_val + 8..], // entry 1
@@ -1273,7 +1599,7 @@ mod tests {
         BigEndian::write_u64(&mut l1_buf, l1_entry.raw());
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
         let file_size = backend.file_size().unwrap();
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, file_size);
+        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, file_size, false);
         let header = make_header();
         let refcount_manager = RefcountManager::load(&backend, &header).unwrap();
         let cache = MetadataCache::new(CacheConfig::default());
@@ -1301,12 +1627,12 @@ mod tests {
         // Read the new L2 table — entry 0 should still be unallocated
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, new_l2_offset.0).unwrap();
-        let new_l2 = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let new_l2 = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
         assert!(matches!(new_l2.get(L2Index(0)).unwrap(), L2Entry::Unallocated));
 
         // Entry 1 should point to a NEW data cluster (COW'd), with copied=true
         match new_l2.get(L2Index(1)).unwrap() {
-            L2Entry::Standard { host_offset, copied } => {
+            L2Entry::Standard { host_offset, copied, .. } => {
                 assert!(copied, "COW'd entry should be copied");
                 assert_ne!(host_offset.0, data_offset as u64, "should be a new cluster");
             }
@@ -1382,10 +1708,10 @@ mod tests {
         let l2_off = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_off.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
 
         match l2_table.get(L2Index(0)).unwrap() {
-            L2Entry::Standard { host_offset, copied } => {
+            L2Entry::Standard { host_offset, copied, .. } => {
                 assert!(copied);
                 // Read back the full cluster
                 let mut readback = vec![0u8; CLUSTER_SIZE];
@@ -1423,7 +1749,7 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; CLUSTER_SIZE];
         s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, CLUSTER_BITS, false).unwrap();
 
         match l2_table.get(L2Index(0)).unwrap() {
             L2Entry::Compressed(desc) => {

@@ -33,6 +33,7 @@ fn create_image_with_data(
         CreateOptions {
             virtual_size: 2 * 1024 * 1024, // 2 MB
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();

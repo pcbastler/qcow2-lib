@@ -41,6 +41,14 @@ pub struct BitmapIndex(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct IntraClusterOffset(pub u32);
 
+/// Index of a subcluster within a cluster (0..31 in extended L2 mode).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SubclusterIndex(pub u32);
+
+/// Byte offset within a single subcluster.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct IntraSubclusterOffset(pub u32);
+
 // ---- Debug and Display implementations (hex for offsets) ----
 
 impl fmt::Debug for ClusterOffset {
@@ -127,6 +135,30 @@ impl fmt::Display for IntraClusterOffset {
     }
 }
 
+impl fmt::Debug for SubclusterIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SubclusterIndex({})", self.0)
+    }
+}
+
+impl fmt::Display for SubclusterIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Debug for IntraSubclusterOffset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "IntraSubclusterOffset(0x{:x})", self.0)
+    }
+}
+
+impl fmt::Display for IntraSubclusterOffset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:x}", self.0)
+    }
+}
+
 // ---- From/Into conversions ----
 
 impl From<u64> for ClusterOffset {
@@ -179,10 +211,13 @@ impl GuestOffset {
     ///              + intra_cluster_offset
     /// ```
     ///
-    /// Where `l2_entries = cluster_size / 8` (each L2 entry is 8 bytes).
-    pub fn split(self, cluster_bits: u32) -> (L1Index, L2Index, IntraClusterOffset) {
+    /// Where `l2_entries = cluster_size / entry_size`:
+    /// - Standard mode: entry_size = 8 bytes, so `l2_bits = cluster_bits - 3`
+    /// - Extended L2:   entry_size = 16 bytes, so `l2_bits = cluster_bits - 4`
+    pub fn split(self, cluster_bits: u32, extended_l2: bool) -> (L1Index, L2Index, IntraClusterOffset) {
         let cluster_size = 1u64 << cluster_bits;
-        let l2_bits = cluster_bits - 3; // log2(cluster_size / 8)
+        let l2_shift = if extended_l2 { 4 } else { 3 };
+        let l2_bits = cluster_bits - l2_shift;
 
         let intra = (self.0 & (cluster_size - 1)) as u32;
         let cluster_number = self.0 >> cluster_bits;
@@ -213,7 +248,7 @@ mod tests {
 
     #[test]
     fn split_offset_zero() {
-        let (l1, l2, intra) = GuestOffset(0).split(16);
+        let (l1, l2, intra) = GuestOffset(0).split(16, false);
         assert_eq!(l1, L1Index(0));
         assert_eq!(l2, L2Index(0));
         assert_eq!(intra, IntraClusterOffset(0));
@@ -223,7 +258,7 @@ mod tests {
     fn split_first_byte_of_second_cluster() {
         // cluster_bits=16 => cluster_size=65536
         // Offset 65536 = cluster 1 => L1=0, L2=1, intra=0
-        let (l1, l2, intra) = GuestOffset(65536).split(16);
+        let (l1, l2, intra) = GuestOffset(65536).split(16, false);
         assert_eq!(l1, L1Index(0));
         assert_eq!(l2, L2Index(1));
         assert_eq!(intra, IntraClusterOffset(0));
@@ -232,7 +267,7 @@ mod tests {
     #[test]
     fn split_with_intra_cluster_offset() {
         // cluster_bits=16, offset = 65536 + 512 = cluster 1, byte 512
-        let (l1, l2, intra) = GuestOffset(65536 + 512).split(16);
+        let (l1, l2, intra) = GuestOffset(65536 + 512).split(16, false);
         assert_eq!(l1, L1Index(0));
         assert_eq!(l2, L2Index(1));
         assert_eq!(intra, IntraClusterOffset(512));
@@ -243,7 +278,7 @@ mod tests {
         // cluster_bits=16 => cluster_size=65536, l2_entries=8192
         // L1 boundary at l2_entries * cluster_size = 8192 * 65536 = 0x2000_0000
         let boundary = 8192u64 * 65536;
-        let (l1, l2, intra) = GuestOffset(boundary).split(16);
+        let (l1, l2, intra) = GuestOffset(boundary).split(16, false);
         assert_eq!(l1, L1Index(1));
         assert_eq!(l2, L2Index(0));
         assert_eq!(intra, IntraClusterOffset(0));
@@ -252,7 +287,7 @@ mod tests {
     #[test]
     fn split_last_byte_before_l1_boundary() {
         let boundary = 8192u64 * 65536;
-        let (l1, l2, intra) = GuestOffset(boundary - 1).split(16);
+        let (l1, l2, intra) = GuestOffset(boundary - 1).split(16, false);
         assert_eq!(l1, L1Index(0));
         assert_eq!(l2, L2Index(8191));
         assert_eq!(intra, IntraClusterOffset(65535));
@@ -261,13 +296,13 @@ mod tests {
     #[test]
     fn split_with_different_cluster_bits() {
         // cluster_bits=12 => cluster_size=4096, l2_entries=512
-        let (l1, l2, intra) = GuestOffset(4096).split(12);
+        let (l1, l2, intra) = GuestOffset(4096).split(12, false);
         assert_eq!(l1, L1Index(0));
         assert_eq!(l2, L2Index(1));
         assert_eq!(intra, IntraClusterOffset(0));
 
         // L1 boundary at 512 * 4096 = 2097152
-        let (l1, l2, _) = GuestOffset(2097152).split(12);
+        let (l1, l2, _) = GuestOffset(2097152).split(12, false);
         assert_eq!(l1, L1Index(1));
         assert_eq!(l2, L2Index(0));
     }
@@ -322,20 +357,20 @@ mod tests {
         let l2_entries = 64u64;
 
         // Second cluster
-        let (l1, l2, intra) = GuestOffset(cluster_size).split(9);
+        let (l1, l2, intra) = GuestOffset(cluster_size).split(9, false);
         assert_eq!(l1, L1Index(0));
         assert_eq!(l2, L2Index(1));
         assert_eq!(intra, IntraClusterOffset(0));
 
         // L1 boundary at l2_entries * cluster_size = 64 * 512 = 32768
         let boundary = l2_entries * cluster_size;
-        let (l1, l2, intra) = GuestOffset(boundary).split(9);
+        let (l1, l2, intra) = GuestOffset(boundary).split(9, false);
         assert_eq!(l1, L1Index(1));
         assert_eq!(l2, L2Index(0));
         assert_eq!(intra, IntraClusterOffset(0));
 
         // Last byte before L1 boundary
-        let (l1, l2, intra) = GuestOffset(boundary - 1).split(9);
+        let (l1, l2, intra) = GuestOffset(boundary - 1).split(9, false);
         assert_eq!(l1, L1Index(0));
         assert_eq!(l2, L2Index(63));
         assert_eq!(intra, IntraClusterOffset(511));
@@ -348,14 +383,14 @@ mod tests {
         let l2_entries = 1u64 << 18; // 262144
 
         // Second cluster
-        let (l1, l2, intra) = GuestOffset(cluster_size).split(21);
+        let (l1, l2, intra) = GuestOffset(cluster_size).split(21, false);
         assert_eq!(l1, L1Index(0));
         assert_eq!(l2, L2Index(1));
         assert_eq!(intra, IntraClusterOffset(0));
 
         // L1 boundary
         let boundary = l2_entries * cluster_size;
-        let (l1, l2, _) = GuestOffset(boundary).split(21);
+        let (l1, l2, _) = GuestOffset(boundary).split(21, false);
         assert_eq!(l1, L1Index(1));
         assert_eq!(l2, L2Index(0));
     }
@@ -363,7 +398,7 @@ mod tests {
     #[test]
     fn split_u64_max_offset() {
         // Should not panic — the offset is absurd but split() does pure arithmetic
-        let (l1, l2, intra) = GuestOffset(u64::MAX).split(16);
+        let (l1, l2, intra) = GuestOffset(u64::MAX).split(16, false);
         // u64::MAX = 0xFFFF_FFFF_FFFF_FFFF
         // intra = 0xFFFF (65535), cluster_number = 0xFFFF_FFFF_FFFF
         // l2_index = cluster_number & 0x1FFF = 0x1FFF (8191)
@@ -377,12 +412,12 @@ mod tests {
     fn intra_cluster_offset_at_maximum() {
         // Last byte of a 64KB cluster
         let offset = (1u64 << 16) - 1; // 65535
-        let (_, _, intra) = GuestOffset(offset).split(16);
+        let (_, _, intra) = GuestOffset(offset).split(16, false);
         assert_eq!(intra, IntraClusterOffset(65535));
 
         // Last byte of a 2MB cluster
         let offset = (1u64 << 21) - 1;
-        let (_, _, intra) = GuestOffset(offset).split(21);
+        let (_, _, intra) = GuestOffset(offset).split(21, false);
         assert_eq!(intra, IntraClusterOffset((1u32 << 21) - 1));
     }
 

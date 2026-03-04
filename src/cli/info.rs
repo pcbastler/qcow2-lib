@@ -31,6 +31,10 @@ pub fn run(path: &Path) -> Result<()> {
         header.refcount_table_offset.0,
         header.refcount_table_clusters,
     );
+    if header.has_extended_l2() {
+        println!("  Extended L2:      yes (subcluster size: {} bytes)",
+            header.subcluster_size().unwrap_or(0));
+    }
     println!("  Snapshots:        {}", header.snapshot_count);
     println!("  Encryption:       {}",
         match header.crypt_method {

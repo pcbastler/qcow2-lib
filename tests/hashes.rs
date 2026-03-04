@@ -9,6 +9,7 @@ fn create_test_image(virtual_size: u64) -> Qcow2Image {
         CreateOptions {
             virtual_size,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap()
@@ -20,6 +21,7 @@ fn create_test_image_with_cluster_bits(virtual_size: u64, cluster_bits: u32) -> 
         CreateOptions {
             virtual_size,
             cluster_bits: Some(cluster_bits),
+            extended_l2: false,
         },
     )
     .unwrap()

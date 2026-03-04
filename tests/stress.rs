@@ -60,6 +60,7 @@ fn snapshot_chain_8_deep_with_cow_writes() {
         CreateOptions {
             virtual_size,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -141,6 +142,7 @@ fn snapshot_tree_branch_apply_diverge() {
         CreateOptions {
             virtual_size: 8 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -231,6 +233,7 @@ fn heavy_scattered_writes_with_pattern_verification() {
         CreateOptions {
             virtual_size,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -306,6 +309,7 @@ fn bitmask_pattern_verification() {
         CreateOptions {
             virtual_size: 16 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -431,6 +435,7 @@ fn chaos_cycle_write_snapshot_delete() {
         CreateOptions {
             virtual_size,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -501,6 +506,7 @@ fn snapshot_apply_back_and_forward() {
         CreateOptions {
             virtual_size: 8 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -604,6 +610,7 @@ fn large_sequential_write_cross_validation() {
         CreateOptions {
             virtual_size,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -660,6 +667,7 @@ fn delete_all_snapshots_then_check() {
         CreateOptions {
             virtual_size: 8 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -719,6 +727,7 @@ fn compact_after_fragmentation() {
         CreateOptions {
             virtual_size: 32 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();
@@ -786,6 +795,7 @@ fn partial_cluster_writes_interleaved() {
         CreateOptions {
             virtual_size: 4 * 1024 * 1024,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();

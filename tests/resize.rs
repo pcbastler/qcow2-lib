@@ -64,6 +64,7 @@ fn create_image_with_data(
         CreateOptions {
             virtual_size,
             cluster_bits: None,
+            extended_l2: false,
         },
     )
     .unwrap();

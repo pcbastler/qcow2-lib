@@ -121,6 +121,15 @@ pub const COMPRESSED_SECTOR_SIZE: u64 = 512;
 /// Size of each L2 entry in bytes (standard, non-extended).
 pub const L2_ENTRY_SIZE: usize = 8;
 
+/// Size of each L2 entry in bytes for extended L2 mode (128 bits).
+pub const L2_ENTRY_SIZE_EXTENDED: usize = 16;
+
+/// Number of subclusters per cluster (always 32 in extended L2 mode).
+pub const SUBCLUSTERS_PER_CLUSTER: u32 = 32;
+
+/// Minimum cluster_bits for extended L2 images (2^14 = 16 KB clusters).
+pub const MIN_CLUSTER_BITS_EXTENDED_L2: u32 = 14;
+
 /// Size of each L1 entry in bytes.
 pub const L1_ENTRY_SIZE: usize = 8;
 

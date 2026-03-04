@@ -154,7 +154,7 @@ impl Qcow2Image {
         let l1_table = L1Table::read_from(&l1_buf, header.l1_table_entries)?;
 
         // Build cluster mapper
-        let mapper = ClusterMapper::new(l1_table, header.cluster_bits, file_size);
+        let mapper = ClusterMapper::new(l1_table, header.cluster_bits, file_size, header.has_extended_l2());
 
         // Resolve backing chain and open backing image
         let mut warnings = Vec::new();
@@ -576,9 +576,19 @@ impl Qcow2Image {
         let cluster_bits = options.cluster_bits.unwrap_or(16);
         let cluster_size = 1u64 << cluster_bits;
         let refcount_order = 4u32; // 16-bit refcounts
+        let extended_l2 = options.extended_l2;
+
+        // Validate extended L2 requirements
+        if extended_l2 && cluster_bits < crate::format::constants::MIN_CLUSTER_BITS_EXTENDED_L2 {
+            return Err(Error::ExtendedL2ClusterBitsTooSmall {
+                cluster_bits,
+                min: crate::format::constants::MIN_CLUSTER_BITS_EXTENDED_L2,
+            });
+        }
 
         // Calculate L1 table size
-        let l2_entries = cluster_size / 8; // 8 bytes per L2 entry
+        let l2_entry_size = if extended_l2 { 16u64 } else { 8u64 };
+        let l2_entries = cluster_size / l2_entry_size;
         let bytes_per_l1_entry = l2_entries * cluster_size;
         let l1_entries =
             ((options.virtual_size + bytes_per_l1_entry - 1) / bytes_per_l1_entry) as u32;
@@ -603,7 +613,11 @@ impl Qcow2Image {
             refcount_table_clusters: 1,
             snapshot_count: 0,
             snapshots_offset: ClusterOffset(0),
-            incompatible_features: IncompatibleFeatures::empty(),
+            incompatible_features: if extended_l2 {
+                IncompatibleFeatures::EXTENDED_L2
+            } else {
+                IncompatibleFeatures::empty()
+            },
             compatible_features: crate::format::feature_flags::CompatibleFeatures::empty(),
             autoclear_features: crate::format::feature_flags::AutoclearFeatures::empty(),
             refcount_order,
@@ -641,7 +655,7 @@ impl Qcow2Image {
         // Build in-memory structures
         let l1_table = L1Table::new_empty(l1_entries);
         let file_size = backend.file_size()?;
-        let mapper = ClusterMapper::new(l1_table, cluster_bits, file_size);
+        let mapper = ClusterMapper::new(l1_table, cluster_bits, file_size, extended_l2);
         let refcount_manager = RefcountManager::load(backend.as_ref(), &header)?;
 
         Ok(Self {
@@ -791,7 +805,7 @@ impl Qcow2Image {
         // Build in-memory structures
         let l1_table = L1Table::new_empty(l1_entries);
         let file_size = backend.file_size()?;
-        let mapper = ClusterMapper::new(l1_table, cluster_bits, file_size);
+        let mapper = ClusterMapper::new(l1_table, cluster_bits, file_size, false);
         let refcount_manager = RefcountManager::load(backend.as_ref(), &header)?;
 
         // Open the backing image for read-through
@@ -861,7 +875,7 @@ impl Qcow2Image {
             let l2_table = {
                 let mut buf = vec![0u8; cluster_size as usize];
                 self.backend.read_exact_at(&mut buf, l2_offset.0)?;
-                crate::format::l2::L2Table::read_from(&buf, cluster_bits)?
+                crate::format::l2::L2Table::read_from(&buf, cluster_bits, self.header.has_extended_l2())?
             };
 
             for l2_idx in 0..l2_entries_per_table {
@@ -1788,7 +1802,7 @@ impl Qcow2Image {
             let mut l2_buf = vec![0u8; cluster_size as usize];
             self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
             let l2_table =
-                crate::format::l2::L2Table::read_from(&l2_buf, self.header.cluster_bits)?;
+                crate::format::l2::L2Table::read_from(&l2_buf, self.header.cluster_bits, self.header.has_extended_l2())?;
 
             // Check entries that correspond to guest offsets >= new_virtual_size
             let l1_guest_base = l1_idx as u64 * entries_per_l2 * cluster_size;
@@ -1804,7 +1818,7 @@ impl Qcow2Image {
                 match entry {
                     crate::format::l2::L2Entry::Unallocated
                     | crate::format::l2::L2Entry::Zero {
-                        preallocated_offset: None,
+                        preallocated_offset: None, ..
                     } => {}
                     _ => {
                         has_data_beyond = true;
@@ -2036,6 +2050,9 @@ pub struct CreateOptions {
     pub virtual_size: u64,
     /// Log2 of cluster size (default: 16 = 64 KB).
     pub cluster_bits: Option<u32>,
+    /// Enable extended L2 entries (subclusters). Default: false.
+    /// Requires cluster_bits >= 14.
+    pub extended_l2: bool,
 }
 
 #[cfg(test)]
@@ -2550,6 +2567,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 30, // 1 GB
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -2569,6 +2587,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: Some(12), // 4 KB clusters
+                extended_l2: false,
             },
         )
         .unwrap();
@@ -2585,6 +2604,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 512,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -2601,6 +2621,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 30,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -2625,6 +2646,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -2645,6 +2667,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -2664,6 +2687,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -2698,6 +2722,7 @@ mod tests {
             CreateOptions {
                 virtual_size,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -2719,6 +2744,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -2745,6 +2771,7 @@ mod tests {
                 CreateOptions {
                     virtual_size: 1 << 20,
                     cluster_bits: None,
+            extended_l2: false,
                 },
             )
             .unwrap();
@@ -2774,6 +2801,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
+            extended_l2: false,
             },
         );
         assert!(result.is_err());
@@ -2789,6 +2817,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -3039,6 +3068,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -3056,6 +3086,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 4 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
@@ -3078,6 +3109,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 4 * 1024 * 1024,
                 cluster_bits: None,
+            extended_l2: false,
             },
         )
         .unwrap();
