@@ -178,6 +178,13 @@ impl BitmapDirectoryEntry {
         let mut pos = 0;
 
         for _ in 0..nb_bitmaps {
+            if pos >= bytes.len() {
+                return Err(Error::BitmapDirectoryTruncated {
+                    offset: pos,
+                    expected: BITMAP_DIR_ENTRY_FIXED_SIZE,
+                    actual: 0,
+                });
+            }
             let remaining = &bytes[pos..];
             let (entry, consumed) = Self::read_from(remaining, pos)?;
             entries.push(entry);

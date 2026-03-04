@@ -72,7 +72,10 @@ impl IoBackend for MemoryBackend {
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
         let data = self.data.read().unwrap();
         let start = offset as usize;
-        let end = start + buf.len();
+        let end = match start.checked_add(buf.len()) {
+            Some(e) => e,
+            None => data.len() + 1, // force EOF error below
+        };
         if end > data.len() {
             return Err(crate::error::Error::Io {
                 source: std::io::Error::new(
@@ -95,7 +98,16 @@ impl IoBackend for MemoryBackend {
     fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<()> {
         let mut data = self.data.write().unwrap();
         let start = offset as usize;
-        let end = start + buf.len();
+        let end = start.checked_add(buf.len()).ok_or_else(|| {
+            crate::error::Error::Io {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "write offset + length overflows usize",
+                ),
+                offset,
+                context: "MemoryBackend::write_all_at",
+            }
+        })?;
         if end > data.len() {
             data.resize(end, 0);
         }
