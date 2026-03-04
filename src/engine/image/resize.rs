@@ -83,18 +83,14 @@ impl Qcow2Image {
             self.backend
                 .read_exact_at(&mut old_l1_data, self.header.l1_table_offset.0)?;
 
-            // Allocate new clusters
-            let mut new_l1_offset = None;
-            for i in 0..new_l1_clusters {
-                let cluster =
-                    refcount_manager.allocate_cluster(self.backend.as_ref(), &mut self.cache)?;
-                let file_size = self.backend.file_size()?;
-                self.mapper.set_file_size(file_size);
-                if i == 0 {
-                    new_l1_offset = Some(cluster);
-                }
-            }
-            let new_l1_offset = new_l1_offset.expect("at least one cluster allocated");
+            // Allocate contiguous clusters for the new L1 table
+            let new_l1_offset = refcount_manager.allocate_contiguous_clusters(
+                new_l1_clusters as u64,
+                self.backend.as_ref(),
+                &mut self.cache,
+            )?;
+            let file_size = self.backend.file_size()?;
+            self.mapper.set_file_size(file_size);
 
             // Write old data to new location, zero-padded
             let mut new_l1_data = vec![0u8; new_l1_clusters * cluster_size_usize];

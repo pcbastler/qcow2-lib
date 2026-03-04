@@ -171,13 +171,11 @@ impl<'a> HashManager<'a> {
         let table_byte_size = hash_table_entries as u64 * HASH_TABLE_ENTRY_SIZE as u64;
         let table_clusters = ((table_byte_size + cluster_size - 1) / cluster_size).max(1);
 
-        let first_offset = self
-            .refcount_manager
-            .allocate_cluster(self.backend, self.cache)?;
-        for _ in 1..table_clusters {
-            self.refcount_manager
-                .allocate_cluster(self.backend, self.cache)?;
-        }
+        let first_offset = self.refcount_manager.allocate_contiguous_clusters(
+            table_clusters,
+            self.backend,
+            self.cache,
+        )?;
 
         // Write zeros (table is already zeroed by allocator, but be explicit)
         let table_data = vec![0u8; (table_clusters * cluster_size) as usize];
