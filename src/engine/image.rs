@@ -26,7 +26,7 @@ use crate::format::feature_flags::{AutoclearFeatures, IncompatibleFeatures};
 use crate::format::header::Header;
 use crate::format::header_extension::HeaderExtension;
 use crate::format::l1::L1Table;
-use crate::format::types::ClusterOffset;
+use crate::format::types::{ClusterGeometry, ClusterOffset};
 use crate::io::sync_backend::SyncFileBackend;
 use crate::io::IoBackend;
 
@@ -154,7 +154,7 @@ impl Qcow2Image {
         let l1_table = L1Table::read_from(&l1_buf, header.l1_table_entries)?;
 
         // Build cluster mapper
-        let mapper = ClusterMapper::new(l1_table, header.cluster_bits, file_size, header.has_extended_l2());
+        let mapper = ClusterMapper::new(l1_table, header.geometry(), file_size);
 
         // Resolve backing chain and open backing image
         let mut warnings = Vec::new();
@@ -655,7 +655,7 @@ impl Qcow2Image {
         // Build in-memory structures
         let l1_table = L1Table::new_empty(l1_entries);
         let file_size = backend.file_size()?;
-        let mapper = ClusterMapper::new(l1_table, cluster_bits, file_size, extended_l2);
+        let mapper = ClusterMapper::new(l1_table, ClusterGeometry { cluster_bits, extended_l2 }, file_size);
         let refcount_manager = RefcountManager::load(backend.as_ref(), &header)?;
 
         Ok(Self {
@@ -805,7 +805,7 @@ impl Qcow2Image {
         // Build in-memory structures
         let l1_table = L1Table::new_empty(l1_entries);
         let file_size = backend.file_size()?;
-        let mapper = ClusterMapper::new(l1_table, cluster_bits, file_size, false);
+        let mapper = ClusterMapper::new(l1_table, ClusterGeometry { cluster_bits, extended_l2: false }, file_size);
         let refcount_manager = RefcountManager::load(backend.as_ref(), &header)?;
 
         // Open the backing image for read-through
@@ -856,7 +856,6 @@ impl Qcow2Image {
         }
 
         let cluster_size = self.header.cluster_size();
-        let cluster_bits = self.header.cluster_bits;
         let l1_len = self.mapper.l1_table().len();
         let l2_entries_per_table = self.header.l2_entries_per_table();
 
@@ -875,7 +874,7 @@ impl Qcow2Image {
             let l2_table = {
                 let mut buf = vec![0u8; cluster_size as usize];
                 self.backend.read_exact_at(&mut buf, l2_offset.0)?;
-                crate::format::l2::L2Table::read_from(&buf, cluster_bits, self.header.has_extended_l2())?
+                crate::format::l2::L2Table::read_from(&buf, self.header.geometry())?
             };
 
             for l2_idx in 0..l2_entries_per_table {
@@ -1802,7 +1801,7 @@ impl Qcow2Image {
             let mut l2_buf = vec![0u8; cluster_size as usize];
             self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
             let l2_table =
-                crate::format::l2::L2Table::read_from(&l2_buf, self.header.cluster_bits, self.header.has_extended_l2())?;
+                crate::format::l2::L2Table::read_from(&l2_buf, self.header.geometry())?;
 
             // Check entries that correspond to guest offsets >= new_virtual_size
             let l1_guest_base = l1_idx as u64 * entries_per_l2 * cluster_size;

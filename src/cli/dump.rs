@@ -78,9 +78,8 @@ fn dump_l2(image: &Qcow2Image) -> Result<()> {
     let mut l2_buf = vec![0u8; cluster_size];
     backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
 
-    let extended_l2 = header.has_extended_l2();
-    let l2_table = qcow2_lib::format::l2::L2Table::read_from(&l2_buf, header.cluster_bits, extended_l2)?;
-    let entries_per_table = cluster_size / header.l2_entry_size();
+    let l2_table = qcow2_lib::format::l2::L2Table::read_from(&l2_buf, header.geometry())?;
+    let entries_per_table = header.geometry().l2_entries_per_table() as usize;
 
     println!("L2 Table (L1[0] -> offset 0x{:x}, {} entries):",
         l2_offset.0, entries_per_table);
@@ -96,12 +95,12 @@ fn dump_l2(image: &Qcow2Image) -> Result<()> {
                 let detail = preallocated_offset
                     .map(|o| format!("prealloc: 0x{:x}", o.0))
                     .unwrap_or_else(|| "-".to_string());
-                let sc = subclusters.map(|b| format!(" sc=0x{:016x}", b.0)).unwrap_or_default();
+                let sc = if !subclusters.is_all_zero() { format!(" sc=0x{:016x}", subclusters.0) } else { String::new() };
                 println!("{:>6}  {:>18}  {}{}", i, "zero", detail, sc);
             }
             L2Entry::Standard { host_offset, copied, subclusters } => {
                 let flag = if copied { " (copied)" } else { "" };
-                let sc = subclusters.map(|b| format!(" sc=0x{:016x}", b.0)).unwrap_or_default();
+                let sc = if !subclusters.is_all_allocated() { format!(" sc=0x{:016x}", subclusters.0) } else { String::new() };
                 println!("{:>6}  {:>18}  0x{:x}{}{}", i, "standard", host_offset.0, flag, sc);
             }
             L2Entry::Compressed(desc) => {

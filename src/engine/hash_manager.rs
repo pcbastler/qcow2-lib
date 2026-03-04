@@ -539,7 +539,7 @@ impl<'a> HashManager<'a> {
                         host_offset.0 + intra_cluster_offset.0 as u64,
                     )?;
                 }
-                ClusterResolution::Zero => {
+                ClusterResolution::Zero { .. } => {
                     has_data = true;
                     // data is already zeroed
                 }
@@ -565,12 +565,6 @@ impl<'a> HashManager<'a> {
                     let intra = intra_cluster_offset.0 as usize;
                     data[pos as usize..pos as usize + len]
                         .copy_from_slice(&decompressed[intra..intra + len]);
-                }
-                ClusterResolution::ZeroSubclustered { .. } => {
-                    has_data = true;
-                    // data is already zeroed; subcluster-level backing reads
-                    // are not needed for hash computation (we treat any
-                    // zero-subclustered entry as "has data").
                 }
                 ClusterResolution::Unallocated => {
                     // data stays zeroed

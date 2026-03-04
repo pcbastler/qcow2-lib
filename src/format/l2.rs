@@ -16,7 +16,7 @@ use byteorder::{BigEndian, ByteOrder};
 use crate::error::{Error, Result};
 use crate::format::compressed::CompressedClusterDescriptor;
 use crate::format::constants::*;
-use crate::format::types::{ClusterOffset, L2Index};
+use crate::format::types::{ClusterGeometry, ClusterOffset, L2Index};
 
 // ---------------------------------------------------------------------------
 // Subcluster types (Extended L2)
@@ -56,6 +56,16 @@ impl SubclusterBitmap {
     /// A bitmap where all 32 subclusters are allocated (alloc=1, zero=0).
     pub fn all_allocated() -> Self {
         Self(0xFFFF_FFFF)
+    }
+
+    /// A bitmap where all 32 subclusters are zero (alloc=0, zero=1).
+    pub fn all_zero() -> Self {
+        Self(0xFFFF_FFFF_0000_0000)
+    }
+
+    /// Whether all subclusters are zero (alloc=0, zero=1).
+    pub fn is_all_zero(&self) -> bool {
+        self.allocation_mask() == 0 && self.zero_mask() == 0xFFFF_FFFF
     }
 
     /// Get the state of a single subcluster (index 0..31).
@@ -153,8 +163,8 @@ pub enum L2Entry {
     Zero {
         /// If set, a host cluster is preallocated at this offset.
         preallocated_offset: Option<ClusterOffset>,
-        /// Subcluster bitmap (extended L2 only; `None` in standard mode).
-        subclusters: Option<SubclusterBitmap>,
+        /// Subcluster bitmap. In standard mode: `all_zero()`.
+        subclusters: SubclusterBitmap,
     },
 
     /// Standard allocated cluster stored at a specific host offset.
@@ -163,8 +173,8 @@ pub enum L2Entry {
         host_offset: ClusterOffset,
         /// Whether the COPIED flag (bit 63) is set, indicating refcount is 1.
         copied: bool,
-        /// Subcluster bitmap (extended L2 only; `None` in standard mode).
-        subclusters: Option<SubclusterBitmap>,
+        /// Subcluster bitmap. In standard mode: `all_allocated()`.
+        subclusters: SubclusterBitmap,
     },
 
     /// Compressed cluster (bit 62 set in the raw entry).
@@ -206,13 +216,13 @@ impl L2Entry {
                 Self::Standard {
                     host_offset: ClusterOffset(offset),
                     copied: is_copied,
-                    subclusters: Some(bitmap),
+                    subclusters: bitmap,
                 }
             } else if bitmap.zero_mask() != 0 {
                 // No host offset but some subclusters are zero
                 Self::Zero {
                     preallocated_offset: None,
-                    subclusters: Some(bitmap),
+                    subclusters: bitmap,
                 }
             } else if bitmap.allocation_mask() != 0 {
                 // No host offset but some allocation bits set — treat as standard
@@ -220,7 +230,7 @@ impl L2Entry {
                 Self::Standard {
                     host_offset: ClusterOffset(0),
                     copied: is_copied,
-                    subclusters: Some(bitmap),
+                    subclusters: bitmap,
                 }
             } else {
                 Self::Unallocated
@@ -236,30 +246,33 @@ impl L2Entry {
                     } else {
                         None
                     },
-                    subclusters: None,
+                    subclusters: SubclusterBitmap::all_zero(),
                 },
                 (false, false) => Self::Standard {
                     host_offset: ClusterOffset(offset),
                     copied: is_copied,
-                    subclusters: None,
+                    subclusters: SubclusterBitmap::all_allocated(),
                 },
             }
         }
     }
 
-    /// Encode back to a raw 64-bit L2 entry value (first word only).
+    /// Encode the first 64-bit word of an L2 entry.
     ///
+    /// In standard mode, bit 0 (L2_ZERO_FLAG) is set for Zero entries.
     /// In extended L2 mode, bit 0 is always 0 (zero status is in the bitmap).
-    pub fn encode(self, cluster_bits: u32) -> u64 {
+    pub fn encode(self, geo: ClusterGeometry) -> u64 {
         match self {
             Self::Unallocated => 0,
             Self::Zero {
                 preallocated_offset, ..
             } => {
                 let offset = preallocated_offset.map_or(0, |o| o.0 & L2_STANDARD_OFFSET_MASK);
-                // In extended mode the zero flag is not used (bit 0 = 0),
-                // but for standard mode we still set it.
-                offset | L2_ZERO_FLAG
+                if geo.extended_l2 {
+                    offset // bit 0 stays 0 — zero status is in bitmap
+                } else {
+                    offset | L2_ZERO_FLAG
+                }
             }
             Self::Standard {
                 host_offset,
@@ -271,46 +284,24 @@ impl L2Entry {
                 }
                 raw
             }
-            Self::Compressed(desc) => L2_COMPRESSED_FLAG | desc.encode(cluster_bits),
+            Self::Compressed(desc) => L2_COMPRESSED_FLAG | desc.encode(geo.cluster_bits),
         }
     }
 
-    /// Encode the first 64-bit word for extended L2 mode (bit 0 always 0).
-    pub fn encode_extended_word(self, cluster_bits: u32) -> u64 {
-        match self {
-            Self::Unallocated => 0,
-            Self::Zero {
-                preallocated_offset, ..
-            } => {
-                // In extended mode bit 0 is NOT set — zero status is in bitmap only
-                preallocated_offset.map_or(0, |o| o.0 & L2_STANDARD_OFFSET_MASK)
-            }
-            Self::Standard {
-                host_offset,
-                copied, ..
-            } => {
-                let mut raw = host_offset.0 & L2_STANDARD_OFFSET_MASK;
-                if copied {
-                    raw |= L2_COPIED_FLAG;
-                }
-                raw
-            }
-            Self::Compressed(desc) => L2_COMPRESSED_FLAG | desc.encode(cluster_bits),
-        }
-    }
-
-    /// Get the subcluster bitmap, if present.
-    pub fn subclusters(&self) -> Option<SubclusterBitmap> {
+    /// Get the subcluster bitmap.
+    ///
+    /// Returns `all_unallocated()` for `Unallocated` and `Compressed` entries.
+    pub fn subclusters(&self) -> SubclusterBitmap {
         match self {
             Self::Standard { subclusters, .. } | Self::Zero { subclusters, .. } => *subclusters,
-            Self::Unallocated | Self::Compressed(_) => None,
+            Self::Unallocated | Self::Compressed(_) => SubclusterBitmap::all_unallocated(),
         }
     }
 
     /// Encode the subcluster bitmap as a raw u64 (second word of extended L2).
-    /// Returns 0 for standard-mode entries and compressed entries.
+    /// Returns 0 for unallocated and compressed entries.
     pub fn encode_bitmap(&self) -> u64 {
-        self.subclusters().map_or(0, |b| b.0)
+        self.subclusters().0
     }
 }
 
@@ -322,23 +313,21 @@ impl L2Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct L2Table {
     entries: Vec<L2Entry>,
-    cluster_bits: u32,
-    extended_l2: bool,
+    geometry: ClusterGeometry,
 }
 
 impl L2Table {
     /// The size of each L2 entry in bytes for this table.
     pub fn entry_size(&self) -> usize {
-        if self.extended_l2 { L2_ENTRY_SIZE_EXTENDED } else { L2_ENTRY_SIZE }
+        self.geometry.l2_entry_size()
     }
 
     /// Parse an L2 table from raw bytes.
     ///
-    /// The byte slice should be exactly one cluster in size
-    /// (`1 << cluster_bits` bytes).
-    pub fn read_from(bytes: &[u8], cluster_bits: u32, extended_l2: bool) -> Result<Self> {
-        let cluster_size = 1usize << cluster_bits;
-        let entry_size = if extended_l2 { L2_ENTRY_SIZE_EXTENDED } else { L2_ENTRY_SIZE };
+    /// The byte slice should be exactly one cluster in size.
+    pub fn read_from(bytes: &[u8], geometry: ClusterGeometry) -> Result<Self> {
+        let cluster_size = geometry.cluster_size() as usize;
+        let entry_size = geometry.l2_entry_size();
         let entry_count = cluster_size / entry_size;
 
         if bytes.len() < cluster_size {
@@ -351,19 +340,18 @@ impl L2Table {
         let entries = (0..entry_count)
             .map(|i| {
                 let raw = BigEndian::read_u64(&bytes[i * entry_size..]);
-                let bitmap_raw = if extended_l2 {
+                let bitmap_raw = if geometry.extended_l2 {
                     BigEndian::read_u64(&bytes[i * entry_size + 8..])
                 } else {
                     0
                 };
-                L2Entry::decode_extended(raw, bitmap_raw, cluster_bits, extended_l2)
+                L2Entry::decode_extended(raw, bitmap_raw, geometry.cluster_bits, geometry.extended_l2)
             })
             .collect();
 
         Ok(Self {
             entries,
-            cluster_bits,
-            extended_l2,
+            geometry,
         })
     }
 
@@ -380,14 +368,9 @@ impl L2Table {
 
         for (i, entry) in self.entries.iter().enumerate() {
             let offset = i * entry_size;
-            if self.extended_l2 {
-                BigEndian::write_u64(
-                    &mut buf[offset..],
-                    entry.encode_extended_word(self.cluster_bits),
-                );
+            BigEndian::write_u64(&mut buf[offset..], entry.encode(self.geometry));
+            if self.geometry.extended_l2 {
                 BigEndian::write_u64(&mut buf[offset + 8..], entry.encode_bitmap());
-            } else {
-                BigEndian::write_u64(&mut buf[offset..], entry.encode(self.cluster_bits));
             }
         }
 
@@ -430,24 +413,27 @@ impl L2Table {
     }
 
     /// Create a new L2 table with all entries unallocated.
-    pub fn new_empty(cluster_bits: u32, extended_l2: bool) -> Self {
-        let entry_size = if extended_l2 { L2_ENTRY_SIZE_EXTENDED } else { L2_ENTRY_SIZE };
-        let entry_count = (1usize << cluster_bits) / entry_size;
+    pub fn new_empty(geometry: ClusterGeometry) -> Self {
+        let entry_count = geometry.l2_entries_per_table() as usize;
         Self {
             entries: vec![L2Entry::Unallocated; entry_count],
-            cluster_bits,
-            extended_l2,
+            geometry,
         }
+    }
+
+    /// The cluster geometry used by this table.
+    pub fn geometry(&self) -> ClusterGeometry {
+        self.geometry
     }
 
     /// The cluster_bits used by this table.
     pub fn cluster_bits(&self) -> u32 {
-        self.cluster_bits
+        self.geometry.cluster_bits
     }
 
     /// Whether this table uses extended L2 entries.
     pub fn extended_l2(&self) -> bool {
-        self.extended_l2
+        self.geometry.extended_l2
     }
 
     /// Iterate over all entries in the table.
@@ -461,6 +447,7 @@ mod tests {
     use super::*;
 
     const CLUSTER_BITS: u32 = 16; // 64 KB clusters
+    const GEO_STD: ClusterGeometry = ClusterGeometry { cluster_bits: CLUSTER_BITS, extended_l2: false };
 
     #[test]
     fn decode_unallocated() {
@@ -476,7 +463,7 @@ mod tests {
             entry,
             L2Entry::Zero {
                 preallocated_offset: None,
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_zero(),
             }
         );
     }
@@ -489,7 +476,7 @@ mod tests {
             entry,
             L2Entry::Zero {
                 preallocated_offset: Some(ClusterOffset(0x10000)),
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_zero(),
             }
         );
     }
@@ -503,7 +490,7 @@ mod tests {
             L2Entry::Standard {
                 host_offset: ClusterOffset(0x20000),
                 copied: false,
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_allocated(),
             }
         );
     }
@@ -517,7 +504,7 @@ mod tests {
             L2Entry::Standard {
                 host_offset: ClusterOffset(0x20000),
                 copied: true,
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_allocated(),
             }
         );
     }
@@ -540,21 +527,21 @@ mod tests {
             L2Entry::Unallocated,
             L2Entry::Zero {
                 preallocated_offset: None,
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_zero(),
             },
             L2Entry::Zero {
                 preallocated_offset: Some(ClusterOffset(0x30000)),
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_zero(),
             },
             L2Entry::Standard {
                 host_offset: ClusterOffset(0x40000),
                 copied: false,
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_allocated(),
             },
             L2Entry::Standard {
                 host_offset: ClusterOffset(0x50000),
                 copied: true,
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_allocated(),
             },
             L2Entry::Compressed(CompressedClusterDescriptor {
                 host_offset: 0x6000,
@@ -563,8 +550,8 @@ mod tests {
         ];
 
         for original in &variants {
-            let encoded = original.encode(CLUSTER_BITS);
-            let decoded = L2Entry::decode(encoded, CLUSTER_BITS);
+            let encoded = original.encode(GEO_STD);
+            let decoded = L2Entry::decode(encoded, GEO_STD.cluster_bits);
             assert_eq!(*original, decoded, "round-trip failed for {original:?}");
         }
     }
@@ -579,11 +566,11 @@ mod tests {
         entries[0] = L2Entry::Standard {
             host_offset: ClusterOffset(0x10000),
             copied: true,
-            subclusters: None,
+            subclusters: SubclusterBitmap::all_allocated(),
         };
         entries[1] = L2Entry::Zero {
             preallocated_offset: None,
-            subclusters: None,
+            subclusters: SubclusterBitmap::all_zero(),
         };
         entries[2] = L2Entry::Compressed(CompressedClusterDescriptor {
             host_offset: 0x2000,
@@ -592,14 +579,13 @@ mod tests {
 
         let table = L2Table {
             entries,
-            cluster_bits: CLUSTER_BITS,
-            extended_l2: false,
+            geometry: GEO_STD,
         };
 
         let mut buf = vec![0u8; cluster_size];
         table.write_to(&mut buf).unwrap();
 
-        let parsed = L2Table::read_from(&buf, CLUSTER_BITS, false).unwrap();
+        let parsed = L2Table::read_from(&buf, GEO_STD).unwrap();
         assert_eq!(table, parsed);
     }
 
@@ -607,7 +593,7 @@ mod tests {
     fn l2_table_get_out_of_bounds() {
         let cluster_size = 1usize << CLUSTER_BITS;
         let buf = vec![0u8; cluster_size];
-        let table = L2Table::read_from(&buf, CLUSTER_BITS, false).unwrap();
+        let table = L2Table::read_from(&buf, GEO_STD).unwrap();
 
         let bad_index = table.len();
         match table.get(L2Index(bad_index)) {
@@ -627,7 +613,7 @@ mod tests {
             entry,
             L2Entry::Zero {
                 preallocated_offset: Some(ClusterOffset(max_offset)),
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_zero(),
             }
         );
     }
@@ -642,7 +628,7 @@ mod tests {
             L2Entry::Standard {
                 host_offset: ClusterOffset(max_offset),
                 copied: true,
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_allocated(),
             }
         );
     }
@@ -657,22 +643,21 @@ mod tests {
         entries[0] = L2Entry::Standard {
             host_offset: ClusterOffset(0x200), // cluster-aligned for 512
             copied: true,
-            subclusters: None,
+            subclusters: SubclusterBitmap::all_allocated(),
         };
         entries[1] = L2Entry::Zero {
             preallocated_offset: None,
-            subclusters: None,
+            subclusters: SubclusterBitmap::all_zero(),
         };
 
         let table = L2Table {
             entries,
-            cluster_bits,
-            extended_l2: false,
+            geometry: ClusterGeometry { cluster_bits, extended_l2: false },
         };
 
         let mut buf = vec![0u8; cluster_size];
         table.write_to(&mut buf).unwrap();
-        let parsed = L2Table::read_from(&buf, cluster_bits, false).unwrap();
+        let parsed = L2Table::read_from(&buf, ClusterGeometry { cluster_bits, extended_l2: false }).unwrap();
         assert_eq!(table, parsed);
     }
 
@@ -687,11 +672,11 @@ mod tests {
             L2Entry::Standard {
                 host_offset: ClusterOffset(1u64 << 21),
                 copied: false,
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_allocated(),
             },
             L2Entry::Zero {
                 preallocated_offset: None,
-                subclusters: None,
+                subclusters: SubclusterBitmap::all_zero(),
             },
             L2Entry::Compressed(CompressedClusterDescriptor {
                 host_offset: 0x1000,
@@ -702,8 +687,7 @@ mod tests {
 
         let table = L2Table {
             entries: entries.clone(),
-            cluster_bits,
-            extended_l2: false,
+            geometry: ClusterGeometry { cluster_bits, extended_l2: false },
         };
 
         let mut buf = vec![0u8; buf_size];
@@ -736,11 +720,11 @@ mod tests {
 
     #[test]
     fn set_valid_index() {
-        let mut table = L2Table::new_empty(CLUSTER_BITS, false);
+        let mut table = L2Table::new_empty(GEO_STD);
         let entry = L2Entry::Standard {
             host_offset: ClusterOffset(0x40000),
             copied: true,
-            subclusters: None,
+            subclusters: SubclusterBitmap::all_allocated(),
         };
         table.set(L2Index(10), entry).unwrap();
         assert_eq!(table.get(L2Index(10)).unwrap(), entry);
@@ -748,11 +732,11 @@ mod tests {
 
     #[test]
     fn set_out_of_bounds() {
-        let mut table = L2Table::new_empty(CLUSTER_BITS, false);
+        let mut table = L2Table::new_empty(GEO_STD);
         let entry = L2Entry::Standard {
             host_offset: ClusterOffset(0x10000),
             copied: false,
-            subclusters: None,
+            subclusters: SubclusterBitmap::all_allocated(),
         };
         let bad_index = table.len();
         match table.set(L2Index(bad_index), entry) {
@@ -763,7 +747,7 @@ mod tests {
 
     #[test]
     fn new_empty_correct_size() {
-        let table = L2Table::new_empty(CLUSTER_BITS, false);
+        let table = L2Table::new_empty(GEO_STD);
         let expected = (1usize << CLUSTER_BITS) / L2_ENTRY_SIZE;
         assert_eq!(table.len(), expected as u32);
         assert_eq!(table.cluster_bits(), CLUSTER_BITS);
@@ -774,14 +758,14 @@ mod tests {
 
     #[test]
     fn set_then_write_round_trip() {
-        let mut table = L2Table::new_empty(CLUSTER_BITS, false);
+        let mut table = L2Table::new_empty(GEO_STD);
         table
             .set(
                 L2Index(0),
                 L2Entry::Standard {
                     host_offset: ClusterOffset(0x10000),
                     copied: true,
-                    subclusters: None,
+                    subclusters: SubclusterBitmap::all_allocated(),
                 },
             )
             .unwrap();
@@ -790,7 +774,7 @@ mod tests {
                 L2Index(5),
                 L2Entry::Zero {
                     preallocated_offset: None,
-                    subclusters: None,
+                    subclusters: SubclusterBitmap::all_zero(),
                 },
             )
             .unwrap();
@@ -799,13 +783,13 @@ mod tests {
         let mut buf = vec![0u8; cluster_size];
         table.write_to(&mut buf).unwrap();
 
-        let parsed = L2Table::read_from(&buf, CLUSTER_BITS, false).unwrap();
+        let parsed = L2Table::read_from(&buf, GEO_STD).unwrap();
         assert_eq!(table, parsed);
     }
 
     #[test]
     fn cluster_bits_accessor() {
-        let table = L2Table::new_empty(12, false);
+        let table = L2Table::new_empty(ClusterGeometry { cluster_bits: 12, extended_l2: false });
         assert_eq!(table.cluster_bits(), 12);
     }
 
@@ -813,11 +797,11 @@ mod tests {
 
     #[test]
     fn iter_matches_get() {
-        let mut table = L2Table::new_empty(CLUSTER_BITS, false);
+        let mut table = L2Table::new_empty(GEO_STD);
         let entry = L2Entry::Standard {
             host_offset: ClusterOffset(0x20000),
             copied: true,
-            subclusters: None,
+            subclusters: SubclusterBitmap::all_allocated(),
         };
         table.set(L2Index(5), entry).unwrap();
 
@@ -940,7 +924,7 @@ mod tests {
             L2Entry::Standard { host_offset: ho, copied, subclusters } => {
                 assert_eq!(ho.0, 0x30000);
                 assert!(copied);
-                assert_eq!(subclusters.unwrap(), SubclusterBitmap::all_allocated());
+                assert_eq!(subclusters, SubclusterBitmap::all_allocated());
             }
             other => panic!("expected Standard, got {:?}", other),
         }
@@ -961,9 +945,8 @@ mod tests {
         match entry {
             L2Entry::Zero { preallocated_offset, subclusters } => {
                 assert!(preallocated_offset.is_none());
-                let sc = subclusters.unwrap();
                 for i in 0..32 {
-                    assert_eq!(sc.get(i), SubclusterState::Zero);
+                    assert_eq!(subclusters.get(i), SubclusterState::Zero);
                 }
             }
             other => panic!("expected Zero, got {:?}", other),
@@ -979,10 +962,9 @@ mod tests {
         let entry = L2Entry::decode_extended(0, bm.0, CLUSTER_BITS, true);
         match entry {
             L2Entry::Zero { subclusters, .. } => {
-                let sc = subclusters.unwrap();
-                assert_eq!(sc.get(0), SubclusterState::Zero);
-                assert_eq!(sc.get(1), SubclusterState::Unallocated);
-                assert_eq!(sc.get(5), SubclusterState::Zero);
+                assert_eq!(subclusters.get(0), SubclusterState::Zero);
+                assert_eq!(subclusters.get(1), SubclusterState::Unallocated);
+                assert_eq!(subclusters.get(5), SubclusterState::Zero);
             }
             other => panic!("expected Zero, got {:?}", other),
         }
@@ -998,23 +980,23 @@ mod tests {
         let entry = L2Entry::Standard {
             host_offset: ClusterOffset(0x50000),
             copied: true,
-            subclusters: Some(bm),
+            subclusters: bm,
         };
 
-        let encoded_word0 = entry.encode(CLUSTER_BITS);
+        let geo_ext = ClusterGeometry { cluster_bits: CLUSTER_BITS, extended_l2: true };
+        let encoded_word0 = entry.encode(geo_ext);
         let encoded_bm = entry.encode_bitmap();
 
-        let decoded = L2Entry::decode_extended(encoded_word0 & !1, encoded_bm, CLUSTER_BITS, true);
+        let decoded = L2Entry::decode_extended(encoded_word0, encoded_bm, CLUSTER_BITS, true);
         match decoded {
             L2Entry::Standard { host_offset, copied, subclusters } => {
                 assert_eq!(host_offset.0, 0x50000);
                 assert!(copied);
-                let sc = subclusters.unwrap();
                 for i in 0..16 {
-                    assert_eq!(sc.get(i), SubclusterState::Allocated, "sc {i}");
+                    assert_eq!(subclusters.get(i), SubclusterState::Allocated, "sc {i}");
                 }
                 for i in 16..32 {
-                    assert_eq!(sc.get(i), SubclusterState::Zero, "sc {i}");
+                    assert_eq!(subclusters.get(i), SubclusterState::Zero, "sc {i}");
                 }
             }
             other => panic!("expected Standard, got {:?}", other),
@@ -1027,7 +1009,7 @@ mod tests {
         let cluster_size = 1usize << cluster_bits;
         let entries_per_table = cluster_size / L2_ENTRY_SIZE_EXTENDED;
 
-        let mut table = L2Table::new_empty(cluster_bits, true);
+        let mut table = L2Table::new_empty(ClusterGeometry { cluster_bits, extended_l2: true });
         assert_eq!(table.len() as usize, entries_per_table);
 
         // Set a few entries
@@ -1035,7 +1017,7 @@ mod tests {
         let entry = L2Entry::Standard {
             host_offset: ClusterOffset(0x40000),
             copied: true,
-            subclusters: Some(bm),
+            subclusters: bm,
         };
         table.set(L2Index(0), entry).unwrap();
 
@@ -1043,21 +1025,21 @@ mod tests {
         zero_bm.set_range(0, 32, SubclusterState::Zero);
         let zero_entry = L2Entry::Zero {
             preallocated_offset: None,
-            subclusters: Some(zero_bm),
+            subclusters: zero_bm,
         };
         table.set(L2Index(10), zero_entry).unwrap();
 
         // Write and read back
         let mut buf = vec![0u8; cluster_size];
         table.write_to(&mut buf).unwrap();
-        let table2 = L2Table::read_from(&buf, cluster_bits, true).unwrap();
+        let table2 = L2Table::read_from(&buf, ClusterGeometry { cluster_bits, extended_l2: true }).unwrap();
 
         // Verify
         let e0 = table2.get(L2Index(0)).unwrap();
         match e0 {
             L2Entry::Standard { host_offset, subclusters, .. } => {
                 assert_eq!(host_offset.0, 0x40000);
-                assert!(subclusters.unwrap().is_all_allocated());
+                assert!(subclusters.is_all_allocated());
             }
             other => panic!("expected Standard, got {:?}", other),
         }
@@ -1065,9 +1047,8 @@ mod tests {
         let e10 = table2.get(L2Index(10)).unwrap();
         match e10 {
             L2Entry::Zero { subclusters, .. } => {
-                let sc = subclusters.unwrap();
                 for i in 0..32 {
-                    assert_eq!(sc.get(i), SubclusterState::Zero);
+                    assert_eq!(subclusters.get(i), SubclusterState::Zero);
                 }
             }
             other => panic!("expected Zero, got {:?}", other),
@@ -1082,11 +1063,11 @@ mod tests {
         // Extended L2: 16 bytes per entry → half as many entries
         let cluster_bits: u32 = 16;
         let cluster_size = 1usize << cluster_bits;
-        let table = L2Table::new_empty(cluster_bits, true);
+        let table = L2Table::new_empty(ClusterGeometry { cluster_bits, extended_l2: true });
         assert_eq!(table.len() as usize, cluster_size / L2_ENTRY_SIZE_EXTENDED);
 
         // Standard: 8 bytes per entry
-        let table_std = L2Table::new_empty(cluster_bits, false);
+        let table_std = L2Table::new_empty(ClusterGeometry { cluster_bits, extended_l2: false });
         assert_eq!(table_std.len() as usize, cluster_size / L2_ENTRY_SIZE);
 
         // Extended has half the entries

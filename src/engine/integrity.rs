@@ -20,6 +20,7 @@ use crate::format::l1::L1Entry;
 use crate::format::l2::{L2Entry, L2Table};
 use crate::format::refcount::{RefcountBlock, RefcountTableEntry};
 use crate::format::snapshot::SnapshotHeader;
+use crate::format::types::ClusterGeometry;
 use crate::io::IoBackend;
 
 /// Statistics about cluster types found during the walk.
@@ -141,9 +142,7 @@ pub fn build_reference_map(
         backend,
         header.l1_table_offset.0,
         header.l1_table_entries,
-        header.cluster_bits,
-        cluster_size,
-        header.has_extended_l2(),
+        header.geometry(),
         &mut refs,
         &mut stats,
     )?;
@@ -183,9 +182,7 @@ pub fn build_reference_map(
                 backend,
                 snap.l1_table_offset.0,
                 snap.l1_table_entries,
-                header.cluster_bits,
-                cluster_size,
-                header.has_extended_l2(),
+                header.geometry(),
                 &mut refs,
                 &mut stats,
             )?;
@@ -390,10 +387,8 @@ fn fix_copied_flags(
         // Fix L2 COPIED flags
         let mut l2_buf = vec![0u8; cluster_size as usize];
         backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-        let extended_l2 = header.has_extended_l2();
-        let l2_entry_size = header.l2_entry_size();
-        let l2_table = L2Table::read_from(&l2_buf, header.cluster_bits, extended_l2)?;
-        let entries_per_l2 = cluster_size as usize / l2_entry_size;
+        let l2_table = L2Table::read_from(&l2_buf, header.geometry())?;
+        let entries_per_l2 = header.geometry().l2_entries_per_table() as usize;
         let mut l2_modified = false;
 
         for l2_idx in 0..entries_per_l2 {
@@ -418,7 +413,7 @@ fn fix_copied_flags(
                     let mut entry_buf = [0u8; 8];
                     BigEndian::write_u64(
                         &mut entry_buf,
-                        fixed.encode(header.cluster_bits),
+                        fixed.encode(header.geometry()),
                     );
                     backend.write_all_at(&entry_buf, entry_offset)?;
                     l2_modified = true;
@@ -449,9 +444,7 @@ fn walk_l1_l2(
     backend: &dyn IoBackend,
     l1_offset: u64,
     l1_entries: u32,
-    cluster_bits: u32,
-    cluster_size: u64,
-    extended_l2: bool,
+    geometry: ClusterGeometry,
     refs: &mut HashMap<u64, u64>,
     stats: &mut ClusterStats,
 ) -> Result<()> {
@@ -459,12 +452,12 @@ fn walk_l1_l2(
         return Ok(());
     }
 
+    let cluster_size = geometry.cluster_size();
     let l1_byte_size = l1_entries as usize * L1_ENTRY_SIZE;
     let mut l1_buf = vec![0u8; l1_byte_size];
     backend.read_exact_at(&mut l1_buf, l1_offset)?;
 
-    let l2_entry_size = if extended_l2 { crate::format::constants::L2_ENTRY_SIZE_EXTENDED } else { L2_ENTRY_SIZE };
-    let entries_per_l2 = cluster_size as usize / l2_entry_size;
+    let entries_per_l2 = geometry.l2_entries_per_table() as usize;
 
     for l1_idx in 0..l1_entries as usize {
         let raw = BigEndian::read_u64(&l1_buf[l1_idx * L1_ENTRY_SIZE..]);
@@ -482,7 +475,7 @@ fn walk_l1_l2(
         // Read and walk L2 table
         let mut l2_buf = vec![0u8; cluster_size as usize];
         backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-        let l2_table = L2Table::read_from(&l2_buf, cluster_bits, extended_l2)?;
+        let l2_table = L2Table::read_from(&l2_buf, geometry)?;
 
         for l2_idx in 0..entries_per_l2 {
             let entry = l2_table
@@ -1209,7 +1202,7 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
         let mut l2_buf = vec![0u8; header.cluster_size() as usize];
         image.backend().read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
-        let l2_table = L2Table::read_from(&l2_buf, header.cluster_bits, false).unwrap();
+        let l2_table = L2Table::read_from(&l2_buf, ClusterGeometry { cluster_bits: header.cluster_bits, extended_l2: false }).unwrap();
         let entry = l2_table.get(crate::format::types::L2Index(0)).unwrap();
         let data_offset = match entry {
             L2Entry::Standard { host_offset, .. } => host_offset.0,
@@ -1231,7 +1224,7 @@ mod tests {
         // Read the L2 entry and check COPIED flag
         let mut l2_buf2 = vec![0u8; image.cluster_size() as usize];
         image.backend().read_exact_at(&mut l2_buf2, l2_offset.0).unwrap();
-        let l2_table2 = L2Table::read_from(&l2_buf2, image.header().cluster_bits, false).unwrap();
+        let l2_table2 = L2Table::read_from(&l2_buf2, image.header().geometry()).unwrap();
         let entry2 = l2_table2.get(crate::format::types::L2Index(0)).unwrap();
         match entry2 {
             L2Entry::Standard { copied, .. } => {

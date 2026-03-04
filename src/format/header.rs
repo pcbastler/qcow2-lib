@@ -10,7 +10,7 @@ use byteorder::{BigEndian, ByteOrder};
 use crate::error::{Error, Result};
 use crate::format::constants::*;
 use crate::format::feature_flags::*;
-use crate::format::types::ClusterOffset;
+use crate::format::types::{ClusterGeometry, ClusterOffset};
 
 /// Parsed QCOW2 image header (supports v2 and v3).
 ///
@@ -298,6 +298,14 @@ impl Header {
     pub fn has_extended_l2(&self) -> bool {
         self.incompatible_features
             .contains(IncompatibleFeatures::EXTENDED_L2)
+    }
+
+    /// Build a [`ClusterGeometry`] from this header's cluster configuration.
+    pub fn geometry(&self) -> ClusterGeometry {
+        ClusterGeometry {
+            cluster_bits: self.cluster_bits,
+            extended_l2: self.has_extended_l2(),
+        }
     }
 
     /// Size of each L2 entry in bytes (8 for standard, 16 for extended).

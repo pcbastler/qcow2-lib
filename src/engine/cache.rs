@@ -202,11 +202,12 @@ impl MetadataCache {
 mod tests {
     use super::*;
     use crate::format::l2::L2Table;
+    use crate::format::types::ClusterGeometry;
 
     fn make_l2_table(cluster_bits: u32) -> L2Table {
         let cluster_size = 1usize << cluster_bits;
         let buf = vec![0u8; cluster_size];
-        L2Table::read_from(&buf, cluster_bits, false).unwrap()
+        L2Table::read_from(&buf, ClusterGeometry { cluster_bits, extended_l2: false }).unwrap()
     }
 
     #[test]

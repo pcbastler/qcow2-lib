@@ -110,33 +110,33 @@ impl<'a> Qcow2Reader<'a> {
             ClusterResolution::Allocated {
                 host_offset,
                 intra_cluster_offset,
-                subclusters: Some(bitmap),
+                subclusters,
             } => {
-                self.read_subclustered(buf, guest_offset, host_offset, intra_cluster_offset, bitmap)
-            }
-            ClusterResolution::Allocated {
-                host_offset,
-                intra_cluster_offset,
-                subclusters: None,
-            } => {
-                let read_offset = host_offset.0 + intra_cluster_offset.0 as u64;
-                match self.backend.read_exact_at(buf, read_offset) {
-                    Ok(()) => Ok(()),
-                    Err(e) => self.handle_read_error(buf, guest_offset, e),
+                if subclusters.is_all_allocated() {
+                    // Fast path: all subclusters allocated → bulk read
+                    let read_offset = host_offset.0 + intra_cluster_offset.0 as u64;
+                    match self.backend.read_exact_at(buf, read_offset) {
+                        Ok(()) => Ok(()),
+                        Err(e) => self.handle_read_error(buf, guest_offset, e),
+                    }
+                } else {
+                    self.read_subclustered(buf, guest_offset, Some(host_offset), intra_cluster_offset, subclusters)
                 }
             }
-            ClusterResolution::Zero => {
-                buf.fill(0);
-                Ok(())
-            }
-            ClusterResolution::Unallocated => {
-                self.read_from_backing_or_zero(buf, guest_offset)
-            }
-            ClusterResolution::ZeroSubclustered {
+            ClusterResolution::Zero {
                 bitmap,
                 intra_cluster_offset,
             } => {
-                self.read_zero_subclustered(buf, guest_offset, intra_cluster_offset, bitmap)
+                if bitmap.is_all_zero() {
+                    // Fast path: all subclusters zero → fill
+                    buf.fill(0);
+                    Ok(())
+                } else {
+                    self.read_subclustered(buf, guest_offset, None, intra_cluster_offset, bitmap)
+                }
+            }
+            ClusterResolution::Unallocated => {
+                self.read_from_backing_or_zero(buf, guest_offset)
             }
             ClusterResolution::Compressed {
                 descriptor,
@@ -187,18 +187,21 @@ impl<'a> Qcow2Reader<'a> {
         }
     }
 
-    /// Read from a cluster with extended L2 subclusters (has a host cluster).
+    /// Read from a cluster with per-subcluster dispatch.
     ///
     /// Each subcluster within the read range is dispatched independently:
-    /// - `Allocated`: read from host at `host_offset + subcluster_offset`
+    /// - `Allocated`: read from host (if `host_offset` is `Some`)
     /// - `Zero`: fill with zeros
     /// - `Unallocated`: read from backing file or fill with zeros
     /// - `Invalid`: error
+    ///
+    /// When `host_offset` is `None`, the cluster has no host data (zero entry
+    /// without preallocated cluster), so allocated subclusters are treated as zero.
     fn read_subclustered(
         &mut self,
         buf: &mut [u8],
         guest_offset: u64,
-        host_offset: ClusterOffset,
+        host_offset: Option<ClusterOffset>,
         intra_cluster_offset: IntraClusterOffset,
         bitmap: SubclusterBitmap,
     ) -> Result<()> {
@@ -221,15 +224,20 @@ impl<'a> Qcow2Reader<'a> {
             let state = bitmap.get(sc_index);
             match state {
                 SubclusterState::Allocated => {
-                    let read_offset = host_offset.0 + cluster_pos;
-                    match self.backend.read_exact_at(
-                        &mut buf[buf_pos..buf_pos + chunk_len],
-                        read_offset,
-                    ) {
-                        Ok(()) => {}
-                        Err(e) => {
-                            return self.handle_read_error(buf, guest_offset, e);
+                    if let Some(host) = host_offset {
+                        let read_offset = host.0 + cluster_pos;
+                        match self.backend.read_exact_at(
+                            &mut buf[buf_pos..buf_pos + chunk_len],
+                            read_offset,
+                        ) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                return self.handle_read_error(buf, guest_offset, e);
+                            }
                         }
+                    } else {
+                        // No host cluster — treat as zero
+                        buf[buf_pos..buf_pos + chunk_len].fill(0);
                     }
                 }
                 SubclusterState::Zero => {
@@ -246,55 +254,6 @@ impl<'a> Qcow2Reader<'a> {
                         l2_index: 0, // we don't have the L2 index here
                         subcluster_index: sc_index,
                     });
-                }
-            }
-
-            buf_pos += chunk_len;
-            cluster_pos += chunk_len as u64;
-        }
-
-        Ok(())
-    }
-
-    /// Read from a zero-entry cluster with per-subcluster state (no host cluster).
-    ///
-    /// Subclusters are either `Zero` (read as zeros) or `Unallocated`
-    /// (read from backing or zeros). No `Allocated` subclusters are possible
-    /// because there is no host cluster.
-    fn read_zero_subclustered(
-        &mut self,
-        buf: &mut [u8],
-        guest_offset: u64,
-        intra_cluster_offset: IntraClusterOffset,
-        bitmap: SubclusterBitmap,
-    ) -> Result<()> {
-        let cluster_size = 1u64 << self.cluster_bits;
-        let sc_size = cluster_size / SUBCLUSTERS_PER_CLUSTER as u64;
-        let intra = intra_cluster_offset.0 as u64;
-
-        let mut buf_pos = 0usize;
-        let mut cluster_pos = intra;
-
-        while buf_pos < buf.len() {
-            let sc_index = (cluster_pos / sc_size) as u32;
-            let sc_end = (sc_index as u64 + 1) * sc_size;
-            let bytes_in_sc = (sc_end - cluster_pos) as usize;
-            let chunk_len = bytes_in_sc.min(buf.len() - buf_pos);
-
-            match bitmap.get(sc_index) {
-                SubclusterState::Zero => {
-                    buf[buf_pos..buf_pos + chunk_len].fill(0);
-                }
-                SubclusterState::Unallocated => {
-                    self.read_from_backing_or_zero(
-                        &mut buf[buf_pos..buf_pos + chunk_len],
-                        guest_offset + buf_pos as u64,
-                    )?;
-                }
-                _ => {
-                    // Allocated or Invalid in a zero entry without host cluster
-                    // shouldn't happen; treat as zero.
-                    buf[buf_pos..buf_pos + chunk_len].fill(0);
                 }
             }
 
@@ -361,7 +320,7 @@ mod tests {
     use crate::format::compressed::CompressedClusterDescriptor;
     use crate::format::constants::*;
     use crate::format::l1::{L1Entry, L1Table};
-    use crate::format::types::ClusterOffset;
+    use crate::format::types::{ClusterGeometry, ClusterOffset};
     use crate::io::MemoryBackend;
     use byteorder::{BigEndian, ByteOrder};
     use flate2::write::DeflateEncoder;
@@ -370,6 +329,7 @@ mod tests {
 
     const CLUSTER_BITS: u32 = 16;
     const CLUSTER_SIZE: usize = 1 << 16;
+    const GEO_STD: ClusterGeometry = ClusterGeometry { cluster_bits: CLUSTER_BITS, extended_l2: false };
 
     /// Create a strict-mode reader for testing (most common case).
     fn make_strict_reader<'a>(
@@ -424,7 +384,7 @@ mod tests {
         }
 
         let backend = MemoryBackend::new(image_data);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64, false);
+        let mapper = ClusterMapper::new(l1_table, GEO_STD, image_size as u64);
         (backend, mapper)
     }
 
@@ -537,7 +497,7 @@ mod tests {
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
 
         let backend = MemoryBackend::new(image_data);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64, false);
+        let mapper = ClusterMapper::new(l1_table, GEO_STD, image_size as u64);
         let mut cache = MetadataCache::new(CacheConfig::default());
 
         let mut warnings = vec![];
@@ -692,7 +652,7 @@ mod tests {
         let l1_table = L1Table::read_from(&l1_buf, 1).unwrap();
         let image_size = 10 * CLUSTER_SIZE;
         let backend = MemoryBackend::zeroed(image_size);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64, false);
+        let mapper = ClusterMapper::new(l1_table, GEO_STD, image_size as u64);
         (backend, mapper)
     }
 
@@ -706,7 +666,7 @@ mod tests {
 
         let image_size = 10 * CLUSTER_SIZE;
         let backend = MemoryBackend::zeroed(image_size);
-        let mapper = ClusterMapper::new(l1_table, CLUSTER_BITS, image_size as u64, false);
+        let mapper = ClusterMapper::new(l1_table, GEO_STD, image_size as u64);
         (backend, mapper)
     }
 

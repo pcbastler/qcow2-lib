@@ -421,7 +421,7 @@ impl<'a> SnapshotManager<'a> {
                 // Load L2 table and clear COPIED flags on its entries
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits, self.header.has_extended_l2())?;
+                let l2_table = L2Table::read_from(&l2_buf, self.header.geometry())?;
 
                 let mut modified = false;
                 for j in 0..l2_table.len() {
@@ -442,7 +442,7 @@ impl<'a> SnapshotManager<'a> {
                         let mut entry_buf = [0u8; 8];
                         BigEndian::write_u64(
                             &mut entry_buf,
-                            cleared.encode(self.cluster_bits),
+                            cleared.encode(self.header.geometry()),
                         );
                         self.backend.write_all_at(&entry_buf, entry_offset)?;
                         modified = true;
@@ -491,7 +491,7 @@ impl<'a> SnapshotManager<'a> {
                 // Load L2 table and restore COPIED flags on data entries
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits, self.header.has_extended_l2())?;
+                let l2_table = L2Table::read_from(&l2_buf, self.header.geometry())?;
 
                 let mut l2_modified = false;
                 for j in 0..l2_table.len() {
@@ -518,7 +518,7 @@ impl<'a> SnapshotManager<'a> {
                             let mut entry_buf = [0u8; 8];
                             BigEndian::write_u64(
                                 &mut entry_buf,
-                                restored.encode(self.cluster_bits),
+                                restored.encode(self.header.geometry()),
                             );
                             self.backend.write_all_at(&entry_buf, entry_offset)?;
                             l2_modified = true;
@@ -598,7 +598,7 @@ impl<'a> SnapshotManager<'a> {
                 // Load L2 table and increment refcounts for data clusters
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits, self.header.has_extended_l2())?;
+                let l2_table = L2Table::read_from(&l2_buf, self.header.geometry())?;
 
                 for entry in l2_table.iter() {
                     self.increment_refcount_for_l2_entry(entry)?;
@@ -654,7 +654,7 @@ impl<'a> SnapshotManager<'a> {
                 // Load L2 and decrement data cluster refcounts
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits, self.header.has_extended_l2())?;
+                let l2_table = L2Table::read_from(&l2_buf, self.header.geometry())?;
 
                 for entry in l2_table.iter() {
                     self.decrement_refcount_for_l2_entry(entry)?;
@@ -683,7 +683,7 @@ impl<'a> SnapshotManager<'a> {
                 // Load L2 and decrement data cluster refcounts
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.cluster_bits, self.header.has_extended_l2())?;
+                let l2_table = L2Table::read_from(&l2_buf, self.header.geometry())?;
 
                 for l2_entry in l2_table.iter() {
                     self.decrement_refcount_for_l2_entry(l2_entry)?;
