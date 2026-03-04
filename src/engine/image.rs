@@ -10,6 +10,7 @@ use byteorder::{BigEndian, ByteOrder};
 
 use crate::engine::backing::{self, BackingChain};
 use crate::engine::bitmap_manager::{BitmapInfo, BitmapManager};
+use crate::engine::hash_manager::{self, HashEntry, HashInfo, HashManager, HashMismatch};
 use crate::engine::cache::{CacheConfig, CacheStats, MetadataCache};
 use crate::engine::compression;
 use crate::engine::cluster_mapping::ClusterMapper;
@@ -60,6 +61,8 @@ pub struct Qcow2Image {
     compressed_cursor: u64,
     /// Cached flag: true if any bitmap has the AUTO flag set.
     has_auto_bitmaps: bool,
+    /// Cached flag: true if a BLAKE3 hash extension exists.
+    has_hashes: bool,
 }
 
 impl Qcow2Image {
@@ -183,6 +186,9 @@ impl Qcow2Image {
         // Check if any bitmap has auto-tracking enabled
         let has_auto_bitmaps = Self::detect_auto_bitmaps(backend.as_ref(), &extensions);
 
+        // Check if BLAKE3 hash extension exists
+        let has_hashes = hash_manager::detect_hashes(&extensions);
+
         Ok(Self {
             header,
             extensions,
@@ -198,6 +204,7 @@ impl Qcow2Image {
             dirty: false,
             compressed_cursor: 0,
             has_auto_bitmaps,
+            has_hashes,
         })
     }
 
@@ -383,6 +390,28 @@ impl Qcow2Image {
             mgr.track_write(guest_offset, buf.len() as u64)?;
         }
 
+        // Update per-cluster hashes
+        if self.has_hashes {
+            let cluster_bits = self.header.cluster_bits;
+            let virtual_size = self.header.virtual_size;
+            let refcount_manager = self
+                .refcount_manager
+                .as_mut()
+                .expect("writable image must have refcount_manager");
+
+            let mut mgr = HashManager::new(
+                self.backend.as_ref(),
+                &mut self.cache,
+                refcount_manager,
+                &mut self.header,
+                &mut self.extensions,
+                &self.mapper,
+                cluster_bits,
+                virtual_size,
+            );
+            mgr.update_hashes_for_range(guest_offset, buf.len() as u64)?;
+        }
+
         Ok(())
     }
 
@@ -433,6 +462,17 @@ impl Qcow2Image {
             self.write_autoclear_features()?;
         }
 
+        // Clear BLAKE3_HASHES autoclear bit while image is dirty
+        if self.has_hashes
+            && self
+                .header
+                .autoclear_features
+                .contains(AutoclearFeatures::BLAKE3_HASHES)
+        {
+            self.header.autoclear_features -= AutoclearFeatures::BLAKE3_HASHES;
+            self.write_autoclear_features()?;
+        }
+
         self.backend.flush()?;
         self.dirty = true;
         Ok(())
@@ -453,6 +493,17 @@ impl Qcow2Image {
                 .contains(AutoclearFeatures::BITMAPS)
         {
             self.header.autoclear_features |= AutoclearFeatures::BITMAPS;
+            self.write_autoclear_features()?;
+        }
+
+        // Restore BLAKE3_HASHES autoclear bit on clean close
+        if self.has_hashes
+            && !self
+                .header
+                .autoclear_features
+                .contains(AutoclearFeatures::BLAKE3_HASHES)
+        {
+            self.header.autoclear_features |= AutoclearFeatures::BLAKE3_HASHES;
             self.write_autoclear_features()?;
         }
 
@@ -594,6 +645,7 @@ impl Qcow2Image {
             dirty: false,
             compressed_cursor: 0,
             has_auto_bitmaps: false,
+            has_hashes: false,
         })
     }
 
@@ -746,6 +798,7 @@ impl Qcow2Image {
             dirty: false,
             compressed_cursor: 0,
             has_auto_bitmaps: false,
+            has_hashes: false,
         })
     }
 
@@ -1017,6 +1070,7 @@ impl Qcow2Image {
             refcount_manager,
             &mut self.mapper,
             &mut self.header,
+            &mut self.extensions,
             cluster_bits,
         );
         mgr.create_snapshot(name)
@@ -1040,6 +1094,7 @@ impl Qcow2Image {
             refcount_manager,
             &mut self.mapper,
             &mut self.header,
+            &mut self.extensions,
             cluster_bits,
         );
         mgr.delete_snapshot(name_or_id)
@@ -1066,9 +1121,14 @@ impl Qcow2Image {
             refcount_manager,
             &mut self.mapper,
             &mut self.header,
+            &mut self.extensions,
             cluster_bits,
         );
-        mgr.apply_snapshot(name_or_id)
+        mgr.apply_snapshot(name_or_id)?;
+
+        // Re-detect hash state after apply (snapshot may have/not have hashes)
+        self.has_hashes = hash_manager::detect_hashes(&self.extensions);
+        Ok(())
     }
 
     // ---- Bitmap API ----
@@ -1339,6 +1399,186 @@ impl Qcow2Image {
             Ok(entries) => entries.iter().any(|e| e.is_auto()),
             Err(_) => false,
         }
+    }
+
+    // ---- BLAKE3 Hash API ----
+
+    /// Initialize the BLAKE3 per-cluster hash extension.
+    ///
+    /// Creates an empty hash table without hashing any data yet.
+    /// Call `hash_rehash` afterwards to compute hashes for all allocated clusters.
+    pub fn hash_init(&mut self, hash_size: Option<u8>) -> Result<()> {
+        if !self.writable {
+            return Err(Error::ReadOnly);
+        }
+
+        let hs = hash_size.unwrap_or(crate::format::constants::BLAKE3_DEFAULT_HASH_SIZE);
+        let cluster_bits = self.header.cluster_bits;
+        let virtual_size = self.header.virtual_size;
+        let refcount_manager = self
+            .refcount_manager
+            .as_mut()
+            .expect("writable image must have refcount_manager");
+
+        let mut mgr = HashManager::new(
+            self.backend.as_ref(),
+            &mut self.cache,
+            refcount_manager,
+            &mut self.header,
+            &mut self.extensions,
+            &self.mapper,
+            cluster_bits,
+            virtual_size,
+        );
+        mgr.init_hashes(hs)?;
+        self.has_hashes = true;
+        Ok(())
+    }
+
+    /// Rehash all allocated clusters. Returns the number of clusters hashed.
+    pub fn hash_rehash(&mut self) -> Result<u64> {
+        if !self.writable {
+            return Err(Error::ReadOnly);
+        }
+
+        let cluster_bits = self.header.cluster_bits;
+        let virtual_size = self.header.virtual_size;
+        let refcount_manager = self
+            .refcount_manager
+            .as_mut()
+            .expect("writable image must have refcount_manager");
+
+        let mut mgr = HashManager::new(
+            self.backend.as_ref(),
+            &mut self.cache,
+            refcount_manager,
+            &mut self.header,
+            &mut self.extensions,
+            &self.mapper,
+            cluster_bits,
+            virtual_size,
+        );
+        mgr.rehash()
+    }
+
+    /// Remove the hash extension and free all hash clusters.
+    pub fn hash_remove(&mut self) -> Result<()> {
+        if !self.writable {
+            return Err(Error::ReadOnly);
+        }
+
+        let cluster_bits = self.header.cluster_bits;
+        let virtual_size = self.header.virtual_size;
+        let refcount_manager = self
+            .refcount_manager
+            .as_mut()
+            .expect("writable image must have refcount_manager");
+
+        let mut mgr = HashManager::new(
+            self.backend.as_ref(),
+            &mut self.cache,
+            refcount_manager,
+            &mut self.header,
+            &mut self.extensions,
+            &self.mapper,
+            cluster_bits,
+            virtual_size,
+        );
+        mgr.remove_hashes()?;
+        self.has_hashes = false;
+        Ok(())
+    }
+
+    /// Verify all stored hashes. Returns a list of mismatches (empty = all OK).
+    pub fn hash_verify(&mut self) -> Result<Vec<HashMismatch>> {
+        let cluster_bits = self.header.cluster_bits;
+        let virtual_size = self.header.virtual_size;
+        let refcount_manager = self
+            .refcount_manager
+            .as_mut()
+            .ok_or(Error::ReadOnly)?;
+
+        let mut mgr = HashManager::new(
+            self.backend.as_ref(),
+            &mut self.cache,
+            refcount_manager,
+            &mut self.header,
+            &mut self.extensions,
+            &self.mapper,
+            cluster_bits,
+            virtual_size,
+        );
+        mgr.verify()
+    }
+
+    /// Get the stored hash for a specific cluster index.
+    pub fn hash_get(&mut self, cluster_index: u64) -> Result<Option<Vec<u8>>> {
+        let cluster_bits = self.header.cluster_bits;
+        let virtual_size = self.header.virtual_size;
+        let refcount_manager = self
+            .refcount_manager
+            .as_mut()
+            .ok_or(Error::ReadOnly)?;
+
+        let mut mgr = HashManager::new(
+            self.backend.as_ref(),
+            &mut self.cache,
+            refcount_manager,
+            &mut self.header,
+            &mut self.extensions,
+            &self.mapper,
+            cluster_bits,
+            virtual_size,
+        );
+        mgr.get_hash(cluster_index)
+    }
+
+    /// Export hashes for a range of guest bytes (or all if range is None).
+    pub fn hash_export(&mut self, range: Option<(u64, u64)>) -> Result<Vec<HashEntry>> {
+        let cluster_bits = self.header.cluster_bits;
+        let virtual_size = self.header.virtual_size;
+        let refcount_manager = self
+            .refcount_manager
+            .as_mut()
+            .ok_or(Error::ReadOnly)?;
+
+        let mut mgr = HashManager::new(
+            self.backend.as_ref(),
+            &mut self.cache,
+            refcount_manager,
+            &mut self.header,
+            &mut self.extensions,
+            &self.mapper,
+            cluster_bits,
+            virtual_size,
+        );
+        mgr.export_hashes(range)
+    }
+
+    /// Get summary info about the hash extension.
+    pub fn hash_info(&self) -> Option<HashInfo> {
+        hash_manager::detect_hashes(&self.extensions).then(|| {
+            let ext = self.extensions.iter().find_map(|e| match e {
+                HeaderExtension::Blake3Hashes(ext) => Some(ext),
+                _ => None,
+            });
+            match ext {
+                Some(ext) => HashInfo {
+                    hash_size: ext.hash_size,
+                    hash_table_entries: ext.hash_table_entries,
+                    consistent: self
+                        .header
+                        .autoclear_features
+                        .contains(AutoclearFeatures::BLAKE3_HASHES),
+                },
+                None => unreachable!(),
+            }
+        })
+    }
+
+    /// Whether the image has a BLAKE3 hash extension.
+    pub fn has_hashes(&self) -> bool {
+        self.has_hashes
     }
 
     // ---- Resize API ----

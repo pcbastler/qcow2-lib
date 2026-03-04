@@ -174,6 +174,26 @@ pub const BITMAP_DEFAULT_GRANULARITY_BITS: u8 = 16;
 /// Size of the bitmaps header extension data in bytes.
 pub const BITMAP_EXTENSION_DATA_SIZE: usize = 24;
 
+// ---- BLAKE3 hash constants ----
+
+/// Custom header extension type ID for per-cluster BLAKE3 hashes ("CLB3" in ASCII).
+pub const EXT_BLAKE3_HASHES: u32 = 0x434C_4233;
+
+/// Size of the BLAKE3 hashes extension header data in bytes.
+pub const BLAKE3_EXTENSION_DATA_SIZE: usize = 24;
+
+/// Size of each hash table entry in bytes (u64 offset).
+pub const HASH_TABLE_ENTRY_SIZE: usize = 8;
+
+/// Default BLAKE3 hash size in bytes (full 256-bit hash).
+pub const BLAKE3_DEFAULT_HASH_SIZE: u8 = 32;
+
+/// Minimum allowed BLAKE3 hash size in bytes (truncated 128-bit hash).
+pub const BLAKE3_MIN_HASH_SIZE: u8 = 16;
+
+/// Maximum allowed BLAKE3 hash size in bytes (full 256-bit hash).
+pub const BLAKE3_MAX_HASH_SIZE: u8 = 32;
+
 #[cfg(test)]
 mod tests {
     use super::*;

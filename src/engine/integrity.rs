@@ -13,6 +13,7 @@ use crate::engine::refcount_manager::RefcountManager;
 use crate::error::Result;
 use crate::format::bitmap::{BitmapDirectoryEntry, BitmapTableEntryState};
 use crate::format::constants::*;
+use crate::format::hash::HashTable;
 use crate::format::header::Header;
 use crate::format::header_extension::HeaderExtension;
 use crate::format::l1::L1Entry;
@@ -207,6 +208,19 @@ pub fn build_reference_map(
 
     // 8. Bitmap clusters (directory, tables, data)
     walk_bitmaps(backend, header, cluster_size, &mut refs)?;
+
+    // 9. BLAKE3 hash clusters (hash table + hash data clusters)
+    let snap_hashes = if header.snapshot_count > 0 {
+        let snap_table_buf = read_snapshot_table_raw(backend, header, cluster_size)?;
+        SnapshotHeader::read_table(
+            &snap_table_buf,
+            header.snapshot_count,
+            header.snapshots_offset.0,
+        )?
+    } else {
+        Vec::new()
+    };
+    walk_blake3_hashes(backend, header, cluster_size, &snap_hashes, &mut refs)?;
 
     Ok((refs, stats))
 }
@@ -579,6 +593,79 @@ fn walk_bitmaps(
             if let BitmapTableEntryState::Data(data_offset) = te.state() {
                 add_ref(refs, data_offset.0, cluster_size);
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Walk BLAKE3 hash extension clusters (active and snapshot hash tables + data clusters).
+fn walk_blake3_hashes(
+    backend: &dyn IoBackend,
+    header: &Header,
+    cluster_size: u64,
+    snapshots: &[SnapshotHeader],
+    refs: &mut HashMap<u64, u64>,
+) -> Result<()> {
+    // Read header extensions to find the active hash extension
+    let ext_start = header.header_length as u64;
+    let ext_end = cluster_size.min(backend.file_size()?);
+    if ext_start >= ext_end {
+        return Ok(());
+    }
+
+    let mut ext_buf = vec![0u8; (ext_end - ext_start) as usize];
+    backend.read_exact_at(&mut ext_buf, ext_start)?;
+    let extensions = HeaderExtension::read_all(&ext_buf).unwrap_or_default();
+
+    // Walk active hash table
+    if let Some(ext) = extensions.iter().find_map(|e| match e {
+        HeaderExtension::Blake3Hashes(b) => Some(b),
+        _ => None,
+    }) {
+        walk_hash_table(backend, ext.hash_table_offset, ext.hash_table_entries, cluster_size, refs)?;
+    }
+
+    // Walk snapshot hash tables
+    for snap in snapshots {
+        if let Some(ht_offset) = snap.hash_table_offset {
+            if ht_offset != 0 {
+                let ht_entries = snap.hash_table_entries.unwrap_or(0);
+                walk_hash_table(backend, ht_offset, ht_entries, cluster_size, refs)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Walk a single hash table and its data clusters.
+fn walk_hash_table(
+    backend: &dyn IoBackend,
+    table_offset: u64,
+    table_entries: u32,
+    cluster_size: u64,
+    refs: &mut HashMap<u64, u64>,
+) -> Result<()> {
+    if table_offset == 0 || table_entries == 0 {
+        return Ok(());
+    }
+
+    // Count hash table clusters
+    let table_byte_size = table_entries as u64 * HASH_TABLE_ENTRY_SIZE as u64;
+    let table_cluster_count = (table_byte_size + cluster_size - 1) / cluster_size;
+    for c in 0..table_cluster_count {
+        add_ref(refs, table_offset + c * cluster_size, cluster_size);
+    }
+
+    // Read hash table and count data clusters
+    let mut table_buf = vec![0u8; table_byte_size as usize];
+    backend.read_exact_at(&mut table_buf, table_offset)?;
+    let table = HashTable::read_from(&table_buf, table_entries)?;
+
+    for entry in table.iter() {
+        if let Some(data_offset) = entry.data_offset() {
+            add_ref(refs, data_offset, cluster_size);
         }
     }
 

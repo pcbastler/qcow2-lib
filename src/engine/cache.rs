@@ -21,6 +21,8 @@ pub struct CacheConfig {
     pub refcount_block_capacity: usize,
     /// Maximum number of bitmap data clusters to cache.
     pub bitmap_data_capacity: usize,
+    /// Maximum number of hash data clusters to cache.
+    pub hash_data_capacity: usize,
 }
 
 impl Default for CacheConfig {
@@ -29,6 +31,7 @@ impl Default for CacheConfig {
             l2_table_capacity: 32,
             refcount_block_capacity: 16,
             bitmap_data_capacity: 8,
+            hash_data_capacity: 16,
         }
     }
 }
@@ -44,6 +47,7 @@ pub struct MetadataCache {
     l2_tables: LruCache<u64, L2Table>,
     refcount_blocks: LruCache<u64, RefcountBlock>,
     bitmap_data: LruCache<u64, Vec<u8>>,
+    hash_data: LruCache<u64, Vec<u8>>,
     stats: CacheStats,
 }
 
@@ -62,6 +66,10 @@ pub struct CacheStats {
     pub bitmap_hits: u64,
     /// Number of bitmap data cluster cache misses.
     pub bitmap_misses: u64,
+    /// Number of hash data cluster cache hits.
+    pub hash_hits: u64,
+    /// Number of hash data cluster cache misses.
+    pub hash_misses: u64,
 }
 
 impl MetadataCache {
@@ -77,6 +85,10 @@ impl MetadataCache {
             ),
             bitmap_data: LruCache::new(
                 NonZeroUsize::new(config.bitmap_data_capacity)
+                    .unwrap_or(NonZeroUsize::new(1).unwrap()),
+            ),
+            hash_data: LruCache::new(
+                NonZeroUsize::new(config.hash_data_capacity)
                     .unwrap_or(NonZeroUsize::new(1).unwrap()),
             ),
             stats: CacheStats::default(),
@@ -151,11 +163,33 @@ impl MetadataCache {
         self.bitmap_data.pop(&offset.0);
     }
 
+    /// Look up a cached hash data cluster by host offset.
+    pub fn get_hash_data(&mut self, offset: ClusterOffset) -> Option<&Vec<u8>> {
+        let result = self.hash_data.get(&offset.0);
+        if result.is_some() {
+            self.stats.hash_hits += 1;
+        } else {
+            self.stats.hash_misses += 1;
+        }
+        result
+    }
+
+    /// Insert a hash data cluster into the cache.
+    pub fn insert_hash_data(&mut self, offset: ClusterOffset, data: Vec<u8>) {
+        self.hash_data.put(offset.0, data);
+    }
+
+    /// Evict a specific hash data cluster from the cache.
+    pub fn evict_hash_data(&mut self, offset: ClusterOffset) {
+        self.hash_data.pop(&offset.0);
+    }
+
     /// Clear all cached entries.
     pub fn clear(&mut self) {
         self.l2_tables.clear();
         self.refcount_blocks.clear();
         self.bitmap_data.clear();
+        self.hash_data.clear();
     }
 
     /// Get cache statistics.
@@ -199,6 +233,7 @@ mod tests {
             l2_table_capacity: 2,
             refcount_block_capacity: 1,
             bitmap_data_capacity: 1,
+            ..Default::default()
         };
         let mut cache = MetadataCache::new(config);
 
@@ -243,6 +278,7 @@ mod tests {
             l2_table_capacity: 1,
             refcount_block_capacity: 1,
             bitmap_data_capacity: 1,
+            ..Default::default()
         };
         let mut cache = MetadataCache::new(config);
 
@@ -285,6 +321,7 @@ mod tests {
             l2_table_capacity: 8,
             refcount_block_capacity: 2,
             bitmap_data_capacity: 1,
+            ..Default::default()
         };
         let mut cache = MetadataCache::new(config);
 
@@ -380,6 +417,7 @@ mod tests {
             l2_table_capacity: 1,
             refcount_block_capacity: 1,
             bitmap_data_capacity: 2,
+            ..Default::default()
         };
         let mut cache = MetadataCache::new(config);
 
@@ -436,6 +474,7 @@ mod tests {
             l2_table_capacity: 1,
             refcount_block_capacity: 1,
             bitmap_data_capacity: 1,
+            ..Default::default()
         };
         let mut cache = MetadataCache::new(config);
 

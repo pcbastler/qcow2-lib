@@ -6,6 +6,7 @@
 
 pub mod bitmap;
 pub mod compressed;
+pub mod hash;
 pub mod constants;
 pub mod feature_flags;
 pub mod header;
@@ -21,6 +22,7 @@ pub use bitmap::{
     BitmapDirectoryEntry, BitmapExtension, BitmapTable, BitmapTableEntry, BitmapTableEntryState,
 };
 pub use compressed::CompressedClusterDescriptor;
+pub use hash::{Blake3Extension, HashTable, HashTableEntry};
 pub use feature_flags::{AutoclearFeatures, CompatibleFeatures, IncompatibleFeatures};
 pub use header::Header;
 pub use header_extension::HeaderExtension;

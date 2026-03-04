@@ -12,6 +12,7 @@ byteorder = "1"
 bitflags = "2"
 flate2 = "1"
 lru = "0.12"
+blake3 = "1"
 clap = { version = "4", features = ["derive"], optional = true }
 
 [dev-dependencies]

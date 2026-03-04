@@ -33,6 +33,12 @@ pub struct SnapshotHeader {
     pub vm_state_size: u64,
     /// Virtual disk size at snapshot time (from extra data, if available).
     pub virtual_disk_size: Option<u64>,
+    /// Hash table offset for this snapshot's BLAKE3 hashes (from extra data, if available).
+    pub hash_table_offset: Option<u64>,
+    /// Number of hash table entries for this snapshot (from extra data, if available).
+    pub hash_table_entries: Option<u32>,
+    /// Hash size in bytes for this snapshot (from extra data, if available).
+    pub hash_size: Option<u8>,
     /// Size of extra data that was present on disk.
     pub extra_data_size: u32,
 }
@@ -91,6 +97,20 @@ impl SnapshotHeader {
             None
         };
 
+        // If extra_data_size >= 32, read BLAKE3 hash table fields
+        let (hash_table_offset, hash_table_entries, hash_size) = if extra_data_size >= 32 {
+            let ht_offset = BigEndian::read_u64(&bytes[extra_start + 16..]);
+            let ht_entries = BigEndian::read_u32(&bytes[extra_start + 24..]);
+            let hs = bytes[extra_start + 28];
+            if ht_offset != 0 {
+                (Some(ht_offset), Some(ht_entries), Some(hs))
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        };
+
         // Variable-length strings follow extra data
         let strings_start = extra_end;
         let id_end = strings_start
@@ -133,6 +153,9 @@ impl SnapshotHeader {
                 vm_clock_nanoseconds,
                 vm_state_size,
                 virtual_disk_size,
+                hash_table_offset,
+                hash_table_entries,
+                hash_size,
                 extra_data_size,
             },
             consumed,
@@ -185,6 +208,16 @@ impl SnapshotHeader {
                     BigEndian::write_u64(&mut extra[8..], vds);
                 }
             }
+            if self.extra_data_size >= 32 {
+                if let Some(ht_offset) = self.hash_table_offset {
+                    BigEndian::write_u64(&mut extra[16..], ht_offset);
+                    BigEndian::write_u32(
+                        &mut extra[24..],
+                        self.hash_table_entries.unwrap_or(0),
+                    );
+                    extra[28] = self.hash_size.unwrap_or(0);
+                }
+            }
             out.extend_from_slice(&extra);
         }
 
@@ -217,6 +250,9 @@ mod tests {
             vm_clock_nanoseconds: 5_000_000_000,
             vm_state_size: 0,
             virtual_disk_size: None,
+            hash_table_offset: None,
+            hash_table_entries: None,
+            hash_size: None,
             extra_data_size: 0,
         }
     }
@@ -244,6 +280,9 @@ mod tests {
             vm_clock_nanoseconds: 10_000_000_000,
             vm_state_size: 4096,
             virtual_disk_size: Some(1024 * 1024 * 1024),
+            hash_table_offset: None,
+            hash_table_entries: None,
+            hash_size: None,
             extra_data_size: 16,
         };
 

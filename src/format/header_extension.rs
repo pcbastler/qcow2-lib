@@ -9,6 +9,7 @@ use byteorder::{BigEndian, ByteOrder};
 use crate::error::{Error, Result};
 use crate::format::bitmap::BitmapExtension;
 use crate::format::constants::*;
+use crate::format::hash::Blake3Extension;
 
 /// Minimum size of a TLV header (4-byte type + 4-byte length).
 const TLV_HEADER_SIZE: usize = 8;
@@ -24,6 +25,9 @@ pub enum HeaderExtension {
 
     /// Bitmaps extension (persistent dirty tracking bitmaps).
     Bitmaps(BitmapExtension),
+
+    /// BLAKE3 per-cluster hash extension.
+    Blake3Hashes(Blake3Extension),
 
     /// Full disk encryption header pointer.
     FullDiskEncryption {
@@ -174,6 +178,13 @@ impl HeaderExtension {
                     data: data.to_vec(),
                 }),
             },
+            EXT_BLAKE3_HASHES => match Blake3Extension::read_from(data) {
+                Ok(ext) => Ok(Self::Blake3Hashes(ext)),
+                Err(_) => Ok(Self::Unknown {
+                    extension_type: ext_type,
+                    data: data.to_vec(),
+                }),
+            },
             EXT_FULL_DISK_ENCRYPTION => {
                 if data.len() >= 16 {
                     let offset = BigEndian::read_u64(data);
@@ -215,6 +226,7 @@ impl HeaderExtension {
                 (EXT_FEATURE_NAME_TABLE, data)
             }
             Self::Bitmaps(ext) => (EXT_BITMAPS, ext.write_to()),
+            Self::Blake3Hashes(ext) => (EXT_BLAKE3_HASHES, ext.write_to()),
             Self::FullDiskEncryption { offset, length } => {
                 let mut data = vec![0u8; 16];
                 BigEndian::write_u64(&mut data[0..], *offset);

@@ -409,6 +409,46 @@ pub enum Error {
         /// The misaligned host offset.
         offset: u64,
     },
+
+    // ---- BLAKE3 hash errors ----
+
+    /// The BLAKE3 hash extension header is invalid.
+    #[error("invalid hash extension: {message}")]
+    InvalidHashExtension {
+        /// Description of what is wrong.
+        message: String,
+    },
+
+    /// A hash table was found at a non-cluster-aligned offset.
+    #[error("hash table at offset 0x{offset:x} is not cluster-aligned")]
+    HashTableMisaligned {
+        /// The misaligned host offset.
+        offset: u64,
+    },
+
+    /// Hash operations require an initialized hash extension.
+    #[error("hash extension not initialized")]
+    HashNotInitialized,
+
+    /// Hash verification detected a mismatch.
+    #[error("hash mismatch at cluster {cluster_index} (0x{guest_offset:x}): expected {expected}, actual {actual}")]
+    HashVerifyFailed {
+        /// Cluster index where the mismatch was found.
+        cluster_index: u64,
+        /// Guest byte offset of the cluster.
+        guest_offset: u64,
+        /// Expected hash (hex string).
+        expected: String,
+        /// Actual computed hash (hex string).
+        actual: String,
+    },
+
+    /// The hash size is not a valid value (must be 16 or 32).
+    #[error("invalid hash size {size} (must be 16 or 32)")]
+    InvalidHashSize {
+        /// The invalid hash size in bytes.
+        size: u8,
+    },
 }
 
 #[cfg(test)]
