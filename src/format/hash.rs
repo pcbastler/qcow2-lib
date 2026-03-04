@@ -62,10 +62,13 @@ impl Blake3Extension {
 
         // Basic sanity check: offset bits 0-8 must be zero (minimum 512-byte alignment).
         // Full cluster-alignment is validated at image open time with the actual cluster_bits.
-        debug_assert!(
-            hash_table_offset == 0 || (hash_table_offset & 0x1FF) == 0,
-            "hash_table_offset 0x{hash_table_offset:x} is not even 512-byte aligned"
-        );
+        if hash_table_offset != 0 && (hash_table_offset & 0x1FF) != 0 {
+            return Err(Error::InvalidHashExtension {
+                message: format!(
+                    "hash_table_offset 0x{hash_table_offset:x} is not 512-byte aligned"
+                ),
+            });
+        }
 
         // Validate reserved fields are zero
         if data[14] != 0 || data[15] != 0 {

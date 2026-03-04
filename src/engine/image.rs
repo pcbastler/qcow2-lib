@@ -1414,6 +1414,15 @@ impl Qcow2Image {
             _ => return false,
         };
 
+        // Guard against malicious bitmap_directory_size exceeding the file.
+        let file_size = match backend.file_size() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if ext.bitmap_directory_size > file_size {
+            return false;
+        }
+
         let mut buf = vec![0u8; ext.bitmap_directory_size as usize];
         if backend
             .read_exact_at(&mut buf, ext.bitmap_directory_offset)
