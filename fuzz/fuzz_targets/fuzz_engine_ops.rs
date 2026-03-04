@@ -50,6 +50,26 @@ enum Op {
     },
     /// Resize the virtual disk.
     Resize { new_size_raw: u8 },
+    /// Create a persistent bitmap.
+    BitmapCreate { name_idx: u8, auto_track: bool },
+    /// Delete a persistent bitmap.
+    BitmapDelete { name_idx: u8 },
+    /// Set dirty bits in a bitmap.
+    BitmapSetDirty {
+        name_idx: u8,
+        offset_raw: u32,
+        len_raw: u16,
+    },
+    /// Clear all dirty bits in a bitmap.
+    BitmapClear { name_idx: u8 },
+    /// Initialize BLAKE3 hashes.
+    HashInit,
+    /// Rehash all allocated clusters.
+    HashRehash,
+    /// Remove hash extension.
+    HashRemove,
+    /// Run integrity check.
+    CheckIntegrity,
 }
 
 /// Top-level fuzz input.
@@ -77,6 +97,8 @@ const SNAP_NAMES: &[&str] = &[
     "snap-0", "snap-1", "snap-2", "snap-3", "snap-4", "snap-5", "snap-6", "snap-7",
 ];
 
+const BITMAP_NAMES: &[&str] = &["bm-0", "bm-1", "bm-2", "bm-3"];
+
 fuzz_target!(|input: FuzzInput| {
     // Cap operations to avoid excessive runtime per input
     let max_ops = 48;
@@ -86,7 +108,7 @@ fuzz_target!(|input: FuzzInput| {
         &input.ops
     };
 
-    let virtual_size = input.config.virtual_size();
+    let mut virtual_size = input.config.virtual_size();
     let backend = Box::new(MemoryBackend::zeroed(0));
     let mut image = match Qcow2Image::create_on_backend(
         backend,
@@ -200,7 +222,46 @@ fuzz_target!(|input: FuzzInput| {
             Op::Resize { new_size_raw } => {
                 // 256 KB to 4 MB
                 let new_size = ((*new_size_raw as u64 % 16) + 1) << 18;
-                let _ = image.resize(new_size);
+                if image.resize(new_size).is_ok() {
+                    virtual_size = new_size;
+                }
+            }
+            Op::BitmapCreate {
+                name_idx,
+                auto_track,
+            } => {
+                let name = BITMAP_NAMES[*name_idx as usize % BITMAP_NAMES.len()];
+                let _ = image.bitmap_create(name, None, *auto_track);
+            }
+            Op::BitmapDelete { name_idx } => {
+                let name = BITMAP_NAMES[*name_idx as usize % BITMAP_NAMES.len()];
+                let _ = image.bitmap_delete(name);
+            }
+            Op::BitmapSetDirty {
+                name_idx,
+                offset_raw,
+                len_raw,
+            } => {
+                let name = BITMAP_NAMES[*name_idx as usize % BITMAP_NAMES.len()];
+                let offset = *offset_raw as u64 % virtual_size;
+                let len = (*len_raw as u64).min(virtual_size - offset).max(1);
+                let _ = image.bitmap_set_dirty(name, offset, len);
+            }
+            Op::BitmapClear { name_idx } => {
+                let name = BITMAP_NAMES[*name_idx as usize % BITMAP_NAMES.len()];
+                let _ = image.bitmap_clear(name);
+            }
+            Op::HashInit => {
+                let _ = image.hash_init(None, None);
+            }
+            Op::HashRehash => {
+                let _ = image.hash_rehash();
+            }
+            Op::HashRemove => {
+                let _ = image.hash_remove();
+            }
+            Op::CheckIntegrity => {
+                let _ = image.check_integrity();
             }
         }
     }
