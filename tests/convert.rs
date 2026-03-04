@@ -34,7 +34,7 @@ fn create_image_with_data(
             virtual_size: 2 * 1024 * 1024, // 2 MB
             cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
         },
     )
     .unwrap();
@@ -60,7 +60,7 @@ fn convert_qcow2_to_raw_matches_qemu_convert() {
 
     // Our conversion
     let our_raw = dir.path().join("our.raw");
-    converter::convert_to_raw(&src, &our_raw).unwrap();
+    converter::convert_to_raw(&src, &our_raw, None).unwrap();
 
     // qemu conversion for reference
     let qemu_raw = dir.path().join("qemu.raw");
@@ -104,7 +104,7 @@ fn convert_raw_to_qcow2_passes_qemu_check() {
     std::fs::write(&raw_path, &raw_data).unwrap();
 
     let qcow2_path = dir.path().join("output.qcow2");
-    converter::convert_from_raw(&raw_path, &qcow2_path, false, None, None).unwrap();
+    converter::convert_from_raw(&raw_path, &qcow2_path, false, None, None, None).unwrap();
 
     assert_qemu_check(&qcow2_path);
 }
@@ -125,7 +125,7 @@ fn convert_raw_to_qcow2_data_integrity() {
     std::fs::write(&raw_path, &raw_data).unwrap();
 
     let qcow2_path = dir.path().join("output.qcow2");
-    converter::convert_from_raw(&raw_path, &qcow2_path, false, None, None).unwrap();
+    converter::convert_from_raw(&raw_path, &qcow2_path, false, None, None, None).unwrap();
 
     // Verify with qemu-io
     let img = common::TestImage {
@@ -160,7 +160,7 @@ fn convert_raw_to_qcow2_compressed_passes_qemu_check() {
     std::fs::write(&raw_path, &raw_data).unwrap();
 
     let qcow2_path = dir.path().join("compressed.qcow2");
-    converter::convert_from_raw(&raw_path, &qcow2_path, true, None, None).unwrap();
+    converter::convert_from_raw(&raw_path, &qcow2_path, true, None, None, None).unwrap();
 
     assert_qemu_check(&qcow2_path);
 }
@@ -180,7 +180,7 @@ fn convert_compressed_data_readable_by_qemu() {
     std::fs::write(&raw_path, &raw_data).unwrap();
 
     let qcow2_path = dir.path().join("compressed.qcow2");
-    converter::convert_from_raw(&raw_path, &qcow2_path, true, None, None).unwrap();
+    converter::convert_from_raw(&raw_path, &qcow2_path, true, None, None, None).unwrap();
 
     let img = common::TestImage {
         path: qcow2_path,
@@ -205,7 +205,7 @@ fn convert_qcow2_to_qcow2_passes_qemu_check() {
     );
 
     let dst = dir.path().join("compact.qcow2");
-    converter::convert_qcow2_to_qcow2(&src, &dst, false, None, None).unwrap();
+    converter::convert_qcow2_to_qcow2(&src, &dst, false, None, None, None, None).unwrap();
 
     assert_qemu_check(&dst);
 
@@ -230,7 +230,7 @@ fn convert_qcow2_to_qcow2_compressed_passes_qemu_check() {
     );
 
     let dst = dir.path().join("compressed.qcow2");
-    converter::convert_qcow2_to_qcow2(&src, &dst, true, None, None).unwrap();
+    converter::convert_qcow2_to_qcow2(&src, &dst, true, None, None, None, None).unwrap();
 
     assert_qemu_check(&dst);
 }

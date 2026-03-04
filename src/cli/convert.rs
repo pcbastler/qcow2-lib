@@ -28,12 +28,14 @@ pub fn run(
     compress: bool,
     compression_type: Option<u8>,
     data_file: Option<String>,
+    password: Option<&[u8]>,
+    encryption: Option<qcow2_lib::engine::image::EncryptionOptions>,
 ) -> Result<()> {
     let input_format = detect_format(input)?;
 
     match (input_format, format) {
         (InputFormat::Qcow2, OutputFormat::Raw) => {
-            converter::convert_to_raw(input, output)?;
+            converter::convert_to_raw(input, output, password)?;
             println!(
                 "Converted {} (qcow2) -> {} (raw)",
                 input.display(),
@@ -41,7 +43,9 @@ pub fn run(
             );
         }
         (InputFormat::Qcow2, OutputFormat::Qcow2) => {
-            converter::convert_qcow2_to_qcow2(input, output, compress, compression_type, data_file)?;
+            converter::convert_qcow2_to_qcow2(
+                input, output, compress, compression_type, data_file, password, encryption,
+            )?;
             let suffix = if compress { " (compressed)" } else { "" };
             println!(
                 "Converted {} (qcow2) -> {} (qcow2){suffix}",
@@ -50,7 +54,7 @@ pub fn run(
             );
         }
         (InputFormat::Raw, OutputFormat::Qcow2) => {
-            converter::convert_from_raw(input, output, compress, compression_type, data_file)?;
+            converter::convert_from_raw(input, output, compress, compression_type, data_file, encryption)?;
             let suffix = if compress { " (compressed)" } else { "" };
             println!(
                 "Converted {} (raw) -> {} (qcow2){suffix}",

@@ -81,6 +81,7 @@ pub struct HashManager<'a> {
     cluster_bits: u32,
     virtual_size: u64,
     compression_type: u8,
+    crypt_context: Option<&'a crate::engine::encryption::CryptContext>,
 }
 
 impl<'a> HashManager<'a> {
@@ -97,6 +98,7 @@ impl<'a> HashManager<'a> {
         cluster_bits: u32,
         virtual_size: u64,
         compression_type: u8,
+        crypt_context: Option<&'a crate::engine::encryption::CryptContext>,
     ) -> Self {
         Self {
             backend,
@@ -109,6 +111,7 @@ impl<'a> HashManager<'a> {
             cluster_bits,
             virtual_size,
             compression_type,
+            crypt_context,
         }
     }
 
@@ -539,10 +542,21 @@ impl<'a> HashManager<'a> {
                     ..
                 } => {
                     has_data = true;
-                    self.data_backend.read_exact_at(
-                        &mut data[pos as usize..pos as usize + len],
-                        host_offset.0 + intra_cluster_offset.0 as u64,
-                    )?;
+                    if let Some(crypt) = self.crypt_context {
+                        // Encrypted: read full cluster, decrypt, extract slice
+                        let cs = cluster_size as usize;
+                        let mut cluster_buf = vec![0u8; cs];
+                        self.data_backend.read_exact_at(&mut cluster_buf, host_offset.0)?;
+                        crypt.decrypt_cluster(host_offset.0, &mut cluster_buf)?;
+                        let intra = intra_cluster_offset.0 as usize;
+                        data[pos as usize..pos as usize + len]
+                            .copy_from_slice(&cluster_buf[intra..intra + len]);
+                    } else {
+                        self.data_backend.read_exact_at(
+                            &mut data[pos as usize..pos as usize + len],
+                            host_offset.0 + intra_cluster_offset.0 as u64,
+                        )?;
+                    }
                 }
                 ClusterResolution::Zero { .. } => {
                     has_data = true;

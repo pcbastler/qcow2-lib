@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::format::constants::SUBCLUSTERS_PER_CLUSTER;
 use crate::format::l2::{SubclusterBitmap, SubclusterState};
 use crate::format::types::{ClusterOffset, GuestOffset, IntraClusterOffset};
+use crate::engine::encryption::CryptContext;
 use crate::io::IoBackend;
 
 /// Reads guest data from a QCOW2 image, handling all cluster types.
@@ -33,6 +34,7 @@ pub struct Qcow2Reader<'a> {
     read_mode: ReadMode,
     warnings: &'a mut Vec<ReadWarning>,
     backing_image: Option<&'a mut crate::engine::image::Qcow2Image>,
+    crypt_context: Option<&'a CryptContext>,
 }
 
 impl<'a> Qcow2Reader<'a> {
@@ -49,6 +51,7 @@ impl<'a> Qcow2Reader<'a> {
         read_mode: ReadMode,
         warnings: &'a mut Vec<ReadWarning>,
         backing_image: Option<&'a mut crate::engine::image::Qcow2Image>,
+        crypt_context: Option<&'a CryptContext>,
     ) -> Self {
         Self {
             mapper,
@@ -61,6 +64,7 @@ impl<'a> Qcow2Reader<'a> {
             read_mode,
             warnings,
             backing_image,
+            crypt_context,
         }
     }
 
@@ -120,12 +124,7 @@ impl<'a> Qcow2Reader<'a> {
                 subclusters,
             } => {
                 if subclusters.is_all_allocated() {
-                    // Fast path: all subclusters allocated → bulk read
-                    let read_offset = host_offset.0 + intra_cluster_offset.0 as u64;
-                    match self.data_backend.read_exact_at(buf, read_offset) {
-                        Ok(()) => Ok(()),
-                        Err(e) => self.handle_read_error(buf, guest_offset, e),
-                    }
+                    self.read_allocated(buf, guest_offset, host_offset, intra_cluster_offset)
                 } else {
                     self.read_subclustered(buf, guest_offset, Some(host_offset), intra_cluster_offset, subclusters)
                 }
@@ -195,6 +194,52 @@ impl<'a> Qcow2Reader<'a> {
         }
     }
 
+    /// Read from an allocated cluster, decrypting if encrypted.
+    ///
+    /// For unencrypted images: direct read from host.
+    /// For encrypted images: if reading a full cluster, read and decrypt in-place.
+    /// For partial reads of encrypted clusters, read the full cluster, decrypt,
+    /// then copy the requested slice.
+    fn read_allocated(
+        &mut self,
+        buf: &mut [u8],
+        guest_offset: u64,
+        host_offset: ClusterOffset,
+        intra_cluster_offset: IntraClusterOffset,
+    ) -> Result<()> {
+        let read_offset = host_offset.0 + intra_cluster_offset.0 as u64;
+
+        if self.crypt_context.is_none() {
+            return match self.data_backend.read_exact_at(buf, read_offset) {
+                Ok(()) => Ok(()),
+                Err(e) => self.handle_read_error(buf, guest_offset, e),
+            };
+        }
+
+        let crypt = self.crypt_context.unwrap();
+        let cluster_size = 1usize << self.cluster_bits;
+        let intra = intra_cluster_offset.0 as usize;
+
+        if intra == 0 && buf.len() == cluster_size {
+            // Full cluster read: decrypt in-place
+            match self.data_backend.read_exact_at(buf, host_offset.0) {
+                Ok(()) => crypt.decrypt_cluster(host_offset.0, buf),
+                Err(e) => self.handle_read_error(buf, guest_offset, e),
+            }
+        } else {
+            // Partial cluster: read full cluster, decrypt, copy slice
+            let mut cluster_buf = vec![0u8; cluster_size];
+            match self.data_backend.read_exact_at(&mut cluster_buf, host_offset.0) {
+                Ok(()) => {
+                    crypt.decrypt_cluster(host_offset.0, &mut cluster_buf)?;
+                    buf.copy_from_slice(&cluster_buf[intra..intra + buf.len()]);
+                    Ok(())
+                }
+                Err(e) => self.handle_read_error(buf, guest_offset, e),
+            }
+        }
+    }
+
     /// Read from a cluster with per-subcluster dispatch.
     ///
     /// Each subcluster within the read range is dispatched independently:
@@ -217,6 +262,21 @@ impl<'a> Qcow2Reader<'a> {
         let sc_size = cluster_size / SUBCLUSTERS_PER_CLUSTER as u64;
         let intra = intra_cluster_offset.0 as u64;
 
+        // For encrypted images with a host cluster, pre-read and decrypt
+        // the entire cluster so subcluster slices come from plaintext.
+        let decrypted_cluster = if self.crypt_context.is_some() {
+            if let Some(host) = host_offset {
+                let mut cluster_buf = vec![0u8; cluster_size as usize];
+                self.data_backend.read_exact_at(&mut cluster_buf, host.0)?;
+                self.crypt_context.unwrap().decrypt_cluster(host.0, &mut cluster_buf)?;
+                Some(cluster_buf)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut buf_pos = 0usize;
         let mut cluster_pos = intra;
 
@@ -232,7 +292,12 @@ impl<'a> Qcow2Reader<'a> {
             let state = bitmap.get(sc_index);
             match state {
                 SubclusterState::Allocated => {
-                    if let Some(host) = host_offset {
+                    if let Some(ref dc) = decrypted_cluster {
+                        // Encrypted: copy from pre-decrypted cluster buffer
+                        let cp = cluster_pos as usize;
+                        buf[buf_pos..buf_pos + chunk_len]
+                            .copy_from_slice(&dc[cp..cp + chunk_len]);
+                    } else if let Some(host) = host_offset {
                         let read_offset = host.0 + cluster_pos;
                         match self.data_backend.read_exact_at(
                             &mut buf[buf_pos..buf_pos + chunk_len],
@@ -357,6 +422,7 @@ mod tests {
             COMPRESSION_DEFLATE,
             ReadMode::Strict,
             warnings,
+            None,
             None,
         )
     }
@@ -652,6 +718,7 @@ mod tests {
             COMPRESSION_DEFLATE,
             ReadMode::Lenient,
             warnings,
+            None,
             None,
         )
     }
@@ -964,7 +1031,7 @@ mod tests {
                 virtual_size: backing_vs,
                 cluster_bits: Some(CLUSTER_BITS),
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -994,6 +1061,7 @@ mod tests {
             ReadMode::Strict,
             &mut warnings,
             Some(&mut backing),
+            None,
         );
 
         let mut buf = vec![0xFF; 512];
@@ -1012,7 +1080,7 @@ mod tests {
                 virtual_size: 256,
                 cluster_bits: Some(CLUSTER_BITS),
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -1034,6 +1102,7 @@ mod tests {
             ReadMode::Strict,
             &mut warnings,
             Some(&mut backing),
+            None,
         );
 
         let mut buf = vec![0xFF; 512];
@@ -1069,6 +1138,7 @@ mod tests {
             ReadMode::Strict,
             &mut warnings,
             Some(&mut backing),
+            None,
         );
 
         let mut buf = vec![0u8; 512];

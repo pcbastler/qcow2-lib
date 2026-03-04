@@ -159,7 +159,7 @@ impl TestImage {
 /// Parse the hex dump output from `qemu-io -c "read -v"`.
 ///
 /// Format: `offset: xx xx xx xx ...  xxxxxxxx`
-fn parse_qemu_io_hex_dump(output: &str) -> Vec<u8> {
+pub fn parse_qemu_io_hex_dump(output: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
 
     for line in output.lines() {
@@ -210,4 +210,104 @@ pub fn has_qemu_img() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// QEMU-created encrypted image helper.
+pub struct EncryptedTestImage {
+    pub path: PathBuf,
+    pub password: String,
+    pub _dir: TempDir,
+}
+
+impl EncryptedTestImage {
+    /// Create a LUKS-encrypted QCOW2 image using qemu-img.
+    pub fn create(size: &str, password: &str) -> Self {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path().join("encrypted.qcow2");
+
+        let secret_arg = format!("secret,id=sec0,data={password}");
+        let output = Command::new("qemu-img")
+            .args(["create", "-f", "qcow2"])
+            .args(["--object", &secret_arg])
+            .args(["-o", "encrypt.format=luks,encrypt.key-secret=sec0,encrypt.cipher-alg=aes-256,encrypt.cipher-mode=xts,encrypt.ivgen-alg=plain64,encrypt.iter-time=10"])
+            .arg(&path)
+            .arg(size)
+            .output()
+            .expect("failed to run qemu-img create");
+
+        assert!(
+            output.status.success(),
+            "qemu-img create encrypted failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        Self {
+            path,
+            password: password.to_string(),
+            _dir: dir,
+        }
+    }
+
+    /// Write a pattern to the encrypted image via qemu-io.
+    pub fn write_pattern(&self, pattern: u8, offset: u64, length: usize) {
+        let secret_arg = format!("secret,id=sec0,data={}", self.password);
+        let image_opts = format!(
+            "driver=qcow2,encrypt.key-secret=sec0,file.driver=file,file.filename={}",
+            self.path.display()
+        );
+        let write_cmd = format!("write -P 0x{pattern:02x} {offset} {length}");
+        let output = Command::new("qemu-io")
+            .args(["--object", &secret_arg])
+            .args(["--image-opts", &image_opts])
+            .args(["-c", &write_cmd])
+            .output()
+            .expect("failed to run qemu-io");
+
+        assert!(
+            output.status.success(),
+            "qemu-io encrypted write failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Read data from the encrypted image via qemu-io.
+    pub fn read_via_qemu(&self, offset: u64, length: usize) -> Vec<u8> {
+        let secret_arg = format!("secret,id=sec0,data={}", self.password);
+        let image_opts = format!(
+            "driver=qcow2,encrypt.key-secret=sec0,file.driver=file,file.filename={}",
+            self.path.display()
+        );
+        let read_cmd = format!("read -v {offset} {length}");
+        let output = Command::new("qemu-io")
+            .args(["--object", &secret_arg])
+            .args(["--image-opts", &image_opts])
+            .args(["-c", &read_cmd])
+            .output()
+            .expect("failed to run qemu-io");
+
+        assert!(
+            output.status.success(),
+            "qemu-io encrypted read failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        parse_qemu_io_hex_dump(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    /// Run qemu-img check on the encrypted image.
+    pub fn qemu_check(&self) -> bool {
+        let secret_arg = format!("secret,id=sec0,data={}", self.password);
+        let image_opts = format!(
+            "driver=qcow2,encrypt.key-secret=sec0,file.driver=file,file.filename={}",
+            self.path.display()
+        );
+        let output = Command::new("qemu-img")
+            .args(["check"])
+            .args(["--object", &secret_arg])
+            .args(["--image-opts", &image_opts])
+            .output()
+            .expect("failed to run qemu-img check");
+
+        output.status.success()
+    }
 }

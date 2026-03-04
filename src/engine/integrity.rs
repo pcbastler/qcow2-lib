@@ -233,6 +233,9 @@ pub fn build_reference_map(
     };
     walk_blake3_hashes(backend, header, cluster_size, &snap_hashes, &mut refs)?;
 
+    // 10. LUKS header clusters (FullDiskEncryption extension)
+    walk_luks_header(backend, header, cluster_size, &mut refs)?;
+
     Ok((refs, stats))
 }
 
@@ -655,6 +658,40 @@ fn walk_blake3_hashes(
     Ok(())
 }
 
+/// Walk LUKS header clusters referenced by the FullDiskEncryption extension.
+fn walk_luks_header(
+    backend: &dyn IoBackend,
+    header: &Header,
+    cluster_size: u64,
+    refs: &mut HashMap<u64, u64>,
+) -> Result<()> {
+    if header.crypt_method < 2 {
+        return Ok(());
+    }
+
+    let ext_start = header.header_length as u64;
+    let ext_end = cluster_size.min(backend.file_size()?);
+    if ext_start >= ext_end {
+        return Ok(());
+    }
+
+    let mut ext_buf = vec![0u8; (ext_end - ext_start) as usize];
+    backend.read_exact_at(&mut ext_buf, ext_start)?;
+    let extensions = HeaderExtension::read_all(&ext_buf).unwrap_or_default();
+
+    if let Some((offset, length)) = extensions.iter().find_map(|e| match e {
+        HeaderExtension::FullDiskEncryption { offset, length } => Some((*offset, *length)),
+        _ => None,
+    }) {
+        let luks_clusters = (length as u64 + cluster_size - 1) / cluster_size;
+        for c in 0..luks_clusters {
+            add_ref(refs, offset + c * cluster_size, cluster_size);
+        }
+    }
+
+    Ok(())
+}
+
 /// Walk a single hash table and its data clusters.
 fn walk_hash_table(
     backend: &dyn IoBackend,
@@ -721,7 +758,7 @@ mod tests {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -747,7 +784,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -777,7 +814,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -806,7 +843,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -837,7 +874,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -869,7 +906,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -927,7 +964,7 @@ mod tests {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -959,7 +996,7 @@ mod tests {
         }
         std::fs::write(&raw_path, &raw_data).unwrap();
 
-        crate::engine::converter::convert_from_raw(&raw_path, &qcow2_path, true, None, None).unwrap();
+        crate::engine::converter::convert_from_raw(&raw_path, &qcow2_path, true, None, None, None).unwrap();
 
         let image = Qcow2Image::open(&qcow2_path).unwrap();
         let report = check_integrity(image.backend(), image.header()).unwrap();
@@ -1012,7 +1049,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -1068,7 +1105,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -1122,7 +1159,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -1171,7 +1208,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -1207,7 +1244,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();

@@ -464,6 +464,65 @@ pub enum Error {
     #[error("only raw external data files are supported (RAW_EXTERNAL autoclear bit required)")]
     RawExternalRequired,
 
+    // ---- Encryption errors ----
+
+    /// Decryption of a cluster failed.
+    #[error("decryption failed for cluster at guest offset 0x{guest_offset:x}: {message}")]
+    DecryptionFailed {
+        /// Guest offset of the cluster being decrypted.
+        guest_offset: u64,
+        /// Description of the error.
+        message: String,
+    },
+
+    /// Encryption of a cluster failed.
+    #[error("encryption failed for cluster at guest offset 0x{guest_offset:x}: {message}")]
+    EncryptionFailed {
+        /// Guest offset of the cluster being encrypted.
+        guest_offset: u64,
+        /// Description of the error.
+        message: String,
+    },
+
+    /// The LUKS header in the image is invalid or corrupted.
+    #[error("invalid LUKS header: {message}")]
+    InvalidLuksHeader {
+        /// Description of what is wrong.
+        message: String,
+    },
+
+    /// The cipher or cipher mode is not supported.
+    #[error("unsupported cipher: {cipher_name}-{cipher_mode}")]
+    UnsupportedCipher {
+        /// Cipher algorithm name (e.g., "aes").
+        cipher_name: String,
+        /// Cipher mode (e.g., "xts-plain64").
+        cipher_mode: String,
+    },
+
+    /// Key derivation failed (PBKDF2 or Argon2).
+    #[error("key derivation failed: {message}")]
+    KeyDerivationFailed {
+        /// Description of the error.
+        message: String,
+    },
+
+    /// The provided password did not unlock any key slot.
+    #[error("wrong password: no key slot could be unlocked")]
+    WrongPassword,
+
+    /// An encrypted image was opened without providing a password.
+    #[error("image is encrypted but no password was provided")]
+    NoPasswordProvided,
+
+    /// Encryption and compression are mutually exclusive in QCOW2.
+    #[error("encryption and compression are mutually exclusive")]
+    EncryptionWithCompression,
+
+    /// All LUKS key slots are full.
+    #[error("all LUKS key slots are full")]
+    LuksKeySlotsFull,
+
     // ---- BLAKE3 hash errors ----
 
     /// The BLAKE3 hash extension header is invalid.

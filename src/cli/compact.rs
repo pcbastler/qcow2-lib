@@ -18,7 +18,7 @@ pub fn run(input: &Path, output: &Path, compress: bool) -> Result<()> {
         if compress { " (compressed)" } else { "" }
     );
 
-    converter::convert_qcow2_to_qcow2(input, output, compress, None, None)?;
+    converter::convert_qcow2_to_qcow2(input, output, compress, None, None, None, None)?;
 
     println!("Done.");
     Ok(())

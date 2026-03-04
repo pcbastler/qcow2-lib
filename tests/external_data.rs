@@ -24,7 +24,7 @@ fn create_external_data_sets_header_fields() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: None,
-            data_file: Some("ext.raw".to_string()),
+            data_file: Some("ext.raw".to_string()), encryption: None,
         },
     )
     .unwrap();
@@ -64,7 +64,7 @@ fn create_external_data_creates_data_file() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: None,
-            data_file: Some("ext.raw".to_string()),
+            data_file: Some("ext.raw".to_string()), encryption: None,
         },
     )
     .unwrap();
@@ -88,7 +88,7 @@ fn write_read_round_trip_with_memory_backends() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: None,
-            data_file: Some("data.raw".to_string()),
+            data_file: Some("data.raw".to_string()), encryption: None,
         },
     )
     .unwrap();
@@ -119,7 +119,7 @@ fn write_read_round_trip_file_based() {
                 cluster_bits: None,
                 extended_l2: false,
                 compression_type: None,
-                data_file: Some("ext.raw".to_string()),
+                data_file: Some("ext.raw".to_string()), encryption: None,
             },
         )
         .unwrap();
@@ -157,7 +157,7 @@ fn compressed_write_rejected_with_external_data() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: None,
-            data_file: Some("ext.raw".to_string()),
+            data_file: Some("ext.raw".to_string()), encryption: None,
         },
     )
     .unwrap();
@@ -188,7 +188,7 @@ fn create_with_compression_and_external_data_fails() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: Some(qcow2_lib::format::constants::COMPRESSION_ZSTD),
-            data_file: Some("data.raw".to_string()),
+            data_file: Some("data.raw".to_string()), encryption: None,
         },
     );
     assert!(result.is_err(), "zstd + external data should fail");
@@ -206,7 +206,7 @@ fn integrity_check_passes_with_external_data() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: None,
-            data_file: Some("ext.raw".to_string()),
+            data_file: Some("ext.raw".to_string()), encryption: None,
         },
     )
     .unwrap();
@@ -247,6 +247,7 @@ fn convert_raw_to_qcow2_with_data_file() {
         false,
         None,
         Some("output.raw".to_string()),
+        None,
     )
     .unwrap();
 
@@ -272,7 +273,7 @@ fn data_offsets_are_identity_mapped() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: None,
-            data_file: Some("ext.raw".to_string()),
+            data_file: Some("ext.raw".to_string()), encryption: None,
         },
     )
     .unwrap();
@@ -310,7 +311,7 @@ fn qemu_reads_our_external_data_image() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: None,
-            data_file: Some(data_raw.display().to_string()),
+            data_file: Some(data_raw.display().to_string()), encryption: None,
         },
     )
     .unwrap();
@@ -387,7 +388,7 @@ fn qemu_check_passes_on_our_image() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: None,
-            data_file: Some(data_raw.display().to_string()),
+            data_file: Some(data_raw.display().to_string()), encryption: None,
         },
     )
     .unwrap();
