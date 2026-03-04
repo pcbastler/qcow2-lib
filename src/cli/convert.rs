@@ -27,6 +27,7 @@ pub fn run(
     format: &OutputFormat,
     compress: bool,
     compression_type: Option<u8>,
+    data_file: Option<String>,
 ) -> Result<()> {
     let input_format = detect_format(input)?;
 
@@ -40,7 +41,7 @@ pub fn run(
             );
         }
         (InputFormat::Qcow2, OutputFormat::Qcow2) => {
-            converter::convert_qcow2_to_qcow2(input, output, compress, compression_type)?;
+            converter::convert_qcow2_to_qcow2(input, output, compress, compression_type, data_file)?;
             let suffix = if compress { " (compressed)" } else { "" };
             println!(
                 "Converted {} (qcow2) -> {} (qcow2){suffix}",
@@ -49,7 +50,7 @@ pub fn run(
             );
         }
         (InputFormat::Raw, OutputFormat::Qcow2) => {
-            converter::convert_from_raw(input, output, compress, compression_type)?;
+            converter::convert_from_raw(input, output, compress, compression_type, data_file)?;
             let suffix = if compress { " (compressed)" } else { "" };
             println!(
                 "Converted {} (raw) -> {} (qcow2){suffix}",

@@ -1019,6 +1019,7 @@ mod tests {
                 virtual_size,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap()

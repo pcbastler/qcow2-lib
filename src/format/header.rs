@@ -736,10 +736,10 @@ mod tests {
         let good = make_test_header_v3();
         let mut buf = vec![0u8; good.serialized_length()];
         good.write_to(&mut buf).unwrap();
-        // Set EXTERNAL_DATA_FILE bit (not supported)
+        // Set an unknown incompatible feature bit (bit 5, not supported)
         BigEndian::write_u64(
             &mut buf[OFF_INCOMPATIBLE_FEATURES..],
-            IncompatibleFeatures::EXTERNAL_DATA_FILE.bits(),
+            1 << 5,
         );
 
         match Header::read_from(&buf) {

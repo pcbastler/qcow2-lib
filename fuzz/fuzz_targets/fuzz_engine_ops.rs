@@ -116,6 +116,7 @@ fuzz_target!(|input: FuzzInput| {
             virtual_size,
             cluster_bits: Some(input.config.cluster_bits()),
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     ) {
         Ok(img) => img,

@@ -57,6 +57,7 @@ bitflags! {
 /// must be rejected.
 pub const SUPPORTED_INCOMPATIBLE_FEATURES: IncompatibleFeatures = IncompatibleFeatures::DIRTY
     .union(IncompatibleFeatures::CORRUPT)
+    .union(IncompatibleFeatures::EXTERNAL_DATA_FILE)
     .union(IncompatibleFeatures::COMPRESSION_TYPE)
     .union(IncompatibleFeatures::EXTENDED_L2);
 
@@ -106,7 +107,7 @@ mod tests {
         assert!(SUPPORTED_INCOMPATIBLE_FEATURES.contains(IncompatibleFeatures::DIRTY));
         assert!(SUPPORTED_INCOMPATIBLE_FEATURES.contains(IncompatibleFeatures::CORRUPT));
         assert!(SUPPORTED_INCOMPATIBLE_FEATURES.contains(IncompatibleFeatures::COMPRESSION_TYPE));
-        assert!(!SUPPORTED_INCOMPATIBLE_FEATURES.contains(IncompatibleFeatures::EXTERNAL_DATA_FILE));
+        assert!(SUPPORTED_INCOMPATIBLE_FEATURES.contains(IncompatibleFeatures::EXTERNAL_DATA_FILE));
         assert!(SUPPORTED_INCOMPATIBLE_FEATURES.contains(IncompatibleFeatures::EXTENDED_L2));
     }
 }

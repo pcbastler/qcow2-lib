@@ -10,8 +10,9 @@ use crate::engine::cluster_mapping::ClusterMapper;
 use crate::engine::read_mode::ReadMode;
 use crate::engine::refcount_manager::RefcountManager;
 use crate::error::{Error, Result};
-use crate::format::feature_flags::IncompatibleFeatures;
+use crate::format::feature_flags::{AutoclearFeatures, IncompatibleFeatures};
 use crate::format::header::Header;
+use crate::format::header_extension::HeaderExtension;
 use crate::format::l1::L1Table;
 use crate::format::types::{ClusterGeometry, ClusterOffset};
 use crate::io::sync_backend::SyncFileBackend;
@@ -31,6 +32,9 @@ impl Qcow2Image {
     /// - Cluster 3: refcount block 0
     pub fn create<P: AsRef<Path>>(path: P, options: CreateOptions) -> Result<Self> {
         let path = path.as_ref();
+        let data_file_name = options.data_file.clone();
+        let virtual_size = options.virtual_size;
+
         let backend = SyncFileBackend::create(path).map_err(|e| {
             if let Error::Io { source, .. } = e {
                 Error::CreateFailed {
@@ -41,7 +45,32 @@ impl Qcow2Image {
                 e
             }
         })?;
-        Self::create_on_backend(Box::new(backend), options)
+
+        let mut image = Self::create_on_backend(Box::new(backend), options)?;
+
+        // Create the external data file if requested
+        if let Some(ref name) = data_file_name {
+            let image_dir = path.parent().unwrap_or(Path::new("."));
+            let data_path = image_dir.join(name);
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&data_path)
+                .map_err(|source| Error::ExternalDataFileOpen {
+                    source,
+                    path: data_path.display().to_string(),
+                })?;
+            // Pre-allocate to virtual_size so guest offsets are valid
+            file.set_len(virtual_size).map_err(|source| Error::ExternalDataFileOpen {
+                source,
+                path: data_path.display().to_string(),
+            })?;
+            image.data_backend = Some(Box::new(SyncFileBackend::from_file(file)));
+        }
+
+        Ok(image)
     }
 
     /// Create a new QCOW2 v3 image on an I/O backend (for testing).
@@ -54,6 +83,7 @@ impl Qcow2Image {
         let refcount_order = 4u32; // 16-bit refcounts
         let extended_l2 = options.extended_l2;
         let compression_type = options.compression_type.unwrap_or(crate::format::constants::COMPRESSION_DEFLATE);
+        let data_file = options.data_file;
 
         // Validate extended L2 requirements
         if extended_l2 && cluster_bits < crate::format::constants::MIN_CLUSTER_BITS_EXTENDED_L2 {
@@ -61,6 +91,13 @@ impl Qcow2Image {
                 cluster_bits,
                 min: crate::format::constants::MIN_CLUSTER_BITS_EXTENDED_L2,
             });
+        }
+
+        // Compressed clusters are not supported with external data files
+        if data_file.is_some()
+            && compression_type != crate::format::constants::COMPRESSION_DEFLATE
+        {
+            return Err(Error::CompressedWithExternalData);
         }
 
         // Calculate L1 table size
@@ -83,6 +120,15 @@ impl Qcow2Image {
         }
         if compression_type != crate::format::constants::COMPRESSION_DEFLATE {
             incompat |= IncompatibleFeatures::COMPRESSION_TYPE;
+        }
+        if data_file.is_some() {
+            incompat |= IncompatibleFeatures::EXTERNAL_DATA_FILE;
+        }
+
+        // Build autoclear features
+        let mut autoclear = AutoclearFeatures::empty();
+        if data_file.is_some() {
+            autoclear |= AutoclearFeatures::RAW_EXTERNAL;
         }
 
         // header_length must include compression_type byte when non-deflate
@@ -108,11 +154,17 @@ impl Qcow2Image {
             snapshots_offset: ClusterOffset(0),
             incompatible_features: incompat,
             compatible_features: crate::format::feature_flags::CompatibleFeatures::empty(),
-            autoclear_features: crate::format::feature_flags::AutoclearFeatures::empty(),
+            autoclear_features: autoclear,
             refcount_order,
             header_length,
             compression_type,
         };
+
+        // Build header extensions
+        let mut extensions = Vec::new();
+        if let Some(ref name) = data_file {
+            extensions.push(HeaderExtension::ExternalDataFile(name.clone()));
+        }
 
         // Write zeroed image (initial_clusters * cluster_size bytes)
         let zeroed_cluster = vec![0u8; cluster_size as usize];
@@ -123,6 +175,14 @@ impl Qcow2Image {
         // Write header
         let mut header_buf = vec![0u8; cluster_size as usize];
         header.write_to(&mut header_buf)?;
+
+        // Write header extensions after the header
+        if !extensions.is_empty() {
+            let ext_data = HeaderExtension::write_all(&extensions);
+            let ext_offset = header_length as usize;
+            header_buf[ext_offset..ext_offset + ext_data.len()].copy_from_slice(&ext_data);
+        }
+
         backend.write_all_at(&header_buf, 0)?;
 
         // Write L1 table (all zeros = unallocated, already written)
@@ -149,8 +209,9 @@ impl Qcow2Image {
 
         Ok(Self {
             header,
-            extensions: Vec::new(),
+            extensions,
             backend,
+            data_backend: None,
             mapper,
             cache: MetadataCache::new(CacheConfig::default()),
             backing_chain: None,
@@ -304,6 +365,7 @@ impl Qcow2Image {
             header,
             extensions: Vec::new(),
             backend,
+            data_backend: None,
             mapper,
             cache: MetadataCache::new(CacheConfig::default()),
             backing_chain: None,
@@ -335,7 +397,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 30, // 1 GB
                 cluster_bits: None,
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         )
         .unwrap();
@@ -355,7 +417,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: Some(12), // 4 KB clusters
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         )
         .unwrap();
@@ -372,7 +434,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 512,
                 cluster_bits: None,
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         )
         .unwrap();
@@ -389,7 +451,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 30,
                 cluster_bits: None,
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         )
         .unwrap();
@@ -414,7 +476,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: None,
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         )
         .unwrap();
@@ -435,7 +497,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         )
         .unwrap();
@@ -455,7 +517,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         )
         .unwrap();
@@ -490,7 +552,7 @@ mod tests {
             CreateOptions {
                 virtual_size,
                 cluster_bits: None,
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         )
         .unwrap();
@@ -512,7 +574,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         )
         .unwrap();
@@ -539,7 +601,7 @@ mod tests {
                 CreateOptions {
                     virtual_size: 1 << 20,
                     cluster_bits: None,
-                    extended_l2: false, compression_type: None,
+                    extended_l2: false, compression_type: None, data_file: None,
                 },
             )
             .unwrap();
@@ -569,7 +631,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         );
         assert!(result.is_err());
@@ -585,7 +647,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: None,
-                extended_l2: false, compression_type: None,
+                extended_l2: false, compression_type: None, data_file: None,
             },
         )
         .unwrap();

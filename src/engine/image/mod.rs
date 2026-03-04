@@ -61,6 +61,8 @@ pub struct Qcow2Image {
     header: Header,
     extensions: Vec<HeaderExtension>,
     backend: Box<dyn IoBackend>,
+    /// Separate I/O backend for guest data when using an external data file.
+    data_backend: Option<Box<dyn IoBackend>>,
     mapper: ClusterMapper,
     cache: MetadataCache,
     backing_chain: Option<BackingChain>,
@@ -90,6 +92,8 @@ pub struct CreateOptions {
     pub extended_l2: bool,
     /// Compression type: `None` = deflate (default), `Some(COMPRESSION_ZSTD)` = zstandard.
     pub compression_type: Option<u8>,
+    /// External data file name. When set, guest data is stored in a separate raw file.
+    pub data_file: Option<String>,
 }
 
 // ---- Core: open, read, accessors ----
@@ -111,7 +115,7 @@ impl Qcow2Image {
         let path = path.as_ref();
         let backend = SyncFileBackend::open(path)?;
         let image_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        Self::from_backend_with_options(Box::new(backend), Some(image_dir), read_mode)
+        Self::from_backend_with_options(Box::new(backend), Some(image_dir), read_mode, None)
     }
 
     /// Create a `Qcow2Image` from an already-opened I/O backend.
@@ -119,7 +123,7 @@ impl Qcow2Image {
     /// Useful for testing with [`MemoryBackend`](crate::io::MemoryBackend)
     /// or for custom I/O implementations. Uses [`ReadMode::Strict`].
     pub fn from_backend(backend: Box<dyn IoBackend>) -> Result<Self> {
-        Self::from_backend_with_options(backend, None, ReadMode::Strict)
+        Self::from_backend_with_options(backend, None, ReadMode::Strict, None)
     }
 
     /// Create a `Qcow2Image` from a backend with an explicit read mode.
@@ -127,7 +131,18 @@ impl Qcow2Image {
         backend: Box<dyn IoBackend>,
         read_mode: ReadMode,
     ) -> Result<Self> {
-        Self::from_backend_with_options(backend, None, read_mode)
+        Self::from_backend_with_options(backend, None, read_mode, None)
+    }
+
+    /// Create a `Qcow2Image` from separate metadata and data backends.
+    ///
+    /// Use this when the image has an external data file and you want to
+    /// provide the data backend yourself instead of having the library open it.
+    pub fn from_backend_with_data(
+        backend: Box<dyn IoBackend>,
+        data_backend: Option<Box<dyn IoBackend>>,
+    ) -> Result<Self> {
+        Self::from_backend_with_options(backend, None, ReadMode::Strict, data_backend)
     }
 
     /// Internal constructor that handles both file and backend paths.
@@ -135,6 +150,7 @@ impl Qcow2Image {
         backend: Box<dyn IoBackend>,
         image_dir: Option<&Path>,
         read_mode: ReadMode,
+        data_backend: Option<Box<dyn IoBackend>>,
     ) -> Result<Self> {
         // Read header (read enough for the largest possible v3 header)
         let mut header_buf = vec![0u8; 512];
@@ -226,6 +242,49 @@ impl Qcow2Image {
             }
         }
 
+        // Open external data file if EXTERNAL_DATA_FILE feature is set
+        let data_backend = if header
+            .incompatible_features
+            .contains(IncompatibleFeatures::EXTERNAL_DATA_FILE)
+        {
+            // Require RAW_EXTERNAL — non-raw external data files are not supported
+            if !header
+                .autoclear_features
+                .contains(AutoclearFeatures::RAW_EXTERNAL)
+            {
+                return Err(Error::RawExternalRequired);
+            }
+            if let Some(db) = data_backend {
+                // Caller provided the data backend directly
+                Some(db)
+            } else if let Some(dir) = image_dir {
+                // Path-based open: find the filename in header extensions
+                let data_file_name = extensions
+                    .iter()
+                    .find_map(|e| match e {
+                        HeaderExtension::ExternalDataFile(name) => Some(name.clone()),
+                        _ => None,
+                    })
+                    .ok_or(Error::MissingExternalDataFilePath)?;
+                let data_path = dir.join(&data_file_name);
+                let db = SyncFileBackend::open(&data_path).map_err(|e| {
+                    if let Error::Io { source, .. } = e {
+                        Error::ExternalDataFileOpen {
+                            source,
+                            path: data_path.display().to_string(),
+                        }
+                    } else {
+                        e
+                    }
+                })?;
+                Some(Box::new(db) as Box<dyn IoBackend>)
+            } else {
+                return Err(Error::MissingExternalDataFilePath);
+            }
+        } else {
+            None
+        };
+
         // Check if any bitmap has auto-tracking enabled
         let has_auto_bitmaps = Self::detect_auto_bitmaps(backend.as_ref(), &extensions);
 
@@ -236,6 +295,7 @@ impl Qcow2Image {
             header,
             extensions,
             backend,
+            data_backend,
             mapper,
             cache: MetadataCache::new(CacheConfig::default()),
             backing_chain,
@@ -259,8 +319,15 @@ impl Qcow2Image {
     /// In [`ReadMode::Lenient`], unreadable regions are filled with zeros
     /// and warnings are collected (see [`warnings`](Self::warnings)).
     pub fn read_at(&mut self, buf: &mut [u8], guest_offset: u64) -> Result<()> {
+        // RAW_EXTERNAL: data is always at guest offset in the raw file.
+        // No L2 lookup needed — identity mapping is guaranteed.
+        if let Some(ref data_be) = self.data_backend {
+            return data_be.read_exact_at(buf, guest_offset);
+        }
+
         let mut reader = Qcow2Reader::new(
             &self.mapper,
+            self.backend.as_ref(),
             self.backend.as_ref(),
             &mut self.cache,
             self.header.cluster_bits,
@@ -315,6 +382,25 @@ impl Qcow2Image {
         self.backend.as_ref()
     }
 
+    /// The I/O backend for guest data clusters.
+    ///
+    /// Returns the external data file backend if present, otherwise the main backend.
+    pub fn data_backend(&self) -> &dyn IoBackend {
+        self.data_backend
+            .as_deref()
+            .unwrap_or(self.backend.as_ref())
+    }
+
+    /// Whether this image uses an external data file.
+    pub fn has_external_data_file(&self) -> bool {
+        self.data_backend.is_some()
+    }
+
+    /// Set the external data backend (for testing or caller-provided backends).
+    pub fn set_data_backend(&mut self, backend: Box<dyn IoBackend>) {
+        self.data_backend = Some(backend);
+    }
+
     /// The current read mode.
     pub fn read_mode(&self) -> ReadMode {
         self.read_mode
@@ -352,7 +438,32 @@ impl Qcow2Image {
             Box::new(backend),
             Some(image_dir),
             ReadMode::Strict,
+            None,
         )?;
+
+        // If external data file, reopen in rw mode
+        if image.has_external_data_file() {
+            let data_file_name = image
+                .extensions
+                .iter()
+                .find_map(|e| match e {
+                    HeaderExtension::ExternalDataFile(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .ok_or(Error::MissingExternalDataFilePath)?;
+            let data_path = image_dir.join(&data_file_name);
+            let db = SyncFileBackend::open_rw(&data_path).map_err(|e| {
+                if let Error::Io { source, .. } = e {
+                    Error::ExternalDataFileOpen {
+                        source,
+                        path: data_path.display().to_string(),
+                    }
+                } else {
+                    e
+                }
+            })?;
+            image.data_backend = Some(Box::new(db));
+        }
 
         // Load refcount manager for write support
         let refcount_manager = RefcountManager::load(
@@ -369,7 +480,7 @@ impl Qcow2Image {
     ///
     /// Loads the refcount table for cluster allocation. Useful for testing.
     pub fn from_backend_rw(backend: Box<dyn IoBackend>) -> Result<Self> {
-        let mut image = Self::from_backend_with_options(backend, None, ReadMode::Strict)?;
+        let mut image = Self::from_backend_with_options(backend, None, ReadMode::Strict, None)?;
 
         let refcount_manager = RefcountManager::load(
             image.backend.as_ref(),
@@ -396,6 +507,11 @@ impl Qcow2Image {
             self.mark_dirty()?;
         }
 
+        let raw_external = self.data_backend.is_some();
+        let data_be: &dyn IoBackend = match &self.data_backend {
+            Some(db) => db.as_ref(),
+            None => self.backend.as_ref(),
+        };
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -405,11 +521,13 @@ impl Qcow2Image {
             &mut self.mapper,
             self.header.l1_table_offset,
             self.backend.as_ref(),
+            data_be,
             &mut self.cache,
             refcount_manager,
             self.header.cluster_bits,
             self.header.virtual_size,
             self.header.compression_type,
+            raw_external,
             self.backing_image.as_deref_mut(),
         );
         writer.write_at(buf, guest_offset)?;
@@ -445,8 +563,13 @@ impl Qcow2Image {
                 .expect("writable image must have refcount_manager");
 
             let compression_type = self.header.compression_type;
+            let data_be: &dyn crate::io::IoBackend = match &self.data_backend {
+                Some(db) => db.as_ref(),
+                None => self.backend.as_ref(),
+            };
             let mut mgr = HashManager::new(
                 self.backend.as_ref(),
+                data_be,
                 &mut self.cache,
                 refcount_manager,
                 &mut self.header,
@@ -611,6 +734,10 @@ impl Qcow2Image {
             self.mark_dirty()?;
         }
 
+        if self.data_backend.is_some() {
+            return Err(Error::CompressedWithExternalData);
+        }
+
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -620,11 +747,13 @@ impl Qcow2Image {
             &mut self.mapper,
             self.header.l1_table_offset,
             self.backend.as_ref(),
+            self.backend.as_ref(),
             &mut self.cache,
             refcount_manager,
             self.header.cluster_bits,
             self.header.virtual_size,
             self.header.compression_type,
+            false,
             self.backing_image.as_deref_mut(),
         );
         writer.set_compressed_cursor(self.compressed_cursor);

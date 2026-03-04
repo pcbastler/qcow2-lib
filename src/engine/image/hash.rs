@@ -29,6 +29,10 @@ impl Qcow2Image {
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
         let compression_type = self.header.compression_type;
+        let data_be: &dyn crate::io::IoBackend = match &self.data_backend {
+            Some(db) => db.as_ref(),
+            None => self.backend.as_ref(),
+        };
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -36,6 +40,7 @@ impl Qcow2Image {
 
         let mut mgr = HashManager::new(
             self.backend.as_ref(),
+            data_be,
             &mut self.cache,
             refcount_manager,
             &mut self.header,
@@ -59,6 +64,10 @@ impl Qcow2Image {
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
         let compression_type = self.header.compression_type;
+        let data_be: &dyn crate::io::IoBackend = match &self.data_backend {
+            Some(db) => db.as_ref(),
+            None => self.backend.as_ref(),
+        };
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -66,6 +75,7 @@ impl Qcow2Image {
 
         let mut mgr = HashManager::new(
             self.backend.as_ref(),
+            data_be,
             &mut self.cache,
             refcount_manager,
             &mut self.header,
@@ -87,6 +97,10 @@ impl Qcow2Image {
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
         let compression_type = self.header.compression_type;
+        let data_be: &dyn crate::io::IoBackend = match &self.data_backend {
+            Some(db) => db.as_ref(),
+            None => self.backend.as_ref(),
+        };
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -94,6 +108,7 @@ impl Qcow2Image {
 
         let mut mgr = HashManager::new(
             self.backend.as_ref(),
+            data_be,
             &mut self.cache,
             refcount_manager,
             &mut self.header,
@@ -113,6 +128,10 @@ impl Qcow2Image {
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
         let compression_type = self.header.compression_type;
+        let data_be: &dyn crate::io::IoBackend = match &self.data_backend {
+            Some(db) => db.as_ref(),
+            None => self.backend.as_ref(),
+        };
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -120,6 +139,7 @@ impl Qcow2Image {
 
         let mut mgr = HashManager::new(
             self.backend.as_ref(),
+            data_be,
             &mut self.cache,
             refcount_manager,
             &mut self.header,
@@ -137,6 +157,10 @@ impl Qcow2Image {
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
         let compression_type = self.header.compression_type;
+        let data_be: &dyn crate::io::IoBackend = match &self.data_backend {
+            Some(db) => db.as_ref(),
+            None => self.backend.as_ref(),
+        };
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -144,6 +168,7 @@ impl Qcow2Image {
 
         let mut mgr = HashManager::new(
             self.backend.as_ref(),
+            data_be,
             &mut self.cache,
             refcount_manager,
             &mut self.header,
@@ -161,6 +186,10 @@ impl Qcow2Image {
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
         let compression_type = self.header.compression_type;
+        let data_be: &dyn crate::io::IoBackend = match &self.data_backend {
+            Some(db) => db.as_ref(),
+            None => self.backend.as_ref(),
+        };
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -168,6 +197,7 @@ impl Qcow2Image {
 
         let mut mgr = HashManager::new(
             self.backend.as_ref(),
+            data_be,
             &mut self.cache,
             refcount_manager,
             &mut self.header,

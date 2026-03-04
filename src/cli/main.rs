@@ -104,6 +104,9 @@ enum Command {
         /// Compression algorithm: deflate (default) or zstd.
         #[arg(long, value_enum)]
         compression_type: Option<CompressionType>,
+        /// Store guest data in an external data file (raw format).
+        #[arg(long)]
+        data_file: Option<String>,
     },
 
     /// Compact/defragment a QCOW2 image into a new file.
@@ -288,12 +291,13 @@ fn main() {
             format,
             compress,
             compression_type,
+            data_file,
         } => {
             let ct = compression_type.map(|ct| match ct {
                 CompressionType::Deflate => qcow2_lib::format::constants::COMPRESSION_DEFLATE,
                 CompressionType::Zstd => qcow2_lib::format::constants::COMPRESSION_ZSTD,
             });
-            convert::run(&input, &output, &format, compress, ct)
+            convert::run(&input, &output, &format, compress, ct, data_file)
         }
         Command::Compact {
             input,

@@ -41,6 +41,7 @@ fn create_image_with_data(
             virtual_size,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -264,7 +265,7 @@ fn compact_produces_valid_image() {
     );
 
     let output = dir.path().join("compacted.qcow2");
-    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&input, &output, false, None).unwrap();
+    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&input, &output, false, None, None).unwrap();
 
     assert_qemu_check(&output);
 }
@@ -284,7 +285,7 @@ fn compact_preserves_data() {
     );
 
     let output = dir.path().join("compacted.qcow2");
-    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&input, &output, false, None).unwrap();
+    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&input, &output, false, None, None).unwrap();
 
     // Read back from compacted image
     let mut image = Qcow2Image::open(&output).unwrap();
@@ -310,7 +311,7 @@ fn compact_compressed_passes_qemu_check() {
     );
 
     let output = dir.path().join("compressed.qcow2");
-    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&input, &output, true, None).unwrap();
+    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&input, &output, true, None, None).unwrap();
 
     assert_qemu_check(&output);
 
@@ -362,6 +363,7 @@ fn shrink_and_truncate_reduces_file_size() {
                 virtual_size: 4 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();

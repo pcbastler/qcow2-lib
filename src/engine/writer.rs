@@ -30,11 +30,15 @@ pub struct Qcow2Writer<'a> {
     mapper: &'a mut ClusterMapper,
     l1_table_offset: ClusterOffset,
     backend: &'a dyn IoBackend,
+    /// Backend for guest data clusters (external data file or same as backend).
+    data_backend: &'a dyn IoBackend,
     cache: &'a mut MetadataCache,
     refcount_manager: &'a mut RefcountManager,
     cluster_bits: u32,
     virtual_size: u64,
     compression_type: u8,
+    /// When true, data clusters use identity-mapped offsets (host = guest).
+    raw_external: bool,
     backing_image: Option<&'a mut crate::engine::image::Qcow2Image>,
     /// Byte offset for the next compressed write within a shared host cluster.
     /// Zero means no active compressed packing cluster.
@@ -48,22 +52,26 @@ impl<'a> Qcow2Writer<'a> {
         mapper: &'a mut ClusterMapper,
         l1_table_offset: ClusterOffset,
         backend: &'a dyn IoBackend,
+        data_backend: &'a dyn IoBackend,
         cache: &'a mut MetadataCache,
         refcount_manager: &'a mut RefcountManager,
         cluster_bits: u32,
         virtual_size: u64,
         compression_type: u8,
+        raw_external: bool,
         backing_image: Option<&'a mut crate::engine::image::Qcow2Image>,
     ) -> Self {
         Self {
             mapper,
             l1_table_offset,
             backend,
+            data_backend,
             cache,
             refcount_manager,
             cluster_bits,
             virtual_size,
             compression_type,
+            raw_external,
             backing_image,
             compressed_cursor: 0,
         }
@@ -264,16 +272,23 @@ impl<'a> Qcow2Writer<'a> {
         guest_cluster_offset: u64,
         old_bitmap: SubclusterBitmap,
     ) -> Result<L2Entry> {
-        let new_offset = self.refcount_manager.allocate_cluster(
-            self.backend,
-            self.cache,
-        )?;
-        let file_size = self.backend.file_size()?;
-        self.mapper.set_file_size(file_size);
+        // With raw external data: host_offset = guest_offset (identity mapping),
+        // no refcount allocation needed for data clusters.
+        let new_offset = if self.raw_external {
+            ClusterOffset(guest_cluster_offset)
+        } else {
+            let off = self.refcount_manager.allocate_cluster(
+                self.backend,
+                self.cache,
+            )?;
+            let file_size = self.backend.file_size()?;
+            self.mapper.set_file_size(file_size);
+            off
+        };
 
         if buf.len() == cluster_size as usize {
             // Fast path: full cluster write — no subcluster handling needed
-            self.backend.write_all_at(buf, new_offset.0)?;
+            self.data_backend.write_all_at(buf, new_offset.0)?;
             return Ok(L2Entry::Standard {
                 host_offset: new_offset,
                 copied: true,
@@ -295,7 +310,7 @@ impl<'a> Qcow2Writer<'a> {
             }
             let start = intra.0 as usize;
             cluster_buf[start..start + buf.len()].copy_from_slice(buf);
-            self.backend.write_all_at(&cluster_buf, new_offset.0)?;
+            self.data_backend.write_all_at(&cluster_buf, new_offset.0)?;
 
             return Ok(L2Entry::Standard {
                 host_offset: new_offset,
@@ -341,7 +356,7 @@ impl<'a> Qcow2Writer<'a> {
         // Write the affected subclusters to the host cluster
         for sc in first_sc..=last_sc {
             let sc_start = sc as u64 * sc_size;
-            self.backend.write_all_at(
+            self.data_backend.write_all_at(
                 &cluster_buf[sc_start as usize..(sc_start + sc_size) as usize],
                 new_offset.0 + sc_start,
             )?;
@@ -369,7 +384,7 @@ impl<'a> Qcow2Writer<'a> {
     ) -> Result<L2Entry> {
         if bitmap.is_all_allocated() {
             // Fast path: all subclusters already allocated → direct write
-            self.backend
+            self.data_backend
                 .write_all_at(buf, host_offset.0 + intra.0 as u64)?;
             return Ok(L2Entry::Standard {
                 host_offset,
@@ -401,12 +416,12 @@ impl<'a> Qcow2Writer<'a> {
                 let overlap_len = (overlap_end - overlap_start) as usize;
                 sc_buf[sc_off..sc_off + overlap_len]
                     .copy_from_slice(&buf[buf_off..buf_off + overlap_len]);
-                self.backend.write_all_at(&sc_buf, host_offset.0 + sc_start)?;
+                self.data_backend.write_all_at(&sc_buf, host_offset.0 + sc_start)?;
             }
         }
 
         // Write the user data
-        self.backend
+        self.data_backend
             .write_all_at(buf, host_offset.0 + intra.0 as u64)?;
 
         // Mark written subclusters as Allocated
@@ -436,22 +451,30 @@ impl<'a> Qcow2Writer<'a> {
         if old_bitmap.is_all_allocated() {
             // Fast path: bulk copy entire cluster
             let mut cluster_data = vec![0u8; cluster_size as usize];
-            self.backend.read_exact_at(&mut cluster_data, old_host_offset.0)?;
+            self.data_backend.read_exact_at(&mut cluster_data, old_host_offset.0)?;
 
             let start = intra.0 as usize;
             cluster_data[start..start + buf.len()].copy_from_slice(buf);
 
-            let new_offset = self.refcount_manager.allocate_cluster(
-                self.backend, self.cache,
-            )?;
-            let file_size = self.backend.file_size()?;
-            self.mapper.set_file_size(file_size);
+            let new_offset = if self.raw_external {
+                // Identity mapping — COW doesn't apply for raw external
+                old_host_offset
+            } else {
+                let off = self.refcount_manager.allocate_cluster(
+                    self.backend, self.cache,
+                )?;
+                let file_size = self.backend.file_size()?;
+                self.mapper.set_file_size(file_size);
+                off
+            };
 
-            self.backend.write_all_at(&cluster_data, new_offset.0)?;
+            self.data_backend.write_all_at(&cluster_data, new_offset.0)?;
 
-            self.refcount_manager.decrement_refcount(
-                old_host_offset.0, self.backend, self.cache,
-            )?;
+            if !self.raw_external {
+                self.refcount_manager.decrement_refcount(
+                    old_host_offset.0, self.backend, self.cache,
+                )?;
+            }
 
             return Ok(L2Entry::Standard {
                 host_offset: new_offset,
@@ -466,11 +489,16 @@ impl<'a> Qcow2Writer<'a> {
         let first_sc = (start / sc_size) as u32;
         let last_sc = ((end - 1) / sc_size) as u32;
 
-        let new_offset = self.refcount_manager.allocate_cluster(
-            self.backend, self.cache,
-        )?;
-        let file_size = self.backend.file_size()?;
-        self.mapper.set_file_size(file_size);
+        let new_offset = if self.raw_external {
+            old_host_offset
+        } else {
+            let off = self.refcount_manager.allocate_cluster(
+                self.backend, self.cache,
+            )?;
+            let file_size = self.backend.file_size()?;
+            self.mapper.set_file_size(file_size);
+            off
+        };
 
         // Copy per-subcluster, preserving state
         let mut new_bitmap = SubclusterBitmap::all_unallocated();
@@ -479,8 +507,8 @@ impl<'a> Qcow2Writer<'a> {
                 SubclusterState::Allocated => {
                     let sc_start = sc as u64 * sc_size;
                     let mut sc_buf = vec![0u8; sc_size as usize];
-                    self.backend.read_exact_at(&mut sc_buf, old_host_offset.0 + sc_start)?;
-                    self.backend.write_all_at(&sc_buf, new_offset.0 + sc_start)?;
+                    self.data_backend.read_exact_at(&mut sc_buf, old_host_offset.0 + sc_start)?;
+                    self.data_backend.write_all_at(&sc_buf, new_offset.0 + sc_start)?;
                     new_bitmap.set(sc, SubclusterState::Allocated);
                 }
                 SubclusterState::Zero => {
@@ -491,7 +519,7 @@ impl<'a> Qcow2Writer<'a> {
         }
 
         // Write the user data
-        self.backend.write_all_at(buf, new_offset.0 + start)?;
+        self.data_backend.write_all_at(buf, new_offset.0 + start)?;
 
         // Mark written subclusters as Allocated
         for sc in first_sc..=last_sc {
@@ -518,6 +546,9 @@ impl<'a> Qcow2Writer<'a> {
         intra: IntraClusterOffset,
         cluster_size: u64,
     ) -> Result<L2Entry> {
+        if self.raw_external {
+            return Err(Error::CompressedWithExternalData);
+        }
         let compressed_size = descriptor.compressed_size as usize;
         let mut compressed_buf = vec![0u8; compressed_size];
         self.backend
@@ -826,11 +857,13 @@ mod tests {
             &mut s.mapper,
             s.l1_table_offset,
             &s.backend,
+            &s.backend,
             &mut s.cache,
             &mut s.refcount_manager,
             CLUSTER_BITS,
             VIRTUAL_SIZE,
             COMPRESSION_DEFLATE,
+            false,
             None,
         )
     }

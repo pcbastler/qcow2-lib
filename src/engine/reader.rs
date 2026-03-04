@@ -24,6 +24,8 @@ use crate::io::IoBackend;
 pub struct Qcow2Reader<'a> {
     mapper: &'a ClusterMapper,
     backend: &'a dyn IoBackend,
+    /// Backend for guest data clusters (external data file or same as backend).
+    data_backend: &'a dyn IoBackend,
     cache: &'a mut MetadataCache,
     cluster_bits: u32,
     virtual_size: u64,
@@ -39,6 +41,7 @@ impl<'a> Qcow2Reader<'a> {
     pub fn new(
         mapper: &'a ClusterMapper,
         backend: &'a dyn IoBackend,
+        data_backend: &'a dyn IoBackend,
         cache: &'a mut MetadataCache,
         cluster_bits: u32,
         virtual_size: u64,
@@ -50,6 +53,7 @@ impl<'a> Qcow2Reader<'a> {
         Self {
             mapper,
             backend,
+            data_backend,
             cache,
             cluster_bits,
             virtual_size,
@@ -118,7 +122,7 @@ impl<'a> Qcow2Reader<'a> {
                 if subclusters.is_all_allocated() {
                     // Fast path: all subclusters allocated → bulk read
                     let read_offset = host_offset.0 + intra_cluster_offset.0 as u64;
-                    match self.backend.read_exact_at(buf, read_offset) {
+                    match self.data_backend.read_exact_at(buf, read_offset) {
                         Ok(()) => Ok(()),
                         Err(e) => self.handle_read_error(buf, guest_offset, e),
                     }
@@ -230,7 +234,7 @@ impl<'a> Qcow2Reader<'a> {
                 SubclusterState::Allocated => {
                     if let Some(host) = host_offset {
                         let read_offset = host.0 + cluster_pos;
-                        match self.backend.read_exact_at(
+                        match self.data_backend.read_exact_at(
                             &mut buf[buf_pos..buf_pos + chunk_len],
                             read_offset,
                         ) {
@@ -345,6 +349,7 @@ mod tests {
     ) -> Qcow2Reader<'a> {
         Qcow2Reader::new(
             mapper,
+            backend,
             backend,
             cache,
             CLUSTER_BITS,
@@ -639,6 +644,7 @@ mod tests {
     ) -> Qcow2Reader<'a> {
         Qcow2Reader::new(
             mapper,
+            backend,
             backend,
             cache,
             CLUSTER_BITS,
@@ -958,6 +964,7 @@ mod tests {
                 virtual_size: backing_vs,
                 cluster_bits: Some(CLUSTER_BITS),
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -978,6 +985,7 @@ mod tests {
         let virtual_size = 4 * CLUSTER_SIZE as u64;
         let mut reader = Qcow2Reader::new(
             &mapper,
+            &backend,
             &backend,
             &mut cache,
             CLUSTER_BITS,
@@ -1004,6 +1012,7 @@ mod tests {
                 virtual_size: 256,
                 cluster_bits: Some(CLUSTER_BITS),
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -1016,6 +1025,7 @@ mod tests {
 
         let mut reader = Qcow2Reader::new(
             &mapper,
+            &backend,
             &backend,
             &mut cache,
             CLUSTER_BITS,
@@ -1050,6 +1060,7 @@ mod tests {
 
         let mut reader = Qcow2Reader::new(
             &mapper,
+            &backend,
             &backend,
             &mut cache,
             CLUSTER_BITS,

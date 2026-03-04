@@ -71,6 +71,8 @@ pub struct HashInfo {
 #[allow(clippy::too_many_arguments)]
 pub struct HashManager<'a> {
     backend: &'a dyn IoBackend,
+    /// Backend for guest data clusters (external data file or same as backend).
+    data_backend: &'a dyn IoBackend,
     cache: &'a mut MetadataCache,
     refcount_manager: &'a mut RefcountManager,
     header: &'a mut Header,
@@ -86,6 +88,7 @@ impl<'a> HashManager<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend: &'a dyn IoBackend,
+        data_backend: &'a dyn IoBackend,
         cache: &'a mut MetadataCache,
         refcount_manager: &'a mut RefcountManager,
         header: &'a mut Header,
@@ -97,6 +100,7 @@ impl<'a> HashManager<'a> {
     ) -> Self {
         Self {
             backend,
+            data_backend,
             cache,
             refcount_manager,
             header,
@@ -535,7 +539,7 @@ impl<'a> HashManager<'a> {
                     ..
                 } => {
                     has_data = true;
-                    self.backend.read_exact_at(
+                    self.data_backend.read_exact_at(
                         &mut data[pos as usize..pos as usize + len],
                         host_offset.0 + intra_cluster_offset.0 as u64,
                     )?;

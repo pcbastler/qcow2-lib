@@ -61,6 +61,7 @@ fn snapshot_chain_8_deep_with_cow_writes() {
             virtual_size,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -143,6 +144,7 @@ fn snapshot_tree_branch_apply_diverge() {
             virtual_size: 8 * 1024 * 1024,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -234,6 +236,7 @@ fn heavy_scattered_writes_with_pattern_verification() {
             virtual_size,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -310,6 +313,7 @@ fn bitmask_pattern_verification() {
             virtual_size: 16 * 1024 * 1024,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -436,6 +440,7 @@ fn chaos_cycle_write_snapshot_delete() {
             virtual_size,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -507,6 +512,7 @@ fn snapshot_apply_back_and_forward() {
             virtual_size: 8 * 1024 * 1024,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -611,6 +617,7 @@ fn large_sequential_write_cross_validation() {
             virtual_size,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -668,6 +675,7 @@ fn delete_all_snapshots_then_check() {
             virtual_size: 8 * 1024 * 1024,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -728,6 +736,7 @@ fn compact_after_fragmentation() {
             virtual_size: 32 * 1024 * 1024,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -755,7 +764,7 @@ fn compact_after_fragmentation() {
 
     // Compact
     let compacted = dir.path().join("compacted.qcow2");
-    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&path, &compacted, false, None).unwrap();
+    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&path, &compacted, false, None, None).unwrap();
     assert_qemu_check(&compacted);
 
     let orig_size = std::fs::metadata(&path).unwrap().len();
@@ -796,6 +805,7 @@ fn partial_cluster_writes_interleaved() {
             virtual_size: 4 * 1024 * 1024,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();

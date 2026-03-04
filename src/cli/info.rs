@@ -44,6 +44,17 @@ pub fn run(path: &Path) -> Result<()> {
         println!("  Extended L2:      yes (subcluster size: {} bytes)",
             header.subcluster_size().unwrap_or(0));
     }
+    if image.has_external_data_file() {
+        let data_file_name = image.extensions().iter().find_map(|e| {
+            if let qcow2_lib::format::header_extension::HeaderExtension::ExternalDataFile(name) = e {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        });
+        println!("  External data:    {} (raw)",
+            data_file_name.unwrap_or("<unknown>"));
+    }
     println!("  Snapshots:        {}", header.snapshot_count);
     println!("  Encryption:       {}",
         match header.crypt_method {

@@ -441,6 +441,29 @@ pub enum Error {
         subcluster_index: u32,
     },
 
+    // ---- External data file errors ----
+
+    /// The external data file could not be opened.
+    #[error("failed to open external data file '{path}': {source}")]
+    ExternalDataFileOpen {
+        /// The underlying I/O error.
+        source: std::io::Error,
+        /// Path of the external data file.
+        path: String,
+    },
+
+    /// Compressed clusters are not supported with external data files.
+    #[error("compressed clusters are not supported with external data files")]
+    CompressedWithExternalData,
+
+    /// The image has the EXTERNAL_DATA_FILE flag but no data file path in header extensions.
+    #[error("image has EXTERNAL_DATA_FILE flag but no data file path in header extensions")]
+    MissingExternalDataFilePath,
+
+    /// Only raw external data files (RAW_EXTERNAL autoclear bit) are supported.
+    #[error("only raw external data files are supported (RAW_EXTERNAL autoclear bit required)")]
+    RawExternalRequired,
+
     // ---- BLAKE3 hash errors ----
 
     /// The BLAKE3 hash extension header is invalid.

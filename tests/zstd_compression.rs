@@ -21,7 +21,7 @@ fn create_zstd_image_sets_header_fields() {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
             extended_l2: false,
-            compression_type: Some(COMPRESSION_ZSTD),
+            compression_type: Some(COMPRESSION_ZSTD), data_file: None,
         },
     )
     .unwrap();
@@ -48,6 +48,7 @@ fn create_deflate_image_has_default_header() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: None,
+            data_file: None,
         },
     )
     .unwrap();
@@ -72,7 +73,7 @@ fn zstd_write_read_round_trip() {
             virtual_size: 2 * 1024 * 1024,
             cluster_bits: None,
             extended_l2: false,
-            compression_type: Some(COMPRESSION_ZSTD),
+            compression_type: Some(COMPRESSION_ZSTD), data_file: None,
         },
     )
     .unwrap();
@@ -105,7 +106,7 @@ fn zstd_compressed_write_round_trip() {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
             extended_l2: false,
-            compression_type: Some(COMPRESSION_ZSTD),
+            compression_type: Some(COMPRESSION_ZSTD), data_file: None,
         },
     )
     .unwrap();
@@ -132,7 +133,7 @@ fn zstd_compressed_cluster_cow() {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
             extended_l2: false,
-            compression_type: Some(COMPRESSION_ZSTD),
+            compression_type: Some(COMPRESSION_ZSTD), data_file: None,
         },
     )
     .unwrap();
@@ -166,7 +167,7 @@ fn zstd_reopen_round_trip() {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
                 extended_l2: false,
-                compression_type: Some(COMPRESSION_ZSTD),
+                compression_type: Some(COMPRESSION_ZSTD), data_file: None,
             },
         )
         .unwrap();
@@ -206,6 +207,7 @@ fn convert_raw_to_zstd_qcow2() {
         &qcow2_path,
         true, // compress
         Some(COMPRESSION_ZSTD),
+        None,
     )
     .unwrap();
 
@@ -256,7 +258,7 @@ fn qemu_reads_our_zstd_image() {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
                 extended_l2: false,
-                compression_type: Some(COMPRESSION_ZSTD),
+                compression_type: Some(COMPRESSION_ZSTD), data_file: None,
             },
         )
         .unwrap();

@@ -14,6 +14,7 @@ use crate::error::Result;
 use crate::format::bitmap::{BitmapDirectoryEntry, BitmapTableEntryState};
 use crate::format::constants::*;
 use crate::format::hash::HashTable;
+use crate::format::feature_flags::{AutoclearFeatures, IncompatibleFeatures};
 use crate::format::header::Header;
 use crate::format::header_extension::HeaderExtension;
 use crate::format::l1::L1Entry;
@@ -122,6 +123,15 @@ pub fn build_reference_map(
     let mut refs: HashMap<u64, u64> = HashMap::new();
     let mut stats = ClusterStats::default();
 
+    // With RAW_EXTERNAL, data clusters live in the external file and are
+    // not refcounted in the main image.
+    let raw_external = header
+        .incompatible_features
+        .contains(IncompatibleFeatures::EXTERNAL_DATA_FILE)
+        && header
+            .autoclear_features
+            .contains(AutoclearFeatures::RAW_EXTERNAL);
+
     // 1. Header cluster
     add_ref(&mut refs, 0, cluster_size);
 
@@ -143,6 +153,7 @@ pub fn build_reference_map(
         header.l1_table_offset.0,
         header.l1_table_entries,
         header.geometry(),
+        raw_external,
         &mut refs,
         &mut stats,
     )?;
@@ -183,6 +194,7 @@ pub fn build_reference_map(
                 snap.l1_table_offset.0,
                 snap.l1_table_entries,
                 header.geometry(),
+                raw_external,
                 &mut refs,
                 &mut stats,
             )?;
@@ -445,6 +457,7 @@ fn walk_l1_l2(
     l1_offset: u64,
     l1_entries: u32,
     geometry: ClusterGeometry,
+    raw_external: bool,
     refs: &mut HashMap<u64, u64>,
     stats: &mut ClusterStats,
 ) -> Result<()> {
@@ -496,8 +509,10 @@ fn walk_l1_l2(
                 }
                 L2Entry::Standard { host_offset, .. } => {
                     stats.data_clusters += 1;
-                    let cluster = host_offset.0 / cluster_size;
-                    *refs.entry(cluster).or_insert(0) += 1;
+                    if !raw_external {
+                        let cluster = host_offset.0 / cluster_size;
+                        *refs.entry(cluster).or_insert(0) += 1;
+                    }
                 }
                 L2Entry::Compressed(desc) => {
                     stats.compressed_clusters += 1;
@@ -706,6 +721,7 @@ mod tests {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -731,6 +747,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -760,6 +777,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -788,6 +806,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -818,6 +837,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -849,6 +869,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -906,6 +927,7 @@ mod tests {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -937,7 +959,7 @@ mod tests {
         }
         std::fs::write(&raw_path, &raw_data).unwrap();
 
-        crate::engine::converter::convert_from_raw(&raw_path, &qcow2_path, true, None).unwrap();
+        crate::engine::converter::convert_from_raw(&raw_path, &qcow2_path, true, None, None).unwrap();
 
         let image = Qcow2Image::open(&qcow2_path).unwrap();
         let report = check_integrity(image.backend(), image.header()).unwrap();
@@ -990,6 +1012,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -1045,6 +1068,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -1098,6 +1122,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -1146,6 +1171,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
@@ -1181,6 +1207,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
+            data_file: None,
             },
         )
         .unwrap();
