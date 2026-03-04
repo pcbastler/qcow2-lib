@@ -13,6 +13,7 @@ mod commit;
 mod compact;
 mod convert;
 mod dump;
+mod hash;
 mod info;
 mod rebase;
 mod resize;
@@ -63,6 +64,12 @@ enum Command {
     Bitmap {
         #[command(subcommand)]
         action: BitmapAction,
+    },
+
+    /// Manage BLAKE3 per-hash-chunk hashes.
+    Hash {
+        #[command(subcommand)]
+        action: HashAction,
     },
 
     /// Resize the image's virtual disk size.
@@ -180,6 +187,49 @@ enum BitmapAction {
     },
 }
 
+#[derive(Subcommand)]
+enum HashAction {
+    /// Initialize BLAKE3 hash extension (creates empty hash table).
+    Init {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+        /// Hash size in bytes (16 or 32). Default: 32.
+        #[arg(long)]
+        hash_size: Option<u8>,
+        /// Hash chunk size in bytes (must be power-of-2, 4K–16M). Default: 64K.
+        #[arg(long)]
+        chunk_size: Option<u64>,
+    },
+    /// Recompute hashes for all allocated clusters.
+    Rehash {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+    },
+    /// Verify all stored hashes against cluster data.
+    Verify {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+    },
+    /// Show hash extension information.
+    Info {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+    },
+    /// Export stored hashes.
+    Export {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove the hash extension and free all hash clusters.
+    Remove {
+        /// Path to the QCOW2 image file.
+        path: PathBuf,
+    },
+}
+
 #[derive(Clone, clap::ValueEnum)]
 enum DumpTarget {
     /// L1 table entries.
@@ -210,6 +260,14 @@ fn main() {
             }
             BitmapAction::Delete { path, name } => bitmap::run_delete(&path, &name),
             BitmapAction::Dump { path, name } => bitmap::run_dump(&path, &name),
+        },
+        Command::Hash { action } => match action {
+            HashAction::Init { path, hash_size, chunk_size } => hash::run_init(&path, hash_size, chunk_size),
+            HashAction::Rehash { path } => hash::run_rehash(&path),
+            HashAction::Verify { path } => hash::run_verify(&path),
+            HashAction::Info { path } => hash::run_info(&path),
+            HashAction::Export { path, json } => hash::run_export(&path, None, json),
+            HashAction::Remove { path } => hash::run_remove(&path),
         },
         Command::Resize { path, size } => resize::run(&path, &size),
         Command::Convert {

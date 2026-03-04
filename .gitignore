@@ -5,3 +5,9 @@ Cargo.lock
 *~
 .idea/
 .vscode/
+
+# Fuzz testing
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/Cargo.lock

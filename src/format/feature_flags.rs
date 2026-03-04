@@ -46,6 +46,8 @@ bitflags! {
         const BITMAPS = 1 << 0;
         /// The external data file contains raw data (not QCOW2 formatted).
         const RAW_EXTERNAL = 1 << 1;
+        /// BLAKE3 per-cluster hash data is consistent with the image content.
+        const BLAKE3_HASHES = 1 << 2;
     }
 }
 
