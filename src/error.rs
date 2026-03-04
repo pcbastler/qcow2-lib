@@ -182,6 +182,17 @@ pub enum Error {
         actual: usize,
     },
 
+    /// The snapshot table is too short for the expected number of entries.
+    #[error("snapshot table truncated: entry {entry} at offset 0x{offset:x} exceeds table size of {table_size} bytes")]
+    SnapshotTableTruncated {
+        /// 0-based index of the snapshot entry that couldn't be read.
+        entry: u32,
+        /// Byte offset where the entry was expected.
+        offset: u64,
+        /// Total size of the snapshot table in bytes.
+        table_size: usize,
+    },
+
     // ---- Header extension ----
     /// A header extension is truncated.
     #[error("header extension at offset 0x{offset:x} is truncated: need {expected} bytes, got {actual}")]

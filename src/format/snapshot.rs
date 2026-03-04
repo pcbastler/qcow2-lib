@@ -172,7 +172,14 @@ impl SnapshotHeader {
         let mut snapshots = Vec::with_capacity(count as usize);
         let mut pos = 0;
 
-        for _ in 0..count {
+        for i in 0..count {
+            if pos > bytes.len() {
+                return Err(Error::SnapshotTableTruncated {
+                    entry: i,
+                    offset: base_offset + pos as u64,
+                    table_size: bytes.len(),
+                });
+            }
             let (snapshot, consumed) =
                 Self::read_from(&bytes[pos..], base_offset + pos as u64)?;
             snapshots.push(snapshot);

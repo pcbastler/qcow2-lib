@@ -1,0 +1,51 @@
+[package]
+name = "qcow2-lib-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.qcow2-lib]
+path = ".."
+
+[[bin]]
+name = "fuzz_image_open"
+path = "fuzz_targets/fuzz_image_open.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_header_extensions"
+path = "fuzz_targets/fuzz_header_extensions.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_snapshot_table"
+path = "fuzz_targets/fuzz_snapshot_table.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_refcount_block"
+path = "fuzz_targets/fuzz_refcount_block.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_engine_ops"
+path = "fuzz_targets/fuzz_engine_ops.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "build_corpus"
+path = "build_corpus.rs"
+test = false
+doc = false
