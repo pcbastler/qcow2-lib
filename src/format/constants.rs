@@ -194,6 +194,15 @@ pub const BLAKE3_MIN_HASH_SIZE: u8 = 16;
 /// Maximum allowed BLAKE3 hash size in bytes (full 256-bit hash).
 pub const BLAKE3_MAX_HASH_SIZE: u8 = 32;
 
+/// Default hash chunk bits (2^16 = 64 KB).
+pub const BLAKE3_DEFAULT_HASH_CHUNK_BITS: u8 = 16;
+
+/// Minimum hash chunk bits (2^12 = 4 KB).
+pub const BLAKE3_MIN_HASH_CHUNK_BITS: u8 = 12;
+
+/// Maximum hash chunk bits (2^24 = 16 MB).
+pub const BLAKE3_MAX_HASH_CHUNK_BITS: u8 = 24;
+
 #[cfg(test)]
 mod tests {
     use super::*;

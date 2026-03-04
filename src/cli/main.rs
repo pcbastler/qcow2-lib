@@ -66,7 +66,7 @@ enum Command {
         action: BitmapAction,
     },
 
-    /// Manage BLAKE3 per-cluster hashes.
+    /// Manage BLAKE3 per-hash-chunk hashes.
     Hash {
         #[command(subcommand)]
         action: HashAction,
@@ -196,6 +196,9 @@ enum HashAction {
         /// Hash size in bytes (16 or 32). Default: 32.
         #[arg(long)]
         hash_size: Option<u8>,
+        /// Hash chunk size in bytes (must be power-of-2, 4K–16M). Default: 64K.
+        #[arg(long)]
+        chunk_size: Option<u64>,
     },
     /// Recompute hashes for all allocated clusters.
     Rehash {
@@ -259,7 +262,7 @@ fn main() {
             BitmapAction::Dump { path, name } => bitmap::run_dump(&path, &name),
         },
         Command::Hash { action } => match action {
-            HashAction::Init { path, hash_size } => hash::run_init(&path, hash_size),
+            HashAction::Init { path, hash_size, chunk_size } => hash::run_init(&path, hash_size, chunk_size),
             HashAction::Rehash { path } => hash::run_rehash(&path),
             HashAction::Verify { path } => hash::run_verify(&path),
             HashAction::Info { path } => hash::run_info(&path),

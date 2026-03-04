@@ -431,11 +431,11 @@ pub enum Error {
     HashNotInitialized,
 
     /// Hash verification detected a mismatch.
-    #[error("hash mismatch at cluster {cluster_index} (0x{guest_offset:x}): expected {expected}, actual {actual}")]
+    #[error("hash mismatch at hash chunk {hash_chunk_index} (0x{guest_offset:x}): expected {expected}, actual {actual}")]
     HashVerifyFailed {
-        /// Cluster index where the mismatch was found.
-        cluster_index: u64,
-        /// Guest byte offset of the cluster.
+        /// Hash chunk index where the mismatch was found.
+        hash_chunk_index: u64,
+        /// Guest byte offset of the hash chunk.
         guest_offset: u64,
         /// Expected hash (hex string).
         expected: String,
@@ -448,6 +448,17 @@ pub enum Error {
     InvalidHashSize {
         /// The invalid hash size in bytes.
         size: u8,
+    },
+
+    /// The hash chunk bits value is out of the valid range.
+    #[error("invalid hash chunk bits {bits} (must be 0 or {min}..={max})")]
+    InvalidHashChunkBits {
+        /// The invalid chunk bits value.
+        bits: u8,
+        /// Minimum allowed value.
+        min: u8,
+        /// Maximum allowed value.
+        max: u8,
     },
 }
 

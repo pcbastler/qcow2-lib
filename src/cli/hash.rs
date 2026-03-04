@@ -1,4 +1,4 @@
-//! `hash` subcommand: manage BLAKE3 per-cluster hashes.
+//! `hash` subcommand: manage BLAKE3 per-hash-chunk hashes.
 
 use std::path::Path;
 
@@ -6,21 +6,41 @@ use qcow2_lib::engine::image::Qcow2Image;
 use qcow2_lib::error::Result;
 
 /// Initialize the BLAKE3 hash extension.
-pub fn run_init(path: &Path, hash_size: Option<u8>) -> Result<()> {
+pub fn run_init(path: &Path, hash_size: Option<u8>, chunk_size: Option<u64>) -> Result<()> {
+    // Convert chunk_size (bytes, power-of-2) to hash_chunk_bits
+    let hash_chunk_bits = match chunk_size {
+        Some(cs) => {
+            if !cs.is_power_of_two() || cs < 4096 || cs > (1 << 24) {
+                return Err(qcow2_lib::error::Error::InvalidHashChunkBits {
+                    bits: 0,
+                    min: 12,
+                    max: 24,
+                });
+            }
+            Some(cs.trailing_zeros() as u8)
+        }
+        None => None,
+    };
+
     let mut image = Qcow2Image::open_rw(path)?;
-    image.hash_init(hash_size)?;
+    image.hash_init(hash_size, hash_chunk_bits)?;
     image.flush()?;
     let hs = hash_size.unwrap_or(32);
-    println!("BLAKE3 hash extension initialized (hash_size: {} bytes).", hs);
+    let chunk_sz = chunk_size.unwrap_or(65536);
+    println!(
+        "BLAKE3 hash extension initialized (hash_size: {} bytes, hash_chunk_size: {}).",
+        hs,
+        format_size(chunk_sz),
+    );
     Ok(())
 }
 
-/// Rehash all allocated clusters.
+/// Rehash all allocated hash chunks.
 pub fn run_rehash(path: &Path) -> Result<()> {
     let mut image = Qcow2Image::open_rw(path)?;
     let count = image.hash_rehash()?;
     image.flush()?;
-    println!("Rehashed {} cluster(s).", count);
+    println!("Rehashed {} hash chunk(s).", count);
     Ok(())
 }
 
@@ -37,7 +57,7 @@ pub fn run_verify(path: &Path) -> Result<()> {
         println!("Run 'hash rehash' to recompute hashes.\n");
     }
 
-    println!("Verifying cluster hashes...");
+    println!("Verifying hash chunk hashes...");
     let mismatches = image.hash_verify()?;
 
     if mismatches.is_empty() {
@@ -45,18 +65,18 @@ pub fn run_verify(path: &Path) -> Result<()> {
     } else {
         for m in &mismatches {
             println!(
-                "  Cluster {} (0x{:012x}): MISMATCH",
-                m.cluster_index, m.guest_offset,
+                "  Hash chunk {} (0x{:012x}): MISMATCH",
+                m.hash_chunk_index, m.guest_offset,
             );
             println!("    Expected: {}", hex_string(&m.expected));
             println!("    Actual:   {}", hex_string(&m.actual));
         }
-        let cluster_size = image.cluster_size();
-        let total_clusters = (image.virtual_size() + cluster_size - 1) / cluster_size;
+        let hash_chunk_size = 1u64 << info.hash_chunk_bits;
+        let total_chunks = (image.virtual_size() + hash_chunk_size - 1) / hash_chunk_size;
         println!(
-            "\n{} of {} cluster(s) have hash mismatches.",
+            "\n{} of {} hash chunk(s) have hash mismatches.",
             mismatches.len(),
-            total_clusters,
+            total_chunks,
         );
     }
 
@@ -70,10 +90,11 @@ pub fn run_info(path: &Path) -> Result<()> {
     match image.hash_info() {
         Some(info) => {
             println!("BLAKE3 hash extension:");
-            println!("  Hash size:     {} bytes", info.hash_size);
-            println!("  Table entries: {}", info.hash_table_entries);
+            println!("  Hash size:       {} bytes", info.hash_size);
+            println!("  Hash chunk size: {}", format_size(1u64 << info.hash_chunk_bits));
+            println!("  Table entries:   {}", info.hash_table_entries);
             println!(
-                "  Consistent:    {}",
+                "  Consistent:      {}",
                 if info.consistent { "yes" } else { "no (rehash needed)" },
             );
         }
@@ -96,9 +117,10 @@ pub fn run_export(path: &Path, range: Option<(u64, u64)>, json: bool) -> Result<
     let entries = image.hash_export(range)?;
 
     if json {
+        let hash_chunk_size = 1u64 << info.hash_chunk_bits;
         println!("{{");
         println!("  \"hash_size\": {},", info.hash_size);
-        println!("  \"cluster_size\": {},", image.cluster_size());
+        println!("  \"hash_chunk_size\": {},", hash_chunk_size);
         println!("  \"algorithm\": \"blake3\",");
         println!("  \"entries\": [");
         for (i, e) in entries.iter().enumerate() {
@@ -135,4 +157,15 @@ pub fn run_remove(path: &Path) -> Result<()> {
 /// Format bytes as a hex string.
 fn hex_string(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Format a byte size as human-readable (e.g. "64 KiB", "4 MiB").
+fn format_size(bytes: u64) -> String {
+    if bytes >= (1 << 20) && bytes % (1 << 20) == 0 {
+        format!("{} MiB", bytes >> 20)
+    } else if bytes >= 1024 && bytes % 1024 == 0 {
+        format!("{} KiB", bytes >> 10)
+    } else {
+        format!("{} bytes", bytes)
+    }
 }

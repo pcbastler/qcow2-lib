@@ -39,6 +39,8 @@ pub struct SnapshotHeader {
     pub hash_table_entries: Option<u32>,
     /// Hash size in bytes for this snapshot (from extra data, if available).
     pub hash_size: Option<u8>,
+    /// Hash chunk bits for this snapshot (from extra data byte 29, if available).
+    pub hash_chunk_bits: Option<u8>,
     /// Size of extra data that was present on disk.
     pub extra_data_size: u32,
 }
@@ -98,18 +100,20 @@ impl SnapshotHeader {
         };
 
         // If extra_data_size >= 32, read BLAKE3 hash table fields
-        let (hash_table_offset, hash_table_entries, hash_size) = if extra_data_size >= 32 {
-            let ht_offset = BigEndian::read_u64(&bytes[extra_start + 16..]);
-            let ht_entries = BigEndian::read_u32(&bytes[extra_start + 24..]);
-            let hs = bytes[extra_start + 28];
-            if ht_offset != 0 {
-                (Some(ht_offset), Some(ht_entries), Some(hs))
+        let (hash_table_offset, hash_table_entries, hash_size, hash_chunk_bits) =
+            if extra_data_size >= 32 {
+                let ht_offset = BigEndian::read_u64(&bytes[extra_start + 16..]);
+                let ht_entries = BigEndian::read_u32(&bytes[extra_start + 24..]);
+                let hs = bytes[extra_start + 28];
+                let hcb = bytes[extra_start + 29];
+                if ht_offset != 0 {
+                    (Some(ht_offset), Some(ht_entries), Some(hs), Some(hcb))
+                } else {
+                    (None, None, None, None)
+                }
             } else {
-                (None, None, None)
-            }
-        } else {
-            (None, None, None)
-        };
+                (None, None, None, None)
+            };
 
         // Variable-length strings follow extra data
         let strings_start = extra_end;
@@ -156,6 +160,7 @@ impl SnapshotHeader {
                 hash_table_offset,
                 hash_table_entries,
                 hash_size,
+                hash_chunk_bits,
                 extra_data_size,
             },
             consumed,
@@ -216,6 +221,7 @@ impl SnapshotHeader {
                         self.hash_table_entries.unwrap_or(0),
                     );
                     extra[28] = self.hash_size.unwrap_or(0);
+                    extra[29] = self.hash_chunk_bits.unwrap_or(0);
                 }
             }
             out.extend_from_slice(&extra);
@@ -253,6 +259,7 @@ mod tests {
             hash_table_offset: None,
             hash_table_entries: None,
             hash_size: None,
+            hash_chunk_bits: None,
             extra_data_size: 0,
         }
     }
@@ -283,6 +290,7 @@ mod tests {
             hash_table_offset: None,
             hash_table_entries: None,
             hash_size: None,
+            hash_chunk_bits: None,
             extra_data_size: 16,
         };
 

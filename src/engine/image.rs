@@ -1403,16 +1403,24 @@ impl Qcow2Image {
 
     // ---- BLAKE3 Hash API ----
 
-    /// Initialize the BLAKE3 per-cluster hash extension.
+    /// Initialize the BLAKE3 per-hash-chunk hash extension.
     ///
     /// Creates an empty hash table without hashing any data yet.
-    /// Call `hash_rehash` afterwards to compute hashes for all allocated clusters.
-    pub fn hash_init(&mut self, hash_size: Option<u8>) -> Result<()> {
+    /// Call `hash_rehash` afterwards to compute hashes for all allocated hash chunks.
+    ///
+    /// `hash_chunk_bits` controls hash granularity: `None` or `Some(0)` = default 64KB,
+    /// otherwise must be 12–24 (4KB–16MB).
+    pub fn hash_init(
+        &mut self,
+        hash_size: Option<u8>,
+        hash_chunk_bits: Option<u8>,
+    ) -> Result<()> {
         if !self.writable {
             return Err(Error::ReadOnly);
         }
 
         let hs = hash_size.unwrap_or(crate::format::constants::BLAKE3_DEFAULT_HASH_SIZE);
+        let hcb = hash_chunk_bits.unwrap_or(0);
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
         let refcount_manager = self
@@ -1430,7 +1438,7 @@ impl Qcow2Image {
             cluster_bits,
             virtual_size,
         );
-        mgr.init_hashes(hs)?;
+        mgr.init_hashes(hs, hcb)?;
         self.has_hashes = true;
         Ok(())
     }
@@ -1511,8 +1519,8 @@ impl Qcow2Image {
         mgr.verify()
     }
 
-    /// Get the stored hash for a specific cluster index.
-    pub fn hash_get(&mut self, cluster_index: u64) -> Result<Option<Vec<u8>>> {
+    /// Get the stored hash for a specific hash chunk index.
+    pub fn hash_get(&mut self, hash_chunk_index: u64) -> Result<Option<Vec<u8>>> {
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
         let refcount_manager = self
@@ -1530,7 +1538,7 @@ impl Qcow2Image {
             cluster_bits,
             virtual_size,
         );
-        mgr.get_hash(cluster_index)
+        mgr.get_hash(hash_chunk_index)
     }
 
     /// Export hashes for a range of guest bytes (or all if range is None).
@@ -1563,14 +1571,22 @@ impl Qcow2Image {
                 _ => None,
             });
             match ext {
-                Some(ext) => HashInfo {
-                    hash_size: ext.hash_size,
-                    hash_table_entries: ext.hash_table_entries,
-                    consistent: self
-                        .header
-                        .autoclear_features
-                        .contains(AutoclearFeatures::BLAKE3_HASHES),
-                },
+                Some(ext) => {
+                    let resolved_bits = if ext.hash_chunk_bits == 0 {
+                        crate::format::constants::BLAKE3_DEFAULT_HASH_CHUNK_BITS
+                    } else {
+                        ext.hash_chunk_bits
+                    };
+                    HashInfo {
+                        hash_size: ext.hash_size,
+                        hash_table_entries: ext.hash_table_entries,
+                        consistent: self
+                            .header
+                            .autoclear_features
+                            .contains(AutoclearFeatures::BLAKE3_HASHES),
+                        hash_chunk_bits: resolved_bits,
+                    }
+                }
                 None => unreachable!(),
             }
         })

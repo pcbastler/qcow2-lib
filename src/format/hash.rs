@@ -1,8 +1,9 @@
-//! BLAKE3 per-cluster hash extension parsing.
+//! BLAKE3 per-hash-chunk hash extension parsing.
 //!
 //! A custom QCOW2 header extension that stores BLAKE3 hashes for each
-//! allocated cluster. Uses a two-level structure: a hash table (Level 1)
-//! pointing to hash data clusters (Level 2), similar to bitmap tables.
+//! allocated hash chunk. The hash chunk size is configurable (default 64 KB)
+//! and independent of the image's cluster size. Uses a two-level structure:
+//! a hash table (Level 1) pointing to hash data clusters (Level 2).
 
 use byteorder::{BigEndian, ByteOrder};
 
@@ -20,6 +21,8 @@ pub struct Blake3Extension {
     pub hash_table_entries: u32,
     /// Hash size in bytes (16 or 32).
     pub hash_size: u8,
+    /// Hash chunk size as log2 (0 = default 16 = 64 KB, valid: 12–24).
+    pub hash_chunk_bits: u8,
 }
 
 impl Blake3Extension {
@@ -38,10 +41,23 @@ impl Blake3Extension {
         let hash_table_offset = BigEndian::read_u64(&data[0..]);
         let hash_table_entries = BigEndian::read_u32(&data[8..]);
         let hash_size = data[12];
+        let hash_chunk_bits = data[13];
 
         // Validate hash_size
         if hash_size != BLAKE3_MIN_HASH_SIZE && hash_size != BLAKE3_MAX_HASH_SIZE {
             return Err(Error::InvalidHashSize { size: hash_size });
+        }
+
+        // Validate hash_chunk_bits (0 = default, otherwise must be in valid range)
+        if hash_chunk_bits != 0
+            && !(BLAKE3_MIN_HASH_CHUNK_BITS..=BLAKE3_MAX_HASH_CHUNK_BITS)
+                .contains(&hash_chunk_bits)
+        {
+            return Err(Error::InvalidHashChunkBits {
+                bits: hash_chunk_bits,
+                min: BLAKE3_MIN_HASH_CHUNK_BITS,
+                max: BLAKE3_MAX_HASH_CHUNK_BITS,
+            });
         }
 
         // Validate alignment (offset must be cluster-aligned, bits 0-8 must be 0)
@@ -52,9 +68,9 @@ impl Blake3Extension {
         }
 
         // Validate reserved fields are zero
-        if data[13] != 0 || data[14] != 0 || data[15] != 0 {
+        if data[14] != 0 || data[15] != 0 {
             return Err(Error::InvalidHashExtension {
-                message: "reserved bytes 13-15 must be zero".to_string(),
+                message: "reserved bytes 14-15 must be zero".to_string(),
             });
         }
         let reserved2 = BigEndian::read_u64(&data[16..]);
@@ -68,6 +84,7 @@ impl Blake3Extension {
             hash_table_offset,
             hash_table_entries,
             hash_size,
+            hash_chunk_bits,
         })
     }
 
@@ -77,9 +94,20 @@ impl Blake3Extension {
         BigEndian::write_u64(&mut buf[0..], self.hash_table_offset);
         BigEndian::write_u32(&mut buf[8..], self.hash_table_entries);
         buf[12] = self.hash_size;
-        // bytes 13-15: reserved (already zero)
+        buf[13] = self.hash_chunk_bits;
+        // bytes 14-15: reserved (already zero)
         // bytes 16-23: reserved (already zero)
         buf
+    }
+
+    /// Effective hash chunk size in bytes (resolves 0 to default 64 KB).
+    pub fn hash_chunk_size(&self) -> u64 {
+        let bits = if self.hash_chunk_bits == 0 {
+            BLAKE3_DEFAULT_HASH_CHUNK_BITS
+        } else {
+            self.hash_chunk_bits
+        };
+        1u64 << bits
     }
 }
 
@@ -198,13 +226,22 @@ impl HashTable {
 }
 
 /// Compute the number of hash table entries needed for a given image configuration.
-pub fn compute_hash_table_entries(virtual_size: u64, cluster_size: u64, hash_size: u8) -> u32 {
+///
+/// `hash_chunk_size` is the granularity of hashing (e.g. 64 KB).
+/// `cluster_size` is the QCOW2 allocation unit (determines hash data cluster capacity).
+pub fn compute_hash_table_entries(
+    virtual_size: u64,
+    cluster_size: u64,
+    hash_size: u8,
+    hash_chunk_size: u64,
+) -> u32 {
     if virtual_size == 0 {
         return 0;
     }
-    let total_clusters = (virtual_size + cluster_size - 1) / cluster_size;
+    let total_hash_chunks = (virtual_size + hash_chunk_size - 1) / hash_chunk_size;
     let hashes_per_data_cluster = cluster_size / hash_size as u64;
-    let entries = (total_clusters + hashes_per_data_cluster - 1) / hashes_per_data_cluster;
+    let entries =
+        (total_hash_chunks + hashes_per_data_cluster - 1) / hashes_per_data_cluster;
     entries as u32
 }
 
@@ -220,6 +257,7 @@ mod tests {
             hash_table_offset: 0x10_0000,
             hash_table_entries: 42,
             hash_size: 32,
+            hash_chunk_bits: 0,
         };
         let bytes = ext.write_to();
         assert_eq!(bytes.len(), BLAKE3_EXTENSION_DATA_SIZE);
@@ -233,10 +271,49 @@ mod tests {
             hash_table_offset: 0x20_0000,
             hash_table_entries: 8192,
             hash_size: 16,
+            hash_chunk_bits: 0,
         };
         let bytes = ext.write_to();
         let parsed = Blake3Extension::read_from(&bytes).unwrap();
         assert_eq!(ext, parsed);
+    }
+
+    #[test]
+    fn extension_round_trip_custom_chunk_bits() {
+        let ext = Blake3Extension {
+            hash_table_offset: 0x10_0000,
+            hash_table_entries: 10,
+            hash_size: 32,
+            hash_chunk_bits: 12,
+        };
+        let bytes = ext.write_to();
+        let parsed = Blake3Extension::read_from(&bytes).unwrap();
+        assert_eq!(ext, parsed);
+        assert_eq!(parsed.hash_chunk_size(), 4096);
+    }
+
+    #[test]
+    fn extension_chunk_bits_zero_defaults_to_64k() {
+        let ext = Blake3Extension {
+            hash_table_offset: 0,
+            hash_table_entries: 0,
+            hash_size: 32,
+            hash_chunk_bits: 0,
+        };
+        assert_eq!(ext.hash_chunk_size(), 65536);
+    }
+
+    #[test]
+    fn extension_rejects_invalid_chunk_bits() {
+        let mut data = vec![0u8; 24];
+        BigEndian::write_u64(&mut data[0..], 0x1_0000);
+        BigEndian::write_u32(&mut data[8..], 1);
+        data[12] = 32;
+        data[13] = 8; // too small
+        assert!(matches!(
+            Blake3Extension::read_from(&data),
+            Err(Error::InvalidHashChunkBits { bits: 8, .. })
+        ));
     }
 
     #[test]
@@ -287,7 +364,7 @@ mod tests {
     fn extension_rejects_nonzero_reserved() {
         let mut data = vec![0u8; 24];
         data[12] = 32;
-        data[13] = 1; // reserved byte not zero
+        data[14] = 1; // reserved byte 14 not zero
         assert!(matches!(
             Blake3Extension::read_from(&data),
             Err(Error::InvalidHashExtension { .. })
@@ -394,38 +471,56 @@ mod tests {
 
     #[test]
     fn compute_entries_1tb_64k_32b() {
-        // 1 TB image, 64 KB clusters, 32 byte hashes
-        let entries = compute_hash_table_entries(1 << 40, 1 << 16, 32);
-        // 16M clusters / 2048 hashes per data cluster = 8192
+        // 1 TB image, 64 KB clusters, 32 byte hashes, 64 KB hash chunks
+        let entries = compute_hash_table_entries(1 << 40, 1 << 16, 32, 1 << 16);
+        // 16M hash chunks / 2048 hashes per data cluster = 8192
         assert_eq!(entries, 8192);
     }
 
     #[test]
     fn compute_entries_1tb_64k_16b() {
-        // 1 TB image, 64 KB clusters, 16 byte hashes
-        let entries = compute_hash_table_entries(1 << 40, 1 << 16, 16);
-        // 16M clusters / 4096 hashes per data cluster = 4096
+        // 1 TB image, 64 KB clusters, 16 byte hashes, 64 KB hash chunks
+        let entries = compute_hash_table_entries(1 << 40, 1 << 16, 16, 1 << 16);
+        // 16M hash chunks / 4096 hashes per data cluster = 4096
         assert_eq!(entries, 4096);
     }
 
     #[test]
     fn compute_entries_1mb_64k() {
-        // 1 MB image, 64 KB clusters → 16 clusters
+        // 1 MB image, 64 KB clusters, 64 KB hash chunks → 16 hash chunks
         // hashes_per_data_cluster = 65536 / 32 = 2048
         // 16 / 2048 = 1 (rounded up)
-        let entries = compute_hash_table_entries(1 << 20, 1 << 16, 32);
+        let entries = compute_hash_table_entries(1 << 20, 1 << 16, 32, 1 << 16);
         assert_eq!(entries, 1);
     }
 
     #[test]
     fn compute_entries_zero_size() {
-        assert_eq!(compute_hash_table_entries(0, 1 << 16, 32), 0);
+        assert_eq!(compute_hash_table_entries(0, 1 << 16, 32, 1 << 16), 0);
     }
 
     #[test]
-    fn compute_entries_not_cluster_aligned_size() {
-        // 100 KB = not a multiple of 64 KB → 2 clusters → 1 entry
-        let entries = compute_hash_table_entries(100 * 1024, 1 << 16, 32);
+    fn compute_entries_not_chunk_aligned_size() {
+        // 100 KB = not a multiple of 64 KB → 2 hash chunks → 1 entry
+        let entries = compute_hash_table_entries(100 * 1024, 1 << 16, 32, 1 << 16);
         assert_eq!(entries, 1);
+    }
+
+    #[test]
+    fn compute_entries_small_chunk_bits() {
+        // 1 MB, 64 KB clusters, 4 KB hash chunks → 256 hash chunks
+        // hashes_per_data_cluster = 65536 / 32 = 2048
+        // 256 / 2048 = 1 (rounded up)
+        let entries = compute_hash_table_entries(1 << 20, 1 << 16, 32, 1 << 12);
+        assert_eq!(entries, 1);
+    }
+
+    #[test]
+    fn compute_entries_large_chunk_bits() {
+        // 1 TB, 64 KB clusters, 1 MB hash chunks → 1M hash chunks
+        // hashes_per_data_cluster = 65536 / 32 = 2048
+        // 1M / 2048 = 512
+        let entries = compute_hash_table_entries(1 << 40, 1 << 16, 32, 1 << 20);
+        assert_eq!(entries, 512);
     }
 }

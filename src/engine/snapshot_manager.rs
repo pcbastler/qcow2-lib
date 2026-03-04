@@ -236,7 +236,7 @@ impl<'a> SnapshotManager<'a> {
             .unwrap_or_default();
 
         // Phase B2: Copy hash table reference (if hashes are active).
-        let (snap_ht_offset, snap_ht_entries, snap_ht_size, extra_data_size) =
+        let (snap_ht_offset, snap_ht_entries, snap_ht_size, snap_ht_chunk_bits, extra_data_size) =
             self.snapshot_hash_table(cluster_size)?;
 
         let new_snap = SnapshotHeader {
@@ -252,6 +252,7 @@ impl<'a> SnapshotManager<'a> {
             hash_table_offset: snap_ht_offset,
             hash_table_entries: snap_ht_entries,
             hash_size: snap_ht_size,
+            hash_chunk_bits: snap_ht_chunk_bits,
             extra_data_size,
         };
 
@@ -756,14 +757,14 @@ impl<'a> SnapshotManager<'a> {
     fn snapshot_hash_table(
         &mut self,
         cluster_size: usize,
-    ) -> Result<(Option<u64>, Option<u32>, Option<u8>, u32)> {
+    ) -> Result<(Option<u64>, Option<u32>, Option<u8>, Option<u8>, u32)> {
         let ext = match self.find_hash_extension() {
             Some(ext) => ext.clone(),
-            None => return Ok((None, None, None, 16)),
+            None => return Ok((None, None, None, None, 16)),
         };
 
         if ext.hash_table_offset == 0 || ext.hash_table_entries == 0 {
-            return Ok((None, None, None, 16));
+            return Ok((None, None, None, None, 16));
         }
 
         // Read the hash table
@@ -804,6 +805,7 @@ impl<'a> SnapshotManager<'a> {
             Some(snap_table_offset.0),
             Some(ext.hash_table_entries),
             Some(ext.hash_size),
+            Some(ext.hash_chunk_bits),
             32,
         ))
     }
@@ -894,6 +896,7 @@ impl<'a> SnapshotManager<'a> {
         };
         let snap_ht_entries = snapshot.hash_table_entries.unwrap_or(0);
         let snap_hash_size = snapshot.hash_size.unwrap_or(32);
+        let snap_chunk_bits = snapshot.hash_chunk_bits.unwrap_or(0);
 
         if snap_ht_entries == 0 {
             self.extensions
@@ -939,6 +942,7 @@ impl<'a> SnapshotManager<'a> {
             hash_table_offset: new_table_offset.0,
             hash_table_entries: snap_ht_entries,
             hash_size: snap_hash_size,
+            hash_chunk_bits: snap_chunk_bits,
         };
 
         let mut found = false;

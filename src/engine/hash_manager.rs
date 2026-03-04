@@ -1,9 +1,12 @@
-//! BLAKE3 per-cluster hash management.
+//! BLAKE3 per-hash-chunk hash management.
 //!
 //! The [`HashManager`] is a transient helper that borrows components from
 //! [`Qcow2Image`](super::image::Qcow2Image) for the duration of a hash
 //! operation. This follows the same borrow-based pattern as
 //! [`BitmapManager`](super::bitmap_manager::BitmapManager).
+//!
+//! The hash granularity (`hash_chunk_size`) is independent of the QCOW2
+//! cluster size and is stored as `hash_chunk_bits` in the [`Blake3Extension`].
 
 use byteorder::{BigEndian, ByteOrder};
 
@@ -25,26 +28,26 @@ const OFF_AUTOCLEAR_FEATURES: u64 = 88;
 /// Information about a hash mismatch found during verification.
 #[derive(Debug, Clone)]
 pub struct HashMismatch {
-    /// Cluster index where the mismatch was found.
-    pub cluster_index: u64,
-    /// Guest byte offset of the cluster.
+    /// Hash chunk index where the mismatch was found.
+    pub hash_chunk_index: u64,
+    /// Guest byte offset of the hash chunk.
     pub guest_offset: u64,
     /// Expected hash (from the stored hash data).
     pub expected: Vec<u8>,
-    /// Actual computed hash of the cluster data.
+    /// Actual computed hash of the hash chunk data.
     pub actual: Vec<u8>,
 }
 
 /// A single exported hash entry.
 #[derive(Debug, Clone)]
 pub struct HashEntry {
-    /// Cluster index.
-    pub cluster_index: u64,
-    /// Guest byte offset of the cluster.
+    /// Hash chunk index.
+    pub hash_chunk_index: u64,
+    /// Guest byte offset of the hash chunk.
     pub guest_offset: u64,
     /// The stored hash value.
     pub hash: Vec<u8>,
-    /// Whether the cluster is currently allocated.
+    /// Whether the hash chunk has any allocated data.
     pub allocated: bool,
 }
 
@@ -57,9 +60,11 @@ pub struct HashInfo {
     pub hash_table_entries: u32,
     /// Whether the autoclear bit is set (hashes consistent).
     pub consistent: bool,
+    /// Hash chunk granularity in bits (e.g. 16 = 64KB).
+    pub hash_chunk_bits: u8,
 }
 
-/// Transient helper for per-cluster hash operations.
+/// Transient helper for per-hash-chunk hash operations.
 ///
 /// Borrows the mutable state needed from `Qcow2Image` for the duration
 /// of a single hash operation.
@@ -109,20 +114,42 @@ impl<'a> HashManager<'a> {
 
     /// Get summary info about the hash extension.
     pub fn info(&self) -> Option<HashInfo> {
-        self.find_extension().map(|ext| HashInfo {
-            hash_size: ext.hash_size,
-            hash_table_entries: ext.hash_table_entries,
-            consistent: self
-                .header
-                .autoclear_features
-                .contains(AutoclearFeatures::BLAKE3_HASHES),
+        self.find_extension().map(|ext| {
+            let resolved_bits = if ext.hash_chunk_bits == 0 {
+                BLAKE3_DEFAULT_HASH_CHUNK_BITS
+            } else {
+                ext.hash_chunk_bits
+            };
+            HashInfo {
+                hash_size: ext.hash_size,
+                hash_table_entries: ext.hash_table_entries,
+                consistent: self
+                    .header
+                    .autoclear_features
+                    .contains(AutoclearFeatures::BLAKE3_HASHES),
+                hash_chunk_bits: resolved_bits,
+            }
         })
     }
 
     /// Initialize the hash extension (creates empty hash table, no hashing yet).
-    pub fn init_hashes(&mut self, hash_size: u8) -> Result<()> {
+    ///
+    /// `hash_chunk_bits` controls the hash granularity: 0 means default (16 = 64KB),
+    /// otherwise must be in the range 12–24.
+    pub fn init_hashes(&mut self, hash_size: u8, hash_chunk_bits: u8) -> Result<()> {
         if hash_size != BLAKE3_MIN_HASH_SIZE && hash_size != BLAKE3_MAX_HASH_SIZE {
             return Err(Error::InvalidHashSize { size: hash_size });
+        }
+
+        if hash_chunk_bits != 0
+            && !(BLAKE3_MIN_HASH_CHUNK_BITS..=BLAKE3_MAX_HASH_CHUNK_BITS)
+                .contains(&hash_chunk_bits)
+        {
+            return Err(Error::InvalidHashChunkBits {
+                bits: hash_chunk_bits,
+                min: BLAKE3_MIN_HASH_CHUNK_BITS,
+                max: BLAKE3_MAX_HASH_CHUNK_BITS,
+            });
         }
 
         if self.find_extension().is_some() {
@@ -132,8 +159,13 @@ impl<'a> HashManager<'a> {
         }
 
         let cluster_size = self.cluster_size();
-        let hash_table_entries =
-            crate::format::hash::compute_hash_table_entries(self.virtual_size, cluster_size, hash_size);
+        let hash_chunk_size = resolve_hash_chunk_size(hash_chunk_bits);
+        let hash_table_entries = crate::format::hash::compute_hash_table_entries(
+            self.virtual_size,
+            cluster_size,
+            hash_size,
+            hash_chunk_size,
+        );
 
         // Allocate cluster(s) for the hash table (all zeros)
         let table_byte_size = hash_table_entries as u64 * HASH_TABLE_ENTRY_SIZE as u64;
@@ -156,6 +188,7 @@ impl<'a> HashManager<'a> {
             hash_table_offset: first_offset.0,
             hash_table_entries,
             hash_size,
+            hash_chunk_bits,
         };
         self.extensions
             .push(HeaderExtension::Blake3Hashes(ext));
@@ -211,55 +244,30 @@ impl<'a> HashManager<'a> {
         Ok(())
     }
 
-    /// Rehash all allocated clusters. Returns the number of clusters hashed.
+    /// Rehash all hash chunks that contain allocated data.
+    /// Returns the number of hash chunks hashed.
     pub fn rehash(&mut self) -> Result<u64> {
         let ext = self
             .find_extension()
             .ok_or(Error::HashNotInitialized)?
             .clone();
 
-        let cluster_size = self.cluster_size();
+        let hash_chunk_size = ext.hash_chunk_size();
         let hash_size = ext.hash_size as usize;
-        let total_clusters = (self.virtual_size + cluster_size - 1) / cluster_size;
-        let zero_hash = compute_zero_hash(cluster_size as usize, ext.hash_size);
+        let total_hash_chunks = (self.virtual_size + hash_chunk_size - 1) / hash_chunk_size;
         let mut table = self.load_hash_table(&ext)?;
         let mut count = 0u64;
 
-        for cluster_idx in 0..total_clusters {
-            let guest_offset = cluster_idx * cluster_size;
-            let resolution =
-                self.mapper
-                    .resolve(GuestOffset(guest_offset), self.backend, self.cache)?;
+        for chunk_idx in 0..total_hash_chunks {
+            let chunk_offset = chunk_idx * hash_chunk_size;
+            let (data, has_data) = self.read_hash_chunk(chunk_offset, hash_chunk_size)?;
 
-            let hash_bytes = match resolution {
-                ClusterResolution::Allocated { host_offset, .. } => {
-                    let mut data = vec![0u8; cluster_size as usize];
-                    self.backend.read_exact_at(&mut data, host_offset.0)?;
-                    compute_hash(&data, hash_size)
-                }
-                ClusterResolution::Zero => zero_hash.clone(),
-                ClusterResolution::Compressed {
-                    descriptor,
-                    ..
-                } => {
-                    let file_size = self.backend.file_size()?;
-                    let available = file_size.saturating_sub(descriptor.host_offset);
-                    let read_size =
-                        (descriptor.compressed_size as usize).min(available as usize);
-                    let mut compressed_data = vec![0u8; read_size];
-                    self.backend
-                        .read_exact_at(&mut compressed_data, descriptor.host_offset)?;
-                    let decompressed = crate::engine::compression::decompress_cluster(
-                        &compressed_data,
-                        cluster_size as usize,
-                        guest_offset,
-                    )?;
-                    compute_hash(&decompressed, hash_size)
-                }
-                ClusterResolution::Unallocated => continue,
-            };
+            if !has_data {
+                continue;
+            }
 
-            self.store_hash(cluster_idx, &hash_bytes, &mut table, &ext)?;
+            let hash_bytes = compute_hash(&data, hash_size);
+            self.store_hash(chunk_idx, &hash_bytes, &mut table, &ext)?;
             count += 1;
         }
 
@@ -269,31 +277,24 @@ impl<'a> HashManager<'a> {
         Ok(count)
     }
 
-    /// Update hashes for all clusters touched by a write at [guest_offset, guest_offset+len).
+    /// Update hashes for all hash chunks touched by a write at [guest_offset, guest_offset+len).
     pub fn update_hashes_for_range(&mut self, guest_offset: u64, len: u64) -> Result<()> {
         let ext = match self.find_extension() {
             Some(ext) => ext.clone(),
             None => return Ok(()),
         };
 
-        let cluster_size = self.cluster_size();
+        let hash_chunk_size = ext.hash_chunk_size();
         let hash_size = ext.hash_size as usize;
-        let first_cluster = guest_offset / cluster_size;
-        let last_cluster = (guest_offset + len - 1) / cluster_size;
+        let first_chunk = guest_offset / hash_chunk_size;
+        let last_chunk = (guest_offset + len - 1) / hash_chunk_size;
         let mut table = self.load_hash_table(&ext)?;
 
-        for cluster_idx in first_cluster..=last_cluster {
-            let g_off = cluster_idx * cluster_size;
-            let resolution =
-                self.mapper
-                    .resolve(GuestOffset(g_off), self.backend, self.cache)?;
-
-            if let ClusterResolution::Allocated { host_offset, .. } = resolution {
-                let mut data = vec![0u8; cluster_size as usize];
-                self.backend.read_exact_at(&mut data, host_offset.0)?;
-                let hash_bytes = compute_hash(&data, hash_size);
-                self.store_hash(cluster_idx, &hash_bytes, &mut table, &ext)?;
-            }
+        for chunk_idx in first_chunk..=last_chunk {
+            let chunk_offset = chunk_idx * hash_chunk_size;
+            let (data, _) = self.read_hash_chunk(chunk_offset, hash_chunk_size)?;
+            let hash_bytes = compute_hash(&data, hash_size);
+            self.store_hash(chunk_idx, &hash_bytes, &mut table, &ext)?;
         }
 
         self.write_hash_table(&table, ext.hash_table_offset)?;
@@ -308,10 +309,11 @@ impl<'a> HashManager<'a> {
             .clone();
 
         let cluster_size = self.cluster_size();
+        let hash_chunk_size = ext.hash_chunk_size();
         let hash_size = ext.hash_size as usize;
         let hashes_per_data_cluster = cluster_size as usize / hash_size;
         let table = self.load_hash_table(&ext)?;
-        let zero_hash = compute_zero_hash(cluster_size as usize, ext.hash_size);
+        let total_hash_chunks = (self.virtual_size + hash_chunk_size - 1) / hash_chunk_size;
         let null_hash = vec![0u8; hash_size];
         let mut mismatches = Vec::new();
 
@@ -327,10 +329,9 @@ impl<'a> HashManager<'a> {
             self.backend.read_exact_at(&mut hash_data, data_offset)?;
 
             for hash_idx in 0..hashes_per_data_cluster {
-                let cluster_idx =
+                let hash_chunk_idx =
                     table_idx as u64 * hashes_per_data_cluster as u64 + hash_idx as u64;
-                let total_clusters = (self.virtual_size + cluster_size - 1) / cluster_size;
-                if cluster_idx >= total_clusters {
+                if hash_chunk_idx >= total_hash_chunks {
                     break;
                 }
 
@@ -340,51 +341,24 @@ impl<'a> HashManager<'a> {
                     continue; // No hash stored
                 }
 
-                let guest_offset = cluster_idx * cluster_size;
-                let resolution = self.mapper.resolve(
-                    GuestOffset(guest_offset),
-                    self.backend,
-                    self.cache,
-                )?;
+                let guest_offset = hash_chunk_idx * hash_chunk_size;
+                let (data, has_data) = self.read_hash_chunk(guest_offset, hash_chunk_size)?;
 
-                let actual = match resolution {
-                    ClusterResolution::Allocated { host_offset, .. } => {
-                        let mut data = vec![0u8; cluster_size as usize];
-                        self.backend.read_exact_at(&mut data, host_offset.0)?;
-                        compute_hash(&data, hash_size)
-                    }
-                    ClusterResolution::Zero => zero_hash.clone(),
-                    ClusterResolution::Compressed { descriptor, .. } => {
-                        let file_size = self.backend.file_size()?;
-                        let available =
-                            file_size.saturating_sub(descriptor.host_offset);
-                        let read_size =
-                            (descriptor.compressed_size as usize).min(available as usize);
-                        let mut comp_buf = vec![0u8; read_size];
-                        self.backend
-                            .read_exact_at(&mut comp_buf, descriptor.host_offset)?;
-                        let decompressed = crate::engine::compression::decompress_cluster(
-                            &comp_buf,
-                            cluster_size as usize,
-                            guest_offset,
-                        )?;
-                        compute_hash(&decompressed, hash_size)
-                    }
-                    ClusterResolution::Unallocated => {
-                        // Hash exists but cluster is unallocated → mismatch
-                        mismatches.push(HashMismatch {
-                            cluster_index: cluster_idx,
-                            guest_offset,
-                            expected: stored.to_vec(),
-                            actual: null_hash.clone(),
-                        });
-                        continue;
-                    }
-                };
+                if !has_data {
+                    // Hash exists but hash chunk is entirely unallocated → mismatch
+                    mismatches.push(HashMismatch {
+                        hash_chunk_index: hash_chunk_idx,
+                        guest_offset,
+                        expected: stored.to_vec(),
+                        actual: null_hash.clone(),
+                    });
+                    continue;
+                }
 
+                let actual = compute_hash(&data, hash_size);
                 if actual != stored {
                     mismatches.push(HashMismatch {
-                        cluster_index: cluster_idx,
+                        hash_chunk_index: hash_chunk_idx,
                         guest_offset,
                         expected: stored.to_vec(),
                         actual,
@@ -396,8 +370,8 @@ impl<'a> HashManager<'a> {
         Ok(mismatches)
     }
 
-    /// Get the stored hash for a specific cluster index.
-    pub fn get_hash(&mut self, cluster_index: u64) -> Result<Option<Vec<u8>>> {
+    /// Get the stored hash for a specific hash chunk index.
+    pub fn get_hash(&mut self, hash_chunk_index: u64) -> Result<Option<Vec<u8>>> {
         let ext = self
             .find_extension()
             .ok_or(Error::HashNotInitialized)?
@@ -406,8 +380,8 @@ impl<'a> HashManager<'a> {
         let cluster_size = self.cluster_size();
         let hash_size = ext.hash_size as usize;
         let hashes_per_data_cluster = cluster_size as usize / hash_size;
-        let table_idx = (cluster_index / hashes_per_data_cluster as u64) as u32;
-        let hash_idx = (cluster_index % hashes_per_data_cluster as u64) as usize;
+        let table_idx = (hash_chunk_index / hashes_per_data_cluster as u64) as u32;
+        let hash_idx = (hash_chunk_index % hashes_per_data_cluster as u64) as usize;
 
         let table = self.load_hash_table(&ext)?;
         let entry = match table.get(table_idx) {
@@ -434,7 +408,7 @@ impl<'a> HashManager<'a> {
         }
     }
 
-    /// Export hashes for a range of clusters (or all if range is None).
+    /// Export hashes for a range of guest bytes (or all if range is None).
     pub fn export_hashes(
         &mut self,
         range: Option<(u64, u64)>,
@@ -445,11 +419,15 @@ impl<'a> HashManager<'a> {
             .clone();
 
         let cluster_size = self.cluster_size();
+        let hash_chunk_size = ext.hash_chunk_size();
         let hash_size = ext.hash_size as usize;
-        let total_clusters = (self.virtual_size + cluster_size - 1) / cluster_size;
-        let (start_cluster, end_cluster) = match range {
-            Some((start, end)) => (start / cluster_size, (end + cluster_size - 1) / cluster_size),
-            None => (0, total_clusters),
+        let total_hash_chunks = (self.virtual_size + hash_chunk_size - 1) / hash_chunk_size;
+        let (start_chunk, end_chunk) = match range {
+            Some((start, end)) => (
+                start / hash_chunk_size,
+                (end + hash_chunk_size - 1) / hash_chunk_size,
+            ),
+            None => (0, total_hash_chunks),
         };
 
         let hashes_per_data_cluster = cluster_size as usize / hash_size;
@@ -457,9 +435,9 @@ impl<'a> HashManager<'a> {
         let null_hash = vec![0u8; hash_size];
         let mut entries = Vec::new();
 
-        for cluster_idx in start_cluster..end_cluster.min(total_clusters) {
-            let table_idx = (cluster_idx / hashes_per_data_cluster as u64) as u32;
-            let hash_idx = (cluster_idx % hashes_per_data_cluster as u64) as usize;
+        for chunk_idx in start_chunk..end_chunk.min(total_hash_chunks) {
+            let table_idx = (chunk_idx / hashes_per_data_cluster as u64) as u32;
+            let hash_idx = (chunk_idx % hashes_per_data_cluster as u64) as usize;
 
             let hash = if let Some(entry) = table.get(table_idx) {
                 if let Some(data_offset) = entry.data_offset() {
@@ -474,7 +452,7 @@ impl<'a> HashManager<'a> {
                 null_hash.clone()
             };
 
-            let guest_offset = cluster_idx * cluster_size;
+            let guest_offset = chunk_idx * hash_chunk_size;
             let allocated = !matches!(
                 self.mapper
                     .resolve(GuestOffset(guest_offset), self.backend, self.cache)?,
@@ -483,7 +461,7 @@ impl<'a> HashManager<'a> {
 
             if hash != null_hash {
                 entries.push(HashEntry {
-                    cluster_index: cluster_idx,
+                    hash_chunk_index: chunk_idx,
                     guest_offset,
                     hash,
                     allocated,
@@ -505,6 +483,86 @@ impl<'a> HashManager<'a> {
             HeaderExtension::Blake3Hashes(ext) => Some(ext),
             _ => None,
         })
+    }
+
+    /// Read the data for a hash chunk, handling chunks that span multiple
+    /// clusters or are sub-cluster regions.
+    ///
+    /// Returns `(data, has_data)` where `has_data` is true if any portion
+    /// of the chunk is non-unallocated (Allocated, Zero, or Compressed).
+    fn read_hash_chunk(
+        &mut self,
+        hash_chunk_offset: u64,
+        hash_chunk_size: u64,
+    ) -> Result<(Vec<u8>, bool)> {
+        let cluster_size = self.cluster_size();
+        let mut data = vec![0u8; hash_chunk_size as usize];
+        let mut has_data = false;
+        let mut pos = 0u64;
+
+        while pos < hash_chunk_size {
+            let guest_off = hash_chunk_offset + pos;
+            if guest_off >= self.virtual_size {
+                break;
+            }
+
+            // How much can we process from this cluster position?
+            let intra = guest_off & (cluster_size - 1);
+            let remaining_in_cluster = cluster_size - intra;
+            let remaining_in_chunk = hash_chunk_size - pos;
+            let len = remaining_in_cluster.min(remaining_in_chunk) as usize;
+
+            let resolution =
+                self.mapper
+                    .resolve(GuestOffset(guest_off), self.backend, self.cache)?;
+
+            match resolution {
+                ClusterResolution::Allocated {
+                    host_offset,
+                    intra_cluster_offset,
+                } => {
+                    has_data = true;
+                    self.backend.read_exact_at(
+                        &mut data[pos as usize..pos as usize + len],
+                        host_offset.0 + intra_cluster_offset.0 as u64,
+                    )?;
+                }
+                ClusterResolution::Zero => {
+                    has_data = true;
+                    // data is already zeroed
+                }
+                ClusterResolution::Compressed {
+                    descriptor,
+                    intra_cluster_offset,
+                } => {
+                    has_data = true;
+                    let file_size = self.backend.file_size()?;
+                    let available = file_size.saturating_sub(descriptor.host_offset);
+                    let rd_size =
+                        (descriptor.compressed_size as usize).min(available as usize);
+                    let mut comp_buf = vec![0u8; rd_size];
+                    self.backend
+                        .read_exact_at(&mut comp_buf, descriptor.host_offset)?;
+                    let cluster_guest_off =
+                        guest_off - intra_cluster_offset.0 as u64;
+                    let decompressed = crate::engine::compression::decompress_cluster(
+                        &comp_buf,
+                        cluster_size as usize,
+                        cluster_guest_off,
+                    )?;
+                    let intra = intra_cluster_offset.0 as usize;
+                    data[pos as usize..pos as usize + len]
+                        .copy_from_slice(&decompressed[intra..intra + len]);
+                }
+                ClusterResolution::Unallocated => {
+                    // data stays zeroed
+                }
+            }
+
+            pos += len as u64;
+        }
+
+        Ok((data, has_data))
     }
 
     fn load_hash_table(&self, ext: &Blake3Extension) -> Result<HashTable> {
@@ -550,10 +608,10 @@ impl<'a> HashManager<'a> {
         Ok(())
     }
 
-    /// Store a hash for a given cluster, handling COW on hash data clusters.
+    /// Store a hash for a given hash chunk, handling COW on hash data clusters.
     fn store_hash(
         &mut self,
-        cluster_idx: u64,
+        hash_chunk_idx: u64,
         hash_bytes: &[u8],
         table: &mut HashTable,
         ext: &Blake3Extension,
@@ -561,8 +619,8 @@ impl<'a> HashManager<'a> {
         let cluster_size = self.cluster_size();
         let hash_size = ext.hash_size as usize;
         let hashes_per_data_cluster = cluster_size as usize / hash_size;
-        let table_idx = (cluster_idx / hashes_per_data_cluster as u64) as u32;
-        let hash_idx = (cluster_idx % hashes_per_data_cluster as u64) as usize;
+        let table_idx = (hash_chunk_idx / hashes_per_data_cluster as u64) as u32;
+        let hash_idx = (hash_chunk_idx % hashes_per_data_cluster as u64) as usize;
 
         let entry = match table.get(table_idx) {
             Some(e) => *e,
@@ -611,16 +669,20 @@ impl<'a> HashManager<'a> {
     }
 }
 
+/// Resolve hash_chunk_bits (0 = default) to hash_chunk_size in bytes.
+fn resolve_hash_chunk_size(hash_chunk_bits: u8) -> u64 {
+    let bits = if hash_chunk_bits == 0 {
+        BLAKE3_DEFAULT_HASH_CHUNK_BITS
+    } else {
+        hash_chunk_bits
+    };
+    1u64 << bits
+}
+
 /// Compute a BLAKE3 hash, truncated to `hash_size` bytes.
 fn compute_hash(data: &[u8], hash_size: usize) -> Vec<u8> {
     let hash = blake3::hash(data);
     hash.as_bytes()[..hash_size].to_vec()
-}
-
-/// Compute the BLAKE3 hash of an all-zero cluster.
-fn compute_zero_hash(cluster_size: usize, hash_size: u8) -> Vec<u8> {
-    let zeros = vec![0u8; cluster_size];
-    compute_hash(&zeros, hash_size as usize)
 }
 
 /// Check if any hash extension exists in the given extensions list.
@@ -633,29 +695,11 @@ pub fn detect_hashes(extensions: &[HeaderExtension]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::image::{CreateOptions, Qcow2Image};
-    use crate::io::MemoryBackend;
 
-    fn create_test_image(virtual_size: u64) -> Qcow2Image {
-        Qcow2Image::create_on_backend(
-            Box::new(MemoryBackend::zeroed(0)),
-            CreateOptions {
-                virtual_size,
-                cluster_bits: None,
-            },
-        )
-        .unwrap()
+    fn compute_zero_hash(size: usize, hash_size: u8) -> Vec<u8> {
+        let zeros = vec![0u8; size];
+        compute_hash(&zeros, hash_size as usize)
     }
-
-    #[allow(dead_code)]
-    fn create_hash_manager(_image: &mut Qcow2Image) -> HashManager<'_> {
-        // We need to access internal fields — use the image API methods instead
-        // This helper is not used; tests call image-level methods
-        unreachable!()
-    }
-
-    // Tests that exercise through the image API will be in Phase 3.
-    // Here we test the standalone helpers.
 
     #[test]
     fn compute_hash_32_bytes() {
@@ -695,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_hash_differs_by_cluster_size() {
+    fn zero_hash_differs_by_size() {
         let h1 = compute_zero_hash(65536, 32);
         let h2 = compute_zero_hash(4096, 32);
         assert_ne!(h1, h2);
@@ -712,6 +756,7 @@ mod tests {
             hash_table_offset: 0x1_0000,
             hash_table_entries: 1,
             hash_size: 32,
+            hash_chunk_bits: 0,
         })];
         assert!(detect_hashes(&exts));
     }
@@ -720,5 +765,16 @@ mod tests {
     fn detect_hashes_other_extensions() {
         let exts = vec![HeaderExtension::BackingFileFormat("qcow2".to_string())];
         assert!(!detect_hashes(&exts));
+    }
+
+    #[test]
+    fn resolve_hash_chunk_size_default() {
+        assert_eq!(resolve_hash_chunk_size(0), 65536);
+    }
+
+    #[test]
+    fn resolve_hash_chunk_size_custom() {
+        assert_eq!(resolve_hash_chunk_size(12), 4096);
+        assert_eq!(resolve_hash_chunk_size(20), 1 << 20);
     }
 }
