@@ -31,7 +31,7 @@ fn build_image_open_corpus() {
             virtual_size: 1 << 20, // 1 MB
             cluster_bits: Some(12), // 4KB clusters
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
         },
     )
     .unwrap();
@@ -47,7 +47,7 @@ fn build_image_open_corpus() {
             virtual_size: 1 << 20,
             cluster_bits: None,
             extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
         },
     )
     .unwrap();

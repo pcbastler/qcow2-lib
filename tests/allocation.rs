@@ -10,7 +10,7 @@ fn create_test_image(size: u64) -> (TempDir, std::path::PathBuf) {
         virtual_size: size,
         cluster_bits: Some(16), // 64 KB clusters
         extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
     };
     Qcow2Image::create(&path, opts).unwrap();
     (dir, path)

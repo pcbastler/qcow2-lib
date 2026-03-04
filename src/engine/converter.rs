@@ -7,7 +7,7 @@
 use std::fs::File;
 use std::path::Path;
 
-use crate::engine::image::{CreateOptions, Qcow2Image};
+use crate::engine::image::{CreateOptions, EncryptionOptions, Qcow2Image};
 use crate::error::{Error, Result};
 use crate::io::sync_backend::SyncFileBackend;
 use crate::io::IoBackend;
@@ -17,8 +17,17 @@ use crate::io::IoBackend;
 /// Reads every guest cluster sequentially and writes it to the output file.
 /// Unallocated and zero clusters produce zeros in the raw output.
 /// If the source has a backing chain, it is resolved transparently.
-pub fn convert_to_raw(input_path: &Path, output_path: &Path) -> Result<()> {
-    let mut source = Qcow2Image::open(input_path)?;
+/// Pass `password` to open an encrypted source image.
+pub fn convert_to_raw(
+    input_path: &Path,
+    output_path: &Path,
+    password: Option<&[u8]>,
+) -> Result<()> {
+    let mut source = if let Some(pw) = password {
+        Qcow2Image::open_with_password(input_path, pw)?
+    } else {
+        Qcow2Image::open(input_path)?
+    };
     let virtual_size = source.virtual_size();
     let cluster_size = source.cluster_size() as usize;
 
@@ -56,6 +65,7 @@ pub fn convert_from_raw(
     compress: bool,
     compression_type: Option<u8>,
     data_file: Option<String>,
+    encryption: Option<EncryptionOptions>,
 ) -> Result<()> {
     let input = File::open(input_path).map_err(|e| Error::ConversionFailed {
         message: format!("failed to open raw input: {e}"),
@@ -74,7 +84,7 @@ pub fn convert_from_raw(
         CreateOptions {
             virtual_size: input_size,
             cluster_bits: None,
-            extended_l2: false, compression_type, data_file,
+            extended_l2: false, compression_type, data_file, encryption,
         },
     )?;
 
@@ -115,8 +125,14 @@ pub fn convert_qcow2_to_qcow2(
     compress: bool,
     compression_type: Option<u8>,
     data_file: Option<String>,
+    password: Option<&[u8]>,
+    encryption: Option<EncryptionOptions>,
 ) -> Result<()> {
-    let mut source = Qcow2Image::open(input_path)?;
+    let mut source = if let Some(pw) = password {
+        Qcow2Image::open_with_password(input_path, pw)?
+    } else {
+        Qcow2Image::open(input_path)?
+    };
     let virtual_size = source.virtual_size();
 
     let mut dest = Qcow2Image::create(
@@ -126,7 +142,7 @@ pub fn convert_qcow2_to_qcow2(
             cluster_bits: Some(source.cluster_bits()),
             extended_l2: source.header().has_extended_l2(),
             compression_type: Some(compression_type.unwrap_or(source.header().compression_type)),
-            data_file,
+            data_file, encryption,
         },
     )?;
 
@@ -171,7 +187,7 @@ mod tests {
                 virtual_size: 1024 * 1024, // 1 MB
                 cluster_bits: None,
                 extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -189,7 +205,7 @@ mod tests {
         let qcow2_path = create_test_qcow2(dir.path(), "src.qcow2", &[(0, &[0xAA; 512])]);
         let raw_path = dir.path().join("output.raw");
 
-        convert_to_raw(&qcow2_path, &raw_path).unwrap();
+        convert_to_raw(&qcow2_path, &raw_path, None).unwrap();
 
         // Verify the raw file
         let raw = std::fs::read(&raw_path).unwrap();
@@ -209,7 +225,7 @@ mod tests {
         std::fs::write(&raw_path, &raw_data).unwrap();
 
         let qcow2_path = dir.path().join("output.qcow2");
-        convert_from_raw(&raw_path, &qcow2_path, false, None, None).unwrap();
+        convert_from_raw(&raw_path, &qcow2_path, false, None, None, None).unwrap();
 
         // Read back with our library
         let mut image = Qcow2Image::open(&qcow2_path).unwrap();
@@ -233,7 +249,7 @@ mod tests {
         );
         let dst = dir.path().join("dst.qcow2");
 
-        convert_qcow2_to_qcow2(&src, &dst, false, None, None).unwrap();
+        convert_qcow2_to_qcow2(&src, &dst, false, None, None, None, None).unwrap();
 
         let mut image = Qcow2Image::open(&dst).unwrap();
         let mut buf = vec![0u8; 4096];
@@ -256,7 +272,7 @@ mod tests {
         std::fs::write(&raw_path, &raw_data).unwrap();
 
         let qcow2_path = dir.path().join("sparse.qcow2");
-        convert_from_raw(&raw_path, &qcow2_path, false, None, None).unwrap();
+        convert_from_raw(&raw_path, &qcow2_path, false, None, None, None).unwrap();
 
         // QCOW2 file should be much smaller than raw (only 1 data cluster allocated)
         let qcow2_size = std::fs::metadata(&qcow2_path).unwrap().len();
@@ -282,8 +298,8 @@ mod tests {
         let uncompressed_path = dir.path().join("uncompressed.qcow2");
         let compressed_path = dir.path().join("compressed.qcow2");
 
-        convert_from_raw(&raw_path, &uncompressed_path, false, None, None).unwrap();
-        convert_from_raw(&raw_path, &compressed_path, true, None, None).unwrap();
+        convert_from_raw(&raw_path, &uncompressed_path, false, None, None, None).unwrap();
+        convert_from_raw(&raw_path, &compressed_path, true, None, None, None).unwrap();
 
         let uncompressed_size = std::fs::metadata(&uncompressed_path).unwrap().len();
         let compressed_size = std::fs::metadata(&compressed_path).unwrap().len();

@@ -13,6 +13,7 @@ pub mod cache;
 pub mod cluster_mapping;
 pub mod compression;
 pub mod converter;
+pub mod encryption;
 pub mod hash_manager;
 pub mod image;
 pub mod integrity;

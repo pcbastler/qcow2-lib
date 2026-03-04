@@ -107,6 +107,15 @@ enum Command {
         /// Store guest data in an external data file (raw format).
         #[arg(long)]
         data_file: Option<String>,
+        /// Password for encrypted source images.
+        #[arg(long)]
+        password: Option<String>,
+        /// Encrypt the output image with LUKS.
+        #[arg(long)]
+        encrypt: bool,
+        /// Encryption password for the output image (requires --encrypt).
+        #[arg(long)]
+        encrypt_password: Option<String>,
     },
 
     /// Compact/defragment a QCOW2 image into a new file.
@@ -292,12 +301,29 @@ fn main() {
             compress,
             compression_type,
             data_file,
+            password,
+            encrypt,
+            encrypt_password,
         } => {
             let ct = compression_type.map(|ct| match ct {
                 CompressionType::Deflate => qcow2_lib::format::constants::COMPRESSION_DEFLATE,
                 CompressionType::Zstd => qcow2_lib::format::constants::COMPRESSION_ZSTD,
             });
-            convert::run(&input, &output, &format, compress, ct, data_file)
+            let pw = password.as_deref().map(|s| s.as_bytes());
+            let enc = if encrypt {
+                let enc_pw = encrypt_password.as_deref().unwrap_or_else(|| {
+                    password.as_deref().expect("--encrypt requires --encrypt-password or --password")
+                });
+                Some(qcow2_lib::engine::image::EncryptionOptions {
+                    password: enc_pw.as_bytes().to_vec(),
+                    cipher: qcow2_lib::engine::encryption::CipherMode::AesXtsPlain64,
+                    luks_version: 1,
+                    iter_time_ms: Some(1000),
+                })
+            } else {
+                None
+            };
+            convert::run(&input, &output, &format, compress, ct, data_file, pw, enc)
         }
         Command::Compact {
             input,

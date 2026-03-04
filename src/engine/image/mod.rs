@@ -78,6 +78,8 @@ pub struct Qcow2Image {
     has_auto_bitmaps: bool,
     /// Cached flag: true if a BLAKE3 hash extension exists.
     has_hashes: bool,
+    /// Encryption context (set when image has crypt_method=2 and password provided).
+    crypt_context: Option<crate::engine::encryption::CryptContext>,
 }
 
 /// Options for creating a new QCOW2 image.
@@ -94,6 +96,21 @@ pub struct CreateOptions {
     pub compression_type: Option<u8>,
     /// External data file name. When set, guest data is stored in a separate raw file.
     pub data_file: Option<String>,
+    /// Encryption options. When set, the image will be LUKS-encrypted.
+    pub encryption: Option<EncryptionOptions>,
+}
+
+/// Options for creating an encrypted QCOW2 image.
+#[derive(Debug, Clone)]
+pub struct EncryptionOptions {
+    /// Password for the key slot.
+    pub password: Vec<u8>,
+    /// Cipher mode (default: AES-XTS-plain64).
+    pub cipher: crate::engine::encryption::CipherMode,
+    /// LUKS version: 1 or 2 (default: 1).
+    pub luks_version: u8,
+    /// PBKDF2/Argon2 iteration time target in milliseconds.
+    pub iter_time_ms: Option<u32>,
 }
 
 // ---- Core: open, read, accessors ----
@@ -115,7 +132,7 @@ impl Qcow2Image {
         let path = path.as_ref();
         let backend = SyncFileBackend::open(path)?;
         let image_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        Self::from_backend_with_options(Box::new(backend), Some(image_dir), read_mode, None)
+        Self::from_backend_with_options(Box::new(backend), Some(image_dir), read_mode, None, None)
     }
 
     /// Create a `Qcow2Image` from an already-opened I/O backend.
@@ -123,7 +140,7 @@ impl Qcow2Image {
     /// Useful for testing with [`MemoryBackend`](crate::io::MemoryBackend)
     /// or for custom I/O implementations. Uses [`ReadMode::Strict`].
     pub fn from_backend(backend: Box<dyn IoBackend>) -> Result<Self> {
-        Self::from_backend_with_options(backend, None, ReadMode::Strict, None)
+        Self::from_backend_with_options(backend, None, ReadMode::Strict, None, None)
     }
 
     /// Create a `Qcow2Image` from a backend with an explicit read mode.
@@ -131,7 +148,7 @@ impl Qcow2Image {
         backend: Box<dyn IoBackend>,
         read_mode: ReadMode,
     ) -> Result<Self> {
-        Self::from_backend_with_options(backend, None, read_mode, None)
+        Self::from_backend_with_options(backend, None, read_mode, None, None)
     }
 
     /// Create a `Qcow2Image` from separate metadata and data backends.
@@ -142,7 +159,44 @@ impl Qcow2Image {
         backend: Box<dyn IoBackend>,
         data_backend: Option<Box<dyn IoBackend>>,
     ) -> Result<Self> {
-        Self::from_backend_with_options(backend, None, ReadMode::Strict, data_backend)
+        Self::from_backend_with_options(backend, None, ReadMode::Strict, data_backend, None)
+    }
+
+    /// Open a QCOW2 image file with a password for encrypted images.
+    pub fn open_with_password<P: AsRef<Path>>(path: P, password: &[u8]) -> Result<Self> {
+        let path = path.as_ref();
+        let backend = SyncFileBackend::open(path)?;
+        let image_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::from_backend_with_options(
+            Box::new(backend), Some(image_dir), ReadMode::Strict, None, Some(password),
+        )
+    }
+
+    /// Open a QCOW2 image read-write with a password for encrypted images.
+    pub fn open_rw_with_password<P: AsRef<Path>>(path: P, password: &[u8]) -> Result<Self> {
+        let path = path.as_ref();
+        let backend = SyncFileBackend::open_rw(path)?;
+        let image_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+        let mut image = Self::from_backend_with_options(
+            Box::new(backend), Some(image_dir), ReadMode::Strict, None, Some(password),
+        )?;
+
+        let refcount_manager = RefcountManager::load(
+            image.backend.as_ref(),
+            &image.header,
+        )?;
+        image.refcount_manager = Some(refcount_manager);
+        image.writable = true;
+        Ok(image)
+    }
+
+    /// Create a `Qcow2Image` from a backend with a password for encrypted images.
+    pub fn from_backend_with_password(
+        backend: Box<dyn IoBackend>,
+        password: &[u8],
+    ) -> Result<Self> {
+        Self::from_backend_with_options(backend, None, ReadMode::Strict, None, Some(password))
     }
 
     /// Internal constructor that handles both file and backend paths.
@@ -151,6 +205,7 @@ impl Qcow2Image {
         image_dir: Option<&Path>,
         read_mode: ReadMode,
         data_backend: Option<Box<dyn IoBackend>>,
+        password: Option<&[u8]>,
     ) -> Result<Self> {
         // Read header (read enough for the largest possible v3 header)
         let mut header_buf = vec![0u8; 512];
@@ -291,6 +346,33 @@ impl Qcow2Image {
         // Check if BLAKE3 hash extension exists
         let has_hashes = hash_manager::detect_hashes(&extensions);
 
+        // Recover encryption context if image is LUKS-encrypted
+        let crypt_context = if header.crypt_method == crate::format::constants::CRYPT_LUKS {
+            let pw = password.ok_or(Error::NoPasswordProvided)?;
+
+            // Find LUKS header location from FullDiskEncryption extension
+            let (luks_offset, luks_length) = extensions
+                .iter()
+                .find_map(|e| match e {
+                    HeaderExtension::FullDiskEncryption { offset, length } => {
+                        Some((*offset, *length))
+                    }
+                    _ => None,
+                })
+                .ok_or(Error::InvalidLuksHeader {
+                    message: "missing FullDiskEncryption header extension".to_string(),
+                })?;
+
+            // Read LUKS header data
+            let mut luks_data = vec![0u8; luks_length as usize];
+            backend.read_exact_at(&mut luks_data, luks_offset)?;
+
+            let ctx = crate::engine::encryption::recover_master_key(&luks_data, pw)?;
+            Some(ctx)
+        } else {
+            None
+        };
+
         Ok(Self {
             header,
             extensions,
@@ -308,6 +390,7 @@ impl Qcow2Image {
             compressed_cursor: 0,
             has_auto_bitmaps,
             has_hashes,
+            crypt_context,
         })
     }
 
@@ -336,6 +419,7 @@ impl Qcow2Image {
             self.read_mode,
             &mut self.warnings,
             self.backing_image.as_deref_mut(),
+            self.crypt_context.as_ref(),
         );
         reader.read_at(buf, guest_offset)
     }
@@ -363,6 +447,11 @@ impl Qcow2Image {
     /// The cluster_bits value from the header.
     pub fn cluster_bits(&self) -> u32 {
         self.header.cluster_bits
+    }
+
+    /// Whether the image is encrypted (crypt_method != 0).
+    pub fn is_encrypted(&self) -> bool {
+        self.crypt_context.is_some()
     }
 
     /// The resolved backing file chain, if any.
@@ -439,6 +528,7 @@ impl Qcow2Image {
             Some(image_dir),
             ReadMode::Strict,
             None,
+            None,
         )?;
 
         // If external data file, reopen in rw mode
@@ -480,7 +570,7 @@ impl Qcow2Image {
     ///
     /// Loads the refcount table for cluster allocation. Useful for testing.
     pub fn from_backend_rw(backend: Box<dyn IoBackend>) -> Result<Self> {
-        let mut image = Self::from_backend_with_options(backend, None, ReadMode::Strict, None)?;
+        let mut image = Self::from_backend_with_options(backend, None, ReadMode::Strict, None, None)?;
 
         let refcount_manager = RefcountManager::load(
             image.backend.as_ref(),
@@ -529,6 +619,7 @@ impl Qcow2Image {
             self.header.compression_type,
             raw_external,
             self.backing_image.as_deref_mut(),
+            self.crypt_context.as_ref(),
         );
         writer.write_at(buf, guest_offset)?;
 
@@ -578,6 +669,7 @@ impl Qcow2Image {
                 cluster_bits,
                 virtual_size,
                 compression_type,
+                self.crypt_context.as_ref(),
             );
             mgr.update_hashes_for_range(guest_offset, buf.len() as u64)?;
         }
@@ -737,6 +829,9 @@ impl Qcow2Image {
         if self.data_backend.is_some() {
             return Err(Error::CompressedWithExternalData);
         }
+        if self.crypt_context.is_some() {
+            return Err(Error::EncryptionWithCompression);
+        }
 
         let refcount_manager = self
             .refcount_manager
@@ -755,6 +850,7 @@ impl Qcow2Image {
             self.header.compression_type,
             false,
             self.backing_image.as_deref_mut(),
+            self.crypt_context.as_ref(),
         );
         writer.set_compressed_cursor(self.compressed_cursor);
         let result = writer.write_compressed_at(compressed_data, guest_offset);

@@ -343,7 +343,7 @@ mod tests {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
                 extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -362,7 +362,7 @@ mod tests {
                 virtual_size: 4 * 1024 * 1024,
                 cluster_bits: None,
                 extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();
@@ -386,7 +386,7 @@ mod tests {
                 virtual_size: 4 * 1024 * 1024,
                 cluster_bits: None,
                 extended_l2: false, compression_type: None,
-            data_file: None,
+            data_file: None, encryption: None,
             },
         )
         .unwrap();

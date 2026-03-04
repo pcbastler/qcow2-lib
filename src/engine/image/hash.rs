@@ -49,6 +49,7 @@ impl Qcow2Image {
             cluster_bits,
             virtual_size,
             compression_type,
+            self.crypt_context.as_ref(),
         );
         mgr.init_hashes(hs, hcb)?;
         self.has_hashes = true;
@@ -84,6 +85,7 @@ impl Qcow2Image {
             cluster_bits,
             virtual_size,
             compression_type,
+            self.crypt_context.as_ref(),
         );
         mgr.rehash()
     }
@@ -117,6 +119,7 @@ impl Qcow2Image {
             cluster_bits,
             virtual_size,
             compression_type,
+            self.crypt_context.as_ref(),
         );
         mgr.remove_hashes()?;
         self.has_hashes = false;
@@ -148,6 +151,7 @@ impl Qcow2Image {
             cluster_bits,
             virtual_size,
             compression_type,
+            self.crypt_context.as_ref(),
         );
         mgr.verify()
     }
@@ -177,6 +181,7 @@ impl Qcow2Image {
             cluster_bits,
             virtual_size,
             compression_type,
+            self.crypt_context.as_ref(),
         );
         mgr.get_hash(hash_chunk_index)
     }
@@ -206,6 +211,7 @@ impl Qcow2Image {
             cluster_bits,
             virtual_size,
             compression_type,
+            self.crypt_context.as_ref(),
         );
         mgr.export_hashes(range)
     }
