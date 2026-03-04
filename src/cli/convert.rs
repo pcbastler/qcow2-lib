@@ -21,7 +21,13 @@ pub enum OutputFormat {
 }
 
 /// Run the convert subcommand.
-pub fn run(input: &Path, output: &Path, format: &OutputFormat, compress: bool) -> Result<()> {
+pub fn run(
+    input: &Path,
+    output: &Path,
+    format: &OutputFormat,
+    compress: bool,
+    compression_type: Option<u8>,
+) -> Result<()> {
     let input_format = detect_format(input)?;
 
     match (input_format, format) {
@@ -34,7 +40,7 @@ pub fn run(input: &Path, output: &Path, format: &OutputFormat, compress: bool) -
             );
         }
         (InputFormat::Qcow2, OutputFormat::Qcow2) => {
-            converter::convert_qcow2_to_qcow2(input, output, compress)?;
+            converter::convert_qcow2_to_qcow2(input, output, compress, compression_type)?;
             let suffix = if compress { " (compressed)" } else { "" };
             println!(
                 "Converted {} (qcow2) -> {} (qcow2){suffix}",
@@ -43,7 +49,7 @@ pub fn run(input: &Path, output: &Path, format: &OutputFormat, compress: bool) -
             );
         }
         (InputFormat::Raw, OutputFormat::Qcow2) => {
-            converter::convert_from_raw(input, output, compress)?;
+            converter::convert_from_raw(input, output, compress, compression_type)?;
             let suffix = if compress { " (compressed)" } else { "" };
             println!(
                 "Converted {} (raw) -> {} (qcow2){suffix}",

@@ -31,6 +31,15 @@ pub fn run(path: &Path) -> Result<()> {
         header.refcount_table_offset.0,
         header.refcount_table_clusters,
     );
+    println!("  Compression:      {}",
+        match header.compression_type {
+            0 => "deflate",
+            1 => "zstd",
+            t => return Err(qcow2_lib::error::Error::UnsupportedCompressionType {
+                compression_type: t,
+            }),
+        },
+    );
     if header.has_extended_l2() {
         println!("  Extended L2:      yes (subcluster size: {} bytes)",
             header.subcluster_size().unwrap_or(0));

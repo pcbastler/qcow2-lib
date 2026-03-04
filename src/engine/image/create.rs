@@ -53,6 +53,7 @@ impl Qcow2Image {
         let cluster_size = 1u64 << cluster_bits;
         let refcount_order = 4u32; // 16-bit refcounts
         let extended_l2 = options.extended_l2;
+        let compression_type = options.compression_type.unwrap_or(crate::format::constants::COMPRESSION_DEFLATE);
 
         // Validate extended L2 requirements
         if extended_l2 && cluster_bits < crate::format::constants::MIN_CLUSTER_BITS_EXTENDED_L2 {
@@ -75,6 +76,22 @@ impl Qcow2Image {
         let rb_offset = 3 * cluster_size;
         let initial_clusters = 4u64;
 
+        // Build incompatible features
+        let mut incompat = IncompatibleFeatures::empty();
+        if extended_l2 {
+            incompat |= IncompatibleFeatures::EXTENDED_L2;
+        }
+        if compression_type != crate::format::constants::COMPRESSION_DEFLATE {
+            incompat |= IncompatibleFeatures::COMPRESSION_TYPE;
+        }
+
+        // header_length must include compression_type byte when non-deflate
+        let header_length = if compression_type != crate::format::constants::COMPRESSION_DEFLATE {
+            (crate::format::constants::HEADER_V3_MIN_LENGTH + 1) as u32
+        } else {
+            crate::format::constants::HEADER_V3_MIN_LENGTH as u32
+        };
+
         // Build header
         let header = Header {
             version: 3,
@@ -89,16 +106,12 @@ impl Qcow2Image {
             refcount_table_clusters: 1,
             snapshot_count: 0,
             snapshots_offset: ClusterOffset(0),
-            incompatible_features: if extended_l2 {
-                IncompatibleFeatures::EXTENDED_L2
-            } else {
-                IncompatibleFeatures::empty()
-            },
+            incompatible_features: incompat,
             compatible_features: crate::format::feature_flags::CompatibleFeatures::empty(),
             autoclear_features: crate::format::feature_flags::AutoclearFeatures::empty(),
             refcount_order,
-            header_length: crate::format::constants::HEADER_V3_MIN_LENGTH as u32,
-            compression_type: 0,
+            header_length,
+            compression_type,
         };
 
         // Write zeroed image (initial_clusters * cluster_size bytes)
@@ -322,7 +335,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 30, // 1 GB
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -342,7 +355,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: Some(12), // 4 KB clusters
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -359,7 +372,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 512,
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -376,7 +389,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 30,
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -401,7 +414,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -422,7 +435,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -442,7 +455,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -477,7 +490,7 @@ mod tests {
             CreateOptions {
                 virtual_size,
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -499,7 +512,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -526,7 +539,7 @@ mod tests {
                 CreateOptions {
                     virtual_size: 1 << 20,
                     cluster_bits: None,
-                    extended_l2: false,
+                    extended_l2: false, compression_type: None,
                 },
             )
             .unwrap();
@@ -556,7 +569,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         );
         assert!(result.is_err());
@@ -572,7 +585,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: None,
-                extended_l2: false,
+                extended_l2: false, compression_type: None,
             },
         )
         .unwrap();

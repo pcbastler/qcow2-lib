@@ -705,7 +705,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -730,7 +730,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -759,7 +759,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -787,7 +787,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -817,7 +817,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -848,7 +848,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -905,7 +905,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -937,7 +937,7 @@ mod tests {
         }
         std::fs::write(&raw_path, &raw_data).unwrap();
 
-        crate::engine::converter::convert_from_raw(&raw_path, &qcow2_path, true).unwrap();
+        crate::engine::converter::convert_from_raw(&raw_path, &qcow2_path, true, None).unwrap();
 
         let image = Qcow2Image::open(&qcow2_path).unwrap();
         let report = check_integrity(image.backend(), image.header()).unwrap();
@@ -989,7 +989,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -1044,7 +1044,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -1097,7 +1097,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -1145,7 +1145,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();
@@ -1180,7 +1180,7 @@ mod tests {
             CreateOptions {
                 virtual_size: 2 * 1024 * 1024,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap();

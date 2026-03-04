@@ -19,6 +19,15 @@ mod rebase;
 mod resize;
 mod snapshot;
 
+/// Compression algorithm for QCOW2 images.
+#[derive(Clone, clap::ValueEnum)]
+enum CompressionType {
+    /// Raw deflate (RFC 1951). Default.
+    Deflate,
+    /// Zstandard compression (QEMU 5.0+).
+    Zstd,
+}
+
 /// qcow2-tool: Inspect and validate QCOW2 disk images.
 #[derive(Parser)]
 #[command(name = "qcow2-tool", version, about)]
@@ -92,6 +101,9 @@ enum Command {
         /// Compress output clusters (QCOW2 output only).
         #[arg(long)]
         compress: bool,
+        /// Compression algorithm: deflate (default) or zstd.
+        #[arg(long, value_enum)]
+        compression_type: Option<CompressionType>,
     },
 
     /// Compact/defragment a QCOW2 image into a new file.
@@ -275,7 +287,14 @@ fn main() {
             output,
             format,
             compress,
-        } => convert::run(&input, &output, &format, compress),
+            compression_type,
+        } => {
+            let ct = compression_type.map(|ct| match ct {
+                CompressionType::Deflate => qcow2_lib::format::constants::COMPRESSION_DEFLATE,
+                CompressionType::Zstd => qcow2_lib::format::constants::COMPRESSION_ZSTD,
+            });
+            convert::run(&input, &output, &format, compress, ct)
+        }
         Command::Compact {
             input,
             output,

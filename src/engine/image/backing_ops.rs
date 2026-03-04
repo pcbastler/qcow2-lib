@@ -88,6 +88,7 @@ impl Qcow2Image {
                             &compressed,
                             cluster_size as usize,
                             guest_offset,
+                            self.header.compression_type,
                         )?;
                         backing.write_at(&decompressed, guest_offset)?;
                     }

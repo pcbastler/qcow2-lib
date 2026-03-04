@@ -28,6 +28,7 @@ impl Qcow2Image {
         let hcb = hash_chunk_bits.unwrap_or(0);
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
+        let compression_type = self.header.compression_type;
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -42,6 +43,7 @@ impl Qcow2Image {
             &self.mapper,
             cluster_bits,
             virtual_size,
+            compression_type,
         );
         mgr.init_hashes(hs, hcb)?;
         self.has_hashes = true;
@@ -56,6 +58,7 @@ impl Qcow2Image {
 
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
+        let compression_type = self.header.compression_type;
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -70,6 +73,7 @@ impl Qcow2Image {
             &self.mapper,
             cluster_bits,
             virtual_size,
+            compression_type,
         );
         mgr.rehash()
     }
@@ -82,6 +86,7 @@ impl Qcow2Image {
 
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
+        let compression_type = self.header.compression_type;
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -96,6 +101,7 @@ impl Qcow2Image {
             &self.mapper,
             cluster_bits,
             virtual_size,
+            compression_type,
         );
         mgr.remove_hashes()?;
         self.has_hashes = false;
@@ -106,6 +112,7 @@ impl Qcow2Image {
     pub fn hash_verify(&mut self) -> Result<Vec<HashMismatch>> {
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
+        let compression_type = self.header.compression_type;
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -120,6 +127,7 @@ impl Qcow2Image {
             &self.mapper,
             cluster_bits,
             virtual_size,
+            compression_type,
         );
         mgr.verify()
     }
@@ -128,6 +136,7 @@ impl Qcow2Image {
     pub fn hash_get(&mut self, hash_chunk_index: u64) -> Result<Option<Vec<u8>>> {
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
+        let compression_type = self.header.compression_type;
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -142,6 +151,7 @@ impl Qcow2Image {
             &self.mapper,
             cluster_bits,
             virtual_size,
+            compression_type,
         );
         mgr.get_hash(hash_chunk_index)
     }
@@ -150,6 +160,7 @@ impl Qcow2Image {
     pub fn hash_export(&mut self, range: Option<(u64, u64)>) -> Result<Vec<HashEntry>> {
         let cluster_bits = self.header.cluster_bits;
         let virtual_size = self.header.virtual_size;
+        let compression_type = self.header.compression_type;
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -164,6 +175,7 @@ impl Qcow2Image {
             &self.mapper,
             cluster_bits,
             virtual_size,
+            compression_type,
         );
         mgr.export_hashes(range)
     }

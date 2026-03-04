@@ -1018,7 +1018,7 @@ mod tests {
             CreateOptions {
                 virtual_size,
                 cluster_bits: None,
-            extended_l2: false,
+            extended_l2: false, compression_type: None,
             },
         )
         .unwrap()

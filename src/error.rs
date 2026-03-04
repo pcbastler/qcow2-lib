@@ -69,7 +69,7 @@ pub enum Error {
     },
 
     /// The image uses a compression type that is not supported.
-    #[error("unsupported compression type {compression_type} (only deflate/0 is supported)")]
+    #[error("unsupported compression type {compression_type} (supported: deflate/0, zstd/1)")]
     UnsupportedCompressionType {
         /// The unsupported compression type value from the header.
         compression_type: u8,
@@ -647,6 +647,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("99"), "should contain type value: {msg}");
         assert!(msg.contains("deflate"), "should mention deflate: {msg}");
+        assert!(msg.contains("zstd"), "should mention zstd: {msg}");
     }
 
     #[test]

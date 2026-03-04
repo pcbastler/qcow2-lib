@@ -34,6 +34,7 @@ pub struct Qcow2Writer<'a> {
     refcount_manager: &'a mut RefcountManager,
     cluster_bits: u32,
     virtual_size: u64,
+    compression_type: u8,
     backing_image: Option<&'a mut crate::engine::image::Qcow2Image>,
     /// Byte offset for the next compressed write within a shared host cluster.
     /// Zero means no active compressed packing cluster.
@@ -51,6 +52,7 @@ impl<'a> Qcow2Writer<'a> {
         refcount_manager: &'a mut RefcountManager,
         cluster_bits: u32,
         virtual_size: u64,
+        compression_type: u8,
         backing_image: Option<&'a mut crate::engine::image::Qcow2Image>,
     ) -> Self {
         Self {
@@ -61,6 +63,7 @@ impl<'a> Qcow2Writer<'a> {
             refcount_manager,
             cluster_bits,
             virtual_size,
+            compression_type,
             backing_image,
             compressed_cursor: 0,
         }
@@ -524,6 +527,7 @@ impl<'a> Qcow2Writer<'a> {
             &compressed_buf,
             cluster_size as usize,
             0,
+            self.compression_type,
         )?;
 
         let start = intra.0 as usize;
@@ -652,9 +656,13 @@ impl<'a> Qcow2Writer<'a> {
             }
         };
 
-        // Write compressed data.
+        // Write compressed data padded to sector alignment.
+        // The L2 entry stores the sector-aligned size, so the on-disk data
+        // must cover the full range to avoid short reads at EOF.
+        let mut padded = vec![0u8; compressed_size as usize];
+        padded[..compressed_data.len()].copy_from_slice(compressed_data);
         self.backend
-            .write_all_at(compressed_data, write_offset)?;
+            .write_all_at(&padded, write_offset)?;
 
         // Advance the cursor past the sector-aligned compressed data.
         self.compressed_cursor = write_offset + compressed_size;
@@ -822,6 +830,7 @@ mod tests {
             &mut s.refcount_manager,
             CLUSTER_BITS,
             VIRTUAL_SIZE,
+            COMPRESSION_DEFLATE,
             None,
         )
     }
@@ -1516,9 +1525,10 @@ mod tests {
         let l2_offset = l1_entry.l2_table_offset().unwrap();
 
         // Compress the original data
-        let compressed = compression::compress_cluster(&original_data, CLUSTER_SIZE)
-            .unwrap()
-            .expect("all-0xAA should compress");
+        let compressed =
+            compression::compress_cluster(&original_data, CLUSTER_SIZE, COMPRESSION_DEFLATE)
+                .unwrap()
+                .expect("all-0xAA should compress");
 
         // Allocate a cluster for the compressed data
         let comp_host = s
@@ -1583,9 +1593,10 @@ mod tests {
 
         // Compress a full cluster of 0xAA data
         let data = vec![0xAA; CLUSTER_SIZE];
-        let compressed = compression::compress_cluster(&data, CLUSTER_SIZE)
-            .unwrap()
-            .expect("all-0xAA should compress");
+        let compressed =
+            compression::compress_cluster(&data, CLUSTER_SIZE, COMPRESSION_DEFLATE)
+                .unwrap()
+                .expect("all-0xAA should compress");
 
         // Write compressed data at guest offset 0
         make_writer(&mut s)
@@ -1606,7 +1617,8 @@ mod tests {
                 let mut comp_buf = vec![0u8; compressed.len()];
                 s.backend.read_exact_at(&mut comp_buf, desc.host_offset).unwrap();
                 let decompressed =
-                    compression::decompress_cluster(&comp_buf, CLUSTER_SIZE, 0).unwrap();
+                    compression::decompress_cluster(&comp_buf, CLUSTER_SIZE, 0, COMPRESSION_DEFLATE)
+                        .unwrap();
                 assert_eq!(decompressed, data, "decompressed data should match original");
             }
             other => panic!("expected Compressed L2 entry, got {other:?}"),
