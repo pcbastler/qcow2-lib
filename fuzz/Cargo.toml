@@ -45,6 +45,30 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_l2_entry"
+path = "fuzz_targets/fuzz_l2_entry.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_bitmap_extension"
+path = "fuzz_targets/fuzz_bitmap_extension.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_compression"
+path = "fuzz_targets/fuzz_compression.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_engine_extended_l2"
+path = "fuzz_targets/fuzz_engine_extended_l2.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "build_corpus"
 path = "build_corpus.rs"
 test = false
