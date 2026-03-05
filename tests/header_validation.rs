@@ -191,7 +191,6 @@ fn cluster_bits_21_maximum() {
 }
 
 #[test]
-#[ignore = "TODO: add cluster_bits range validation to CreateOptions"]
 fn cluster_bits_too_small_rejected() {
     let backend = MemoryBackend::zeroed(0);
     let result = Qcow2Image::create_on_backend(
@@ -209,7 +208,6 @@ fn cluster_bits_too_small_rejected() {
 }
 
 #[test]
-#[ignore = "TODO: add cluster_bits range validation to CreateOptions"]
 fn cluster_bits_too_large_rejected() {
     let backend = MemoryBackend::zeroed(0);
     let result = Qcow2Image::create_on_backend(
@@ -511,7 +509,6 @@ fn qemu_various_refcount_widths() {
 // =====================================================================
 
 #[test]
-#[ignore = "TODO: add virtual_size=0 validation to CreateOptions"]
 fn virtual_size_zero_rejected() {
     let backend = MemoryBackend::zeroed(0);
     let result = Qcow2Image::create_on_backend(

@@ -49,6 +49,13 @@ pub enum Error {
         actual: usize,
     },
 
+    /// The virtual_size is invalid (e.g. zero).
+    #[error("invalid virtual_size {size}: must be greater than 0")]
+    InvalidVirtualSize {
+        /// The invalid virtual size.
+        size: u64,
+    },
+
     /// The cluster_bits field is outside the valid range.
     #[error("invalid cluster_bits {cluster_bits}: must be in [{min}..={max}]")]
     InvalidClusterBits {

@@ -78,6 +78,31 @@ impl Qcow2Image {
         backend: Box<dyn IoBackend>,
         options: CreateOptions,
     ) -> Result<Self> {
+        // Validate basic option constraints
+        if options.virtual_size == 0 {
+            return Err(Error::InvalidVirtualSize { size: 0 });
+        }
+        if let Some(bits) = options.cluster_bits {
+            if bits < crate::format::constants::MIN_CLUSTER_BITS
+                || bits > crate::format::constants::MAX_CLUSTER_BITS
+            {
+                return Err(Error::InvalidClusterBits {
+                    cluster_bits: bits,
+                    min: crate::format::constants::MIN_CLUSTER_BITS,
+                    max: crate::format::constants::MAX_CLUSTER_BITS,
+                });
+            }
+        }
+        if let Some(ct) = options.compression_type {
+            if ct != crate::format::constants::COMPRESSION_DEFLATE
+                && ct != crate::format::constants::COMPRESSION_ZSTD
+            {
+                return Err(Error::UnsupportedCompressionType {
+                    compression_type: ct,
+                });
+            }
+        }
+
         let cluster_bits = options.cluster_bits.unwrap_or(16);
         let cluster_size = 1u64 << cluster_bits;
         let refcount_order = 4u32; // 16-bit refcounts

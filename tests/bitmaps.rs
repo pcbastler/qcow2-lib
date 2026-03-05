@@ -824,14 +824,14 @@ fn integrity_clean_after_delete_recreate_cycle() {
 
 // --- Edge case integration tests ---
 
-/// Zero-length virtual size (degenerate case).
+/// Zero-length virtual size is rejected.
 #[test]
 fn bitmap_on_zero_size_image() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.qcow2");
 
-    // qcow2 with 0 size is unusual but valid
-    let mut image = Qcow2Image::create(
+    // virtual_size=0 should be rejected
+    let result = Qcow2Image::create(
         &path,
         CreateOptions {
             virtual_size: 0,
@@ -839,16 +839,8 @@ fn bitmap_on_zero_size_image() {
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
         },
-    )
-    .unwrap();
-
-    // Creating a bitmap on a zero-size image should work (table size = 0)
-    image.bitmap_create("test", Some(16), false).unwrap();
-
-    let bitmaps = image.bitmap_list().unwrap();
-    assert_eq!(bitmaps.len(), 1);
-
-    image.flush().unwrap();
+    );
+    assert!(result.is_err(), "virtual_size=0 should be rejected");
 }
 
 /// Bitmap with custom cluster size (non-default).

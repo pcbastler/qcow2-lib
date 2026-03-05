@@ -50,7 +50,6 @@ fn create_non_aligned_virtual_size() {
 }
 
 #[test]
-#[ignore = "TODO: add virtual_size=0 validation to CreateOptions"]
 fn create_zero_size_rejected() {
     let result = Qcow2Image::create_on_backend(Box::new(MemoryBackend::zeroed(0)), opts(0));
     assert!(result.is_err());
@@ -91,7 +90,6 @@ fn cluster_bits_21() {
 }
 
 #[test]
-#[ignore = "TODO: add cluster_bits range validation to CreateOptions"]
 fn cluster_bits_8_rejected() {
     let mut o = opts(1 << 20);
     o.cluster_bits = Some(8);
@@ -99,7 +97,6 @@ fn cluster_bits_8_rejected() {
 }
 
 #[test]
-#[ignore = "TODO: add cluster_bits range validation to CreateOptions"]
 fn cluster_bits_22_rejected() {
     let mut o = opts(1 << 20);
     o.cluster_bits = Some(22);
@@ -166,7 +163,6 @@ fn compression_type_zstd() {
 }
 
 #[test]
-#[ignore = "TODO: add compression_type validation to CreateOptions"]
 fn invalid_compression_type_rejected() {
     let mut o = opts(1 << 20);
     o.compression_type = Some(255);
