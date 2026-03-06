@@ -1503,10 +1503,11 @@ mod tests {
         assert!(enc_info.luks_header_found);
         assert!(!enc_info.decrypted);
 
-        // Data should NOT be 0x42 (it's still encrypted)
+        // Data should NOT be all 0x42 (it's still encrypted)
         let recovered = std::fs::read(&recovered_path).unwrap();
         let first_cluster = &recovered[..cluster_size as usize];
-        assert_ne!(first_cluster[0], 0x42,
+        let all_0x42 = first_cluster.iter().all(|&b| b == 0x42);
+        assert!(!all_0x42,
             "without password, data should still be encrypted");
     }
 

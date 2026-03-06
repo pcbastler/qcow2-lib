@@ -14,7 +14,7 @@ use crate::report::ClusterTypeReport;
 ///
 /// The classifier tries each type in order of specificity:
 /// header → L2 table → L1 table → refcount block → compressed → data → empty.
-pub fn classify_cluster(buf: &[u8], cluster_size: u64, _offset: u64) -> ClusterTypeReport {
+pub fn classify_cluster(buf: &[u8], cluster_size: u64, offset: u64) -> ClusterTypeReport {
     // Empty check first (very common, fast path)
     if is_all_zeros(buf) {
         return ClusterTypeReport::Empty;
@@ -25,13 +25,21 @@ pub fn classify_cluster(buf: &[u8], cluster_size: u64, _offset: u64) -> ClusterT
         return report;
     }
 
+    // Cluster 0 is always the header. If magic check failed, it's a corrupt header —
+    // classify as Unknown to prevent false L2/L1 classification of header remnants.
+    if offset == 0 {
+        return ClusterTypeReport::Unknown;
+    }
+
     // Compressed data: deflate or zstd magic at start (very specific signature)
     if let Some(report) = try_classify_compressed(buf) {
         return report;
     }
 
-    // Refcount block: array of small uniform u16 values (check before L2 —
-    // refcount entries with value 1 look like valid L2 zero-flag entries)
+    // Refcount block: array of small uniform u16 values.
+    // Checked before L2/L1 because refcount blocks (arrays of mostly 0 and 1)
+    // can look like valid L2/L1 entries. The refcount classifier is strict:
+    // it requires values to be overwhelmingly 0/1 with maybe a few 2s.
     if let Some(report) = try_classify_refcount(buf) {
         return report;
     }
@@ -118,11 +126,9 @@ fn try_classify_l2(buf: &[u8], cluster_size: u64) -> Option<ClusterTypeReport> {
         }
     }
 
-    // At least 90% valid and a meaningful fraction of nonzero entries.
-    // Require at least 1% nonzero to distinguish from mostly-empty buffers
-    // that happen to have a few stray bytes (e.g. refcount blocks, compressed data).
-    let min_nonzero = (total / 100).max(4);
-    if nonzero >= min_nonzero && valid * 100 / total >= 90 {
+    // At least 90% valid and some nonzero entries.
+    // Minimum 2 nonzero entries to avoid false positives on mostly-empty clusters.
+    if nonzero >= 2 && valid * 100 / total >= 90 {
         Some(ClusterTypeReport::L2Table {
             valid_entries: valid,
             total_entries: total,
@@ -185,8 +191,7 @@ fn try_classify_l2_extended(buf: &[u8], cluster_size: u64) -> Option<ClusterType
         }
     }
 
-    let min_nonzero = (total / 100).max(4);
-    if nonzero >= min_nonzero && valid * 100 / total >= 90 {
+    if nonzero >= 2 && valid * 100 / total >= 90 {
         Some(ClusterTypeReport::L2Table {
             valid_entries: valid,
             total_entries: total,
@@ -206,8 +211,13 @@ pub fn looks_like_l2_table(buf: &[u8], cluster_size: u64) -> bool {
 /// Try to classify as an L1 table.
 ///
 /// An L1 table is an array of 8-byte entries where each non-zero entry
-/// is a cluster-aligned offset (masked with L1_OFFSET_MASK) within
-/// a plausible file size range.
+/// is a cluster-aligned offset (masked with L1_OFFSET_MASK), optionally
+/// with the COPIED flag (bit 63) set.
+///
+/// Key distinction from L2:
+/// - L1 entries point to L2 table offsets (typically a few entries)
+/// - L2 entries point to data cluster offsets (typically many entries)
+/// - L1 tables are typically very sparse for small images
 fn try_classify_l1(buf: &[u8], cluster_size: u64) -> Option<ClusterTypeReport> {
     let entry_count = buf.len() / L1_ENTRY_SIZE;
     if entry_count < 1 {
@@ -231,9 +241,11 @@ fn try_classify_l1(buf: &[u8], cluster_size: u64) -> Option<ClusterTypeReport> {
         }
     }
 
+    // L1 tables should be mostly sparse (≤80% non-zero).
+    let max_nonzero = (entry_count as u32 * 80) / 100;
+
     // Need at least some non-zero entries and high validity
-    // L1 tables are usually smaller and have fewer entries than L2 tables
-    if nonzero >= 1 && valid * 100 / entry_count as u32 >= 90 {
+    if nonzero >= 1 && nonzero <= max_nonzero && valid * 100 / entry_count as u32 >= 90 {
         Some(ClusterTypeReport::L1Table {
             entry_count: entry_count as u32,
             valid_entries: valid,
@@ -246,7 +258,13 @@ fn try_classify_l1(buf: &[u8], cluster_size: u64) -> Option<ClusterTypeReport> {
 /// Try to classify as a refcount block.
 ///
 /// A refcount block (assuming 16-bit refcounts, the most common) is an array
-/// of u16 values where most are small (0–10) and the distribution is narrow.
+/// of u16 values where most are 0 or 1.
+///
+/// Key distinction from L1/L2 tables:
+/// - Refcount blocks have u16 values almost exclusively 0 or 1 (rarely 2+)
+/// - L1/L2 tables interpreted as u16 have diverse higher values from offset bytes
+/// - Refcount blocks must NOT also look like an L2 table (which would be a
+///   more specific classification)
 fn try_classify_refcount(buf: &[u8]) -> Option<ClusterTypeReport> {
     let entry_count = buf.len() / 2;
     if entry_count < 16 {
@@ -254,6 +272,7 @@ fn try_classify_refcount(buf: &[u8]) -> Option<ClusterTypeReport> {
     }
 
     let mut nonzero = 0u32;
+    let mut ones = 0u32;     // entries with value exactly 1
     let mut small_count = 0u32; // values 0-10
 
     for i in 0..entry_count {
@@ -261,14 +280,21 @@ fn try_classify_refcount(buf: &[u8]) -> Option<ClusterTypeReport> {
         if val > 0 {
             nonzero += 1;
         }
+        if val == 1 {
+            ones += 1;
+        }
         if val <= 10 {
             small_count += 1;
         }
     }
 
-    // Almost all values should be small, and there should be some nonzero entries.
-    // The block should also NOT look like an L2 table (which we already checked).
-    if nonzero >= 2 && small_count * 100 / entry_count as u32 >= 95 {
+    // Require: ≥95% values ≤10, ≥2 nonzero entries, and ≥80% of nonzero entries
+    // must be exactly 1. This distinguishes from L1/L2 tables which have
+    // diverse u16 values when their 8-byte entries are split.
+    if nonzero >= 2
+        && small_count * 100 / entry_count as u32 >= 95
+        && ones * 100 / nonzero >= 80
+    {
         Some(ClusterTypeReport::RefcountBlock {
             nonzero_entries: nonzero,
         })
@@ -353,7 +379,7 @@ mod tests {
         }
         // Rest is zeros (unallocated)
 
-        let result = classify_cluster(&buf, cluster_size, 0);
+        let result = classify_cluster(&buf, cluster_size, cluster_size);
         assert!(matches!(result, ClusterTypeReport::L2Table { .. }));
     }
 
@@ -369,7 +395,7 @@ mod tests {
         BigEndian::write_u16(&mut buf[(entry_count * 6 / 10) * 2..], 2);
         BigEndian::write_u16(&mut buf[(entry_count * 6 / 10 + 1) * 2..], 2);
 
-        let result = classify_cluster(&buf, 65536, 0);
+        let result = classify_cluster(&buf, 65536, 65536);
         assert!(matches!(result, ClusterTypeReport::RefcountBlock { .. }));
     }
 
@@ -381,7 +407,7 @@ mod tests {
             *byte = ((i * 7 + 13) % 256) as u8;
         }
 
-        let result = classify_cluster(&buf, 65536, 0);
+        let result = classify_cluster(&buf, 65536, 65536);
         assert!(matches!(result, ClusterTypeReport::Data));
     }
 
@@ -396,7 +422,7 @@ mod tests {
             buf[i] = ((i * 7 + 3) % 256) as u8;
         }
 
-        let result = classify_cluster(&buf, 65536, 0);
+        let result = classify_cluster(&buf, 65536, 65536);
         match result {
             ClusterTypeReport::Compressed { ref algorithm } if algorithm == "deflate" => {}
             other => panic!("expected Compressed(deflate), got {other:?}"),
@@ -413,7 +439,7 @@ mod tests {
             buf[i] = ((i * 11 + 5) % 256) as u8;
         }
 
-        let result = classify_cluster(&buf, 65536, 0);
+        let result = classify_cluster(&buf, 65536, 65536);
         match result {
             ClusterTypeReport::Compressed { ref algorithm } if algorithm == "zstd" => {}
             other => panic!("expected Compressed(zstd), got {other:?}"),
@@ -436,7 +462,7 @@ mod tests {
             BigEndian::write_u64(&mut buf[base + 8..], 0x0000_0000_FFFF_FFFF);
         }
 
-        let result = classify_cluster(&buf, cluster_size, 0);
+        let result = classify_cluster(&buf, cluster_size, cluster_size);
         match result {
             ClusterTypeReport::L2Table { extended: true, .. } => {}
             other => panic!("expected extended L2Table, got {other:?}"),
@@ -457,7 +483,7 @@ mod tests {
             BigEndian::write_u64(&mut buf[base + 8..], 0xFFFF_FFFF_0000_0000);
         }
 
-        let result = classify_cluster(&buf, cluster_size, 0);
+        let result = classify_cluster(&buf, cluster_size, cluster_size);
         match result {
             ClusterTypeReport::L2Table { extended: true, .. } => {}
             other => panic!("expected extended L2Table, got {other:?}"),
@@ -478,7 +504,7 @@ mod tests {
             BigEndian::write_u64(&mut buf[base + 8..], 0xFFFF_FFFF_FFFF_FFFF);
         }
 
-        let result = classify_cluster(&buf, cluster_size, 0);
+        let result = classify_cluster(&buf, cluster_size, cluster_size);
         // Should NOT classify as extended L2 due to invalid bitmaps
         assert!(!matches!(
             result,

@@ -47,8 +47,9 @@ pub fn reconstruct_with_strategy(
     // Determine virtual_size from header scan results
     let virtual_size = find_virtual_size(cluster_map);
 
-    // Try to read L1 table from the header
-    let l1_result = try_read_l1_from_header(&mut file, cluster_size);
+    // Try to read L1 table from the header, falling back to scan-detected L1 clusters
+    let l1_result = try_read_l1_from_header(&mut file, cluster_size)
+        .or_else(|| try_read_l1_from_scan(&mut file, cluster_map, cluster_size));
 
     // Collect L2 table cluster offsets from the scan
     let scan_l2_offsets: Vec<u64> = cluster_map
@@ -260,6 +261,7 @@ fn reconstruct_with_geometry(
         let inferred_l1_idx = infer_l1_index_for_orphan_l2(
             l2_offset,
             l1_result,
+            scan_l2_offsets,
             cluster_size,
         );
 
@@ -439,6 +441,45 @@ fn try_read_l1_from_header(file: &mut std::fs::File, cluster_size: u64) -> Optio
     Some(l1_buf)
 }
 
+/// Try to read the L1 table from a scan-detected L1 cluster.
+///
+/// When the header is corrupt but the scanner found L1-like clusters,
+/// read the first one directly from disk. This provides L2 offsets
+/// even when the header's l1_table_offset field is unreadable.
+fn try_read_l1_from_scan(
+    file: &mut std::fs::File,
+    cluster_map: &ClusterMapReport,
+    cluster_size: u64,
+) -> Option<Vec<u8>> {
+    // Find the first scan-detected L1 cluster
+    let l1_cluster = cluster_map.clusters.iter().find(|c| {
+        matches!(c.cluster_type, ClusterTypeReport::L1Table { .. })
+    })?;
+
+    let l1_offset = l1_cluster.offset;
+    let mut l1_buf = vec![0u8; cluster_size as usize];
+    file.seek(SeekFrom::Start(l1_offset)).ok()?;
+    file.read_exact(&mut l1_buf).ok()?;
+
+    // Validate: at least one non-zero entry that points to a scan-detected L2 table
+    let l2_offsets: HashSet<u64> = cluster_map.clusters.iter()
+        .filter(|c| matches!(c.cluster_type, ClusterTypeReport::L2Table { .. }))
+        .map(|c| c.offset)
+        .collect();
+
+    let has_valid_ref = l1_buf.chunks_exact(L1_ENTRY_SIZE).any(|chunk| {
+        let raw = BigEndian::read_u64(chunk);
+        let offset = raw & L1_OFFSET_MASK;
+        offset > 0 && l2_offsets.contains(&offset)
+    });
+
+    if has_valid_ref {
+        Some(l1_buf)
+    } else {
+        None
+    }
+}
+
 /// Read and parse an L2 table from the file.
 fn read_l2_table(
     file: &mut std::fs::File,
@@ -591,11 +632,15 @@ fn add_l2_mappings(
 
 /// Try to infer which L1 index an orphan L2 table belongs to.
 ///
-/// If we have a valid L1 table, scan it for an entry that matches.
-/// Otherwise, return None (we can't determine the guest range).
+/// Strategy:
+/// 1. If we have a valid L1 table, scan it for a matching entry.
+/// 2. Otherwise, use the position among all known L2 tables to infer index.
+///    L2 tables are typically allocated in L1-index order, so sorting
+///    by disk offset gives a good approximation.
 fn infer_l1_index_for_orphan_l2(
     l2_offset: u64,
     l1_data: &Option<Vec<u8>>,
+    all_l2_offsets: &[u64],
     _cluster_size: u64,
 ) -> Option<u64> {
     // If we have L1 data, scan for a matching entry
@@ -609,9 +654,13 @@ fn infer_l1_index_for_orphan_l2(
         }
     }
 
-    // Without L1 data, we cannot determine the guest address range.
-    // Future enhancement: use data pattern matching or known file signatures.
-    None
+    // Without L1 data: infer index from position among all L2 tables.
+    // L2 tables are typically allocated sequentially, so the Nth L2 table
+    // (sorted by disk offset) corresponds to L1 index N.
+    let mut sorted = all_l2_offsets.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted.iter().position(|&off| off == l2_offset).map(|i| i as u64)
 }
 
 /// Cross-check refcounts for all mapped host clusters.

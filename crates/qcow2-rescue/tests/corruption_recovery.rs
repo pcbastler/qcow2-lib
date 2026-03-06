@@ -178,21 +178,15 @@ fn t01_header_magic_corrupted() {
     corrupt_bytes(&img, 0, b"XXXX");
 
     let out_dir = dir.path().join("out");
-    fs::create_dir_all(&out_dir).unwrap();
-    let out_path = out_dir.join("recovered.raw");
-    let options = default_options();
-    // Recovery may fail or degrade — with cluster_size override it should still find data
-    let result = recover_single(&img, &out_path, &options);
-    // With magic corrupted, scanner may not recognize header.
-    // Recovery may succeed with degraded results or fail entirely — both acceptable.
-    match result {
-        Ok(report) => {
-            // If recovery succeeded, it may have found 0 clusters (no valid header = no L1 pointer)
-            // or some clusters via heuristic scan
-            let _ = report;
-        }
-        Err(_) => {}
-    }
+    let (out_path, report) = run_recovery(&img, &out_dir);
+    let recovered = read_recovered_raw(&out_path);
+
+    // Scanner finds L1/L2 via heuristic classification, recovery works
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover all data clusters even with magic corrupted");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize,
+        "all clusters should match original data");
 }
 
 #[test]
@@ -205,15 +199,14 @@ fn t02_header_version_corrupted() {
     corrupt_bytes(&img, 4, &99u32.to_be_bytes());
 
     let out_dir = dir.path().join("out");
-    fs::create_dir_all(&out_dir).unwrap();
-    let out_path = out_dir.join("recovered.raw");
-    let options = default_options();
-    let result = recover_single(&img, &out_path, &options);
-    // Version corruption may prevent header parsing — both ok and err are acceptable
-    match result {
-        Ok(report) => { let _ = report; }
-        Err(_) => {}
-    }
+    let (out_path, report) = run_recovery(&img, &out_dir);
+    let recovered = read_recovered_raw(&out_path);
+
+    // Scanner finds L1/L2 via heuristic scan, recovery works
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover all data clusters even with version corrupted");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
 }
 
 #[test]
@@ -270,9 +263,11 @@ fn t05_header_l1_pointer_corrupted() {
     let (out_path, report) = run_recovery(&img, &out_dir);
     let recovered = read_recovered_raw(&out_path);
 
-    // L1 pointer is wrong, but scan should still find L2/data clusters heuristically
-    // Recovery should write something (even if degraded)
-    assert!(report.clusters_written > 0 || report.clusters_zeroed > 0 || report.clusters_failed > 0);
+    // L1 pointer is wrong, but scanner finds scan-detected L1 → L2 → data
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover all data clusters via scan-detected L1");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
 }
 
 #[test]
@@ -288,13 +283,14 @@ fn t06_header_entirely_zeroed() {
     fs::create_dir_all(&out_dir).unwrap();
     let out_path = out_dir.join("recovered.raw");
     let options = default_options();
-    let result = recover_single(&img, &out_path, &options);
-    // Header entirely zeroed — no magic, no L1 pointer, no virtual_size.
-    // Recovery may succeed with 0 clusters or fail entirely.
-    match result {
-        Ok(report) => { let _ = report; }
-        Err(_) => {}
-    }
+    let report = recover_single(&img, &out_path, &options).unwrap();
+    let recovered = read_recovered_raw(&out_path);
+
+    // Header zeroed but L1/L2/Data clusters intact — scanner finds them
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover all data clusters via scan-detected L1");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
 }
 
 // ============================================================================
@@ -314,8 +310,11 @@ fn t07_l1_table_first_entry_corrupted() {
     let (out_path, report) = run_recovery(&img, &out_dir);
     let recovered = read_recovered_raw(&out_path);
 
-    // Some data should still be recoverable from remaining L2 tables or heuristics
-    assert!(report.clusters_written > 0 || report.clusters_zeroed > 0);
+    // L1 first entry corrupted but L2 is still on disk — scan finds orphan L2
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover data via orphan L2 scan");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
 }
 
 #[test]
@@ -331,8 +330,11 @@ fn t08_l1_table_all_entries_zeroed() {
     let (out_path, report) = run_recovery(&img, &out_dir);
     let recovered = read_recovered_raw(&out_path);
 
-    // L1 is gone, but L2 tables are still on disk — heuristic scan should find data
-    assert!(report.clusters_written > 0 || report.clusters_zeroed > 0);
+    // L1 zeroed but L2 still on disk — scanner finds orphan L2 and infers mapping
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover data via orphan L2 scan");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
 }
 
 #[test]
@@ -627,21 +629,14 @@ fn t18_header_and_l1_corrupted() {
     corrupt_fill(&img, CLUSTER_SIZE, 8);
 
     let out_dir = dir.path().join("out");
-    fs::create_dir_all(&out_dir).unwrap();
-    let out_path = out_dir.join("recovered.raw");
-    let options = default_options();
-    let result = recover_single(&img, &out_path, &options);
+    let (out_path, report) = run_recovery(&img, &out_dir);
+    let recovered = read_recovered_raw(&out_path);
 
-    // With both header and L1 damaged, recovery is severely degraded
-    // but should not crash
-    match result {
-        Ok(report) => {
-            assert!(report.clusters_written >= 0);
-        }
-        Err(_) => {
-            // Acceptable — too much damage
-        }
-    }
+    // Header magic and first L1 entry corrupted, but scanner finds orphan L2
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover data via orphan L2 scan");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
 }
 
 #[test]
@@ -664,14 +659,11 @@ fn t19_header_and_l2_corrupted() {
     let options = default_options();
     let result = recover_single(&img, &out_path, &options);
 
+    // Header AND L2 both corrupted — no way to find guest-to-host mappings.
+    // Recovery should complete without crash.
     match result {
-        Ok(report) => {
-            // Some recovery may be possible via heuristics
-            assert!(report.clusters_written >= 0);
-        }
-        Err(_) => {
-            // Acceptable
-        }
+        Ok(report) => { let _ = report; }
+        Err(_) => {}
     }
 }
 
@@ -691,22 +683,15 @@ fn t20_header_l1_refcount_all_corrupted() {
     corrupt_zero(&img, 3 * CLUSTER_SIZE, CLUSTER_SIZE as usize);
 
     let out_dir = dir.path().join("out");
-    fs::create_dir_all(&out_dir).unwrap();
-    let out_path = out_dir.join("recovered.raw");
-    let options = default_options();
-    let result = recover_single(&img, &out_path, &options);
+    let (out_path, report) = run_recovery(&img, &out_dir);
+    let recovered = read_recovered_raw(&out_path);
 
-    // Everything except L2 and data clusters is gone
-    // Recovery should attempt heuristic scan and not crash
-    match result {
-        Ok(report) => {
-            // Heuristic scan should still find orphan data clusters
-            assert!(report.clusters_written >= 0);
-        }
-        Err(_) => {
-            // Also acceptable for this level of damage
-        }
-    }
+    // Header, L1, refcount all gone — but L2 and data clusters survive.
+    // Scanner finds orphan L2, infers L1 index, recovers data.
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover data via orphan L2 even with header+L1+refcount gone");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
 }
 
 // ============================================================================
