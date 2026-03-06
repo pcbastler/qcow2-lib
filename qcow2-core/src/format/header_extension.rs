@@ -4,6 +4,12 @@
 //! cluster. They use a simple TLV encoding: 4-byte type, 4-byte length,
 //! then `length` bytes of data padded to an 8-byte boundary.
 
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::error::{Error, Result};
@@ -245,6 +251,7 @@ impl HeaderExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     #[test]
     fn parse_empty_extensions() {
@@ -366,7 +373,7 @@ mod tests {
             offset: 0x1_0000,
             length: 4096,
         };
-        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+        let serialized = HeaderExtension::write_all(core::slice::from_ref(&ext));
         let parsed = HeaderExtension::read_all(&serialized).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], ext);
@@ -378,7 +385,7 @@ mod tests {
     fn extension_data_exactly_8_byte_aligned() {
         // Data length 8 → no padding needed (8 % 8 == 0).
         let ext = HeaderExtension::BackingFileFormat("raw12345".to_string()); // 8 bytes
-        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+        let serialized = HeaderExtension::write_all(core::slice::from_ref(&ext));
         let parsed = HeaderExtension::read_all(&serialized).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], ext);
@@ -388,7 +395,7 @@ mod tests {
     fn extension_data_length_1_needs_7_padding() {
         // Data length 1 → 7 bytes of padding to reach 8-byte boundary.
         let ext = HeaderExtension::BackingFileFormat("r".to_string());
-        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+        let serialized = HeaderExtension::write_all(core::slice::from_ref(&ext));
 
         // TLV header (8) + data (1) + padding (7) + end marker (8) = 24
         assert_eq!(serialized.len(), 24);
@@ -413,7 +420,7 @@ mod tests {
             extension_type: 0xCAFE_BABE,
             data: vec![10, 20, 30, 40, 50],
         };
-        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+        let serialized = HeaderExtension::write_all(core::slice::from_ref(&ext));
         let parsed = HeaderExtension::read_all(&serialized).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], ext);
@@ -430,7 +437,7 @@ mod tests {
         };
         let ext = HeaderExtension::FeatureNameTable(vec![entry]);
 
-        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+        let serialized = HeaderExtension::write_all(core::slice::from_ref(&ext));
         let parsed = HeaderExtension::read_all(&serialized).unwrap();
         assert_eq!(parsed.len(), 1);
         match &parsed[0] {
@@ -467,7 +474,7 @@ mod tests {
     #[test]
     fn external_data_file_round_trip() {
         let ext = HeaderExtension::ExternalDataFile("/path/to/data.raw".to_string());
-        let serialized = HeaderExtension::write_all(std::slice::from_ref(&ext));
+        let serialized = HeaderExtension::write_all(core::slice::from_ref(&ext));
         let parsed = HeaderExtension::read_all(&serialized).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], ext);

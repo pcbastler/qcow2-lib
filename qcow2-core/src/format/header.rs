@@ -5,6 +5,9 @@
 //! are filled with spec-defined defaults so downstream code avoids `Option`
 //! noise.
 
+extern crate alloc;
+
+
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::error::{Error, Result};
@@ -575,6 +578,7 @@ fn make_test_header_v2() -> Header {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     // ---- Computed property tests ----
 

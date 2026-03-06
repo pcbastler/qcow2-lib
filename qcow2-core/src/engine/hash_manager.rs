@@ -8,6 +8,13 @@
 //! The hash granularity (`hash_chunk_size`) is independent of the QCOW2
 //! cluster size and is stored as `hash_chunk_bits` in the [`Blake3Extension`].
 
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::engine::cache::MetadataCache;
@@ -20,7 +27,7 @@ use crate::format::hash::{Blake3Extension, HashTable, HashTableEntry};
 use crate::format::header::Header;
 use crate::format::header_extension::HeaderExtension;
 use crate::format::types::*;
-use crate::io::IoBackend;
+use crate::io::{Compressor, IoBackend};
 
 /// Offset of the autoclear_features field in the QCOW2 header.
 const OFF_AUTOCLEAR_FEATURES: u64 = 88;
@@ -82,6 +89,7 @@ pub struct HashManager<'a> {
     virtual_size: u64,
     compression_type: u8,
     crypt_context: Option<&'a crate::engine::encryption::CryptContext>,
+    compressor: &'a dyn Compressor,
 }
 
 impl<'a> HashManager<'a> {
@@ -99,6 +107,7 @@ impl<'a> HashManager<'a> {
         virtual_size: u64,
         compression_type: u8,
         crypt_context: Option<&'a crate::engine::encryption::CryptContext>,
+        compressor: &'a dyn Compressor,
     ) -> Self {
         Self {
             backend,
@@ -112,6 +121,7 @@ impl<'a> HashManager<'a> {
             virtual_size,
             compression_type,
             crypt_context,
+            compressor,
         }
     }
 
@@ -574,12 +584,10 @@ impl<'a> HashManager<'a> {
                     let mut comp_buf = vec![0u8; rd_size];
                     self.backend
                         .read_exact_at(&mut comp_buf, descriptor.host_offset)?;
-                    let cluster_guest_off =
-                        guest_off - intra_cluster_offset.0 as u64;
-                    let decompressed = crate::engine::compression::decompress_cluster(
+                    let mut decompressed = vec![0u8; cluster_size as usize];
+                    self.compressor.decompress(
                         &comp_buf,
-                        cluster_size as usize,
-                        cluster_guest_off,
+                        &mut decompressed,
                         self.compression_type,
                     )?;
                     let intra = intra_cluster_offset.0 as usize;

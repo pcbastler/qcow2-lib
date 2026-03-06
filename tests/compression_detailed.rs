@@ -5,8 +5,8 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
 
 const CLUSTER_SIZE: usize = 65536;
 const CS: u64 = CLUSTER_SIZE as u64;
@@ -84,7 +84,7 @@ fn multiple_compressed_clusters() {
 fn compressible_data_shrinks_deflate() {
     let data = vec![0u8; CLUSTER_SIZE];
     let compressed =
-        qcow2_lib::engine::compression::compress_cluster(&data, CLUSTER_SIZE, COMPRESSION_DEFLATE)
+        qcow2::engine::compression::compress_cluster(&data, CLUSTER_SIZE, COMPRESSION_DEFLATE)
             .unwrap();
     let compressed = compressed.expect("zeros must compress");
     assert!(compressed.len() < CLUSTER_SIZE / 8, "zeros should compress well: {} bytes", compressed.len());
@@ -94,7 +94,7 @@ fn compressible_data_shrinks_deflate() {
 fn compressible_data_shrinks_zstd() {
     let data: Vec<u8> = (0..CLUSTER_SIZE).map(|i| (i % 4) as u8).collect();
     let compressed =
-        qcow2_lib::engine::compression::compress_cluster(&data, CLUSTER_SIZE, COMPRESSION_ZSTD)
+        qcow2::engine::compression::compress_cluster(&data, CLUSTER_SIZE, COMPRESSION_ZSTD)
             .unwrap();
     let compressed = compressed.expect("repeating pattern must compress");
     assert!(compressed.len() < CLUSTER_SIZE / 4, "pattern should compress: {} bytes", compressed.len());

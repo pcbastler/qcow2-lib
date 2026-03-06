@@ -5,7 +5,7 @@
 
 mod common;
 
-use qcow2_lib::engine::image::Qcow2Image;
+use qcow2::engine::image::Qcow2Image;
 
 #[test]
 fn read_compressed_image() {

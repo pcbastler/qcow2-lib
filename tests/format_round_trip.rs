@@ -5,10 +5,10 @@
 
 mod common;
 
-use qcow2_lib::engine::image::Qcow2Image;
-use qcow2_lib::format::header::Header;
-use qcow2_lib::io::sync_backend::SyncFileBackend;
-use qcow2_lib::io::IoBackend;
+use qcow2::engine::image::Qcow2Image;
+use qcow2::format::header::Header;
+use qcow2::io::sync_backend::SyncFileBackend;
+use qcow2::io::IoBackend;
 
 #[test]
 fn parse_header_from_real_image() {

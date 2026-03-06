@@ -5,8 +5,8 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::io::MemoryBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::io::MemoryBackend;
 
 const CS: usize = 65536;
 const CSU: u64 = CS as u64;
@@ -282,7 +282,7 @@ fn ext_l2_overlay_subcluster_cow() {
 fn extended_l2_feature_bit_set() {
     let image = create_ext_l2(1 << 20);
     assert!(image.header().has_extended_l2());
-    use qcow2_lib::format::feature_flags::IncompatibleFeatures;
+    use qcow2::format::feature_flags::IncompatibleFeatures;
     assert!(image.header().incompatible_features.contains(IncompatibleFeatures::EXTENDED_L2));
 }
 

@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use qcow2_lib::engine::image::Qcow2Image;
-use qcow2_lib::error::Result;
+use qcow2::engine::image::Qcow2Image;
+use qcow2::error::Result;
 
 /// Initialize the BLAKE3 hash extension.
 pub fn run_init(path: &Path, hash_size: Option<u8>, chunk_size: Option<u64>) -> Result<()> {
@@ -11,7 +11,7 @@ pub fn run_init(path: &Path, hash_size: Option<u8>, chunk_size: Option<u64>) -> 
     let hash_chunk_bits = match chunk_size {
         Some(cs) => {
             if !cs.is_power_of_two() || cs < 4096 || cs > (1 << 24) {
-                return Err(qcow2_lib::error::Error::InvalidHashChunkBits {
+                return Err(qcow2::error::Error::InvalidHashChunkBits {
                     bits: 0,
                     min: 12,
                     max: 24,
@@ -49,7 +49,7 @@ pub fn run_verify(path: &Path) -> Result<()> {
     let mut image = Qcow2Image::open_rw(path)?;
 
     let info = image.hash_info().ok_or_else(|| {
-        qcow2_lib::error::Error::HashNotInitialized
+        qcow2::error::Error::HashNotInitialized
     })?;
 
     if !info.consistent {
@@ -111,7 +111,7 @@ pub fn run_export(path: &Path, range: Option<(u64, u64)>, json: bool) -> Result<
     let mut image = Qcow2Image::open_rw(path)?;
 
     let info = image.hash_info().ok_or_else(|| {
-        qcow2_lib::error::Error::HashNotInitialized
+        qcow2::error::Error::HashNotInitialized
     })?;
 
     let entries = image.hash_export(range)?;

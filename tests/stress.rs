@@ -6,7 +6,7 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -764,7 +764,7 @@ fn compact_after_fragmentation() {
 
     // Compact
     let compacted = dir.path().join("compacted.qcow2");
-    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&path, &compacted, false, None, None, None, None).unwrap();
+    qcow2::engine::converter::convert_qcow2_to_qcow2(&path, &compacted, false, None, None, None, None).unwrap();
     assert_qemu_check(&compacted);
 
     let orig_size = std::fs::metadata(&path).unwrap().len();

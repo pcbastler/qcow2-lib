@@ -5,8 +5,8 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
 
 // ---- Library-only tests (no QEMU needed) ----
 
@@ -30,7 +30,7 @@ fn create_zstd_image_sets_header_fields() {
     assert!(image.header().header_length > 104, "header_length should include compression_type byte");
     assert!(
         image.header().incompatible_features.contains(
-            qcow2_lib::format::feature_flags::IncompatibleFeatures::COMPRESSION_TYPE
+            qcow2::format::feature_flags::IncompatibleFeatures::COMPRESSION_TYPE
         ),
         "COMPRESSION_TYPE incompatible feature must be set"
     );
@@ -57,7 +57,7 @@ fn create_deflate_image_has_default_header() {
     assert_eq!(image.header().header_length, 104);
     assert!(
         !image.header().incompatible_features.contains(
-            qcow2_lib::format::feature_flags::IncompatibleFeatures::COMPRESSION_TYPE
+            qcow2::format::feature_flags::IncompatibleFeatures::COMPRESSION_TYPE
         ),
     );
 }
@@ -202,7 +202,7 @@ fn convert_raw_to_zstd_qcow2() {
     std::fs::write(&raw_path, &raw_data).unwrap();
 
     let qcow2_path = dir.path().join("output.qcow2");
-    qcow2_lib::engine::converter::convert_from_raw(
+    qcow2::engine::converter::convert_from_raw(
         &raw_path,
         &qcow2_path,
         true, // compress

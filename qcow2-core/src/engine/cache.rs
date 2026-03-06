@@ -4,13 +4,14 @@
 //! repeated I/O. Keyed by the host file offset where each table
 //! was loaded from.
 
-use std::num::NonZeroUsize;
+extern crate alloc;
 
-use lru::LruCache;
+use alloc::vec::Vec;
 
 use crate::format::l2::L2Table;
 use crate::format::refcount::RefcountBlock;
 use crate::format::types::ClusterOffset;
+use crate::lru::LruCache;
 
 /// Configuration for cache capacities.
 #[derive(Debug, Clone)]
@@ -41,8 +42,6 @@ impl Default for CacheConfig {
 /// Maintains separate caches for L2 tables and refcount blocks because
 /// their access patterns and sizes may differ. Keyed by [`ClusterOffset`]
 /// (the host file offset where the metadata was read from).
-///
-/// In Phase 1 (read-only), entries are never dirty and can be freely evicted.
 pub struct MetadataCache {
     l2_tables: LruCache<u64, L2Table>,
     refcount_blocks: LruCache<u64, RefcountBlock>,
@@ -76,21 +75,10 @@ impl MetadataCache {
     /// Create a new metadata cache with the given configuration.
     pub fn new(config: CacheConfig) -> Self {
         Self {
-            l2_tables: LruCache::new(
-                NonZeroUsize::new(config.l2_table_capacity).unwrap_or(NonZeroUsize::new(1).unwrap()),
-            ),
-            refcount_blocks: LruCache::new(
-                NonZeroUsize::new(config.refcount_block_capacity)
-                    .unwrap_or(NonZeroUsize::new(1).unwrap()),
-            ),
-            bitmap_data: LruCache::new(
-                NonZeroUsize::new(config.bitmap_data_capacity)
-                    .unwrap_or(NonZeroUsize::new(1).unwrap()),
-            ),
-            hash_data: LruCache::new(
-                NonZeroUsize::new(config.hash_data_capacity)
-                    .unwrap_or(NonZeroUsize::new(1).unwrap()),
-            ),
+            l2_tables: LruCache::new(config.l2_table_capacity),
+            refcount_blocks: LruCache::new(config.refcount_block_capacity),
+            bitmap_data: LruCache::new(config.bitmap_data_capacity),
+            hash_data: LruCache::new(config.hash_data_capacity),
             stats: CacheStats::default(),
         }
     }
@@ -201,6 +189,7 @@ impl MetadataCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use crate::format::l2::L2Table;
     use crate::format::types::ClusterGeometry;
 

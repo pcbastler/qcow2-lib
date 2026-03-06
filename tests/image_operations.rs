@@ -2,8 +2,8 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::io::MemoryBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::io::MemoryBackend;
 
 const CS: usize = 65536;
 const CSU: u64 = CS as u64;
@@ -179,7 +179,7 @@ fn convert_from_raw() {
     data[..CS].fill(0xAA);
     std::fs::write(&raw, &data).unwrap();
 
-    qcow2_lib::engine::converter::convert_from_raw(&raw, &qcow2, false, None, None, None).unwrap();
+    qcow2::engine::converter::convert_from_raw(&raw, &qcow2, false, None, None, None).unwrap();
 
     let mut image = Qcow2Image::open(&qcow2).unwrap();
     let mut buf = vec![0u8; CS];
@@ -213,7 +213,7 @@ fn convert_to_raw() {
     image.flush().unwrap();
     drop(image);
 
-    qcow2_lib::engine::converter::convert_to_raw(&qcow2, &raw, None).unwrap();
+    qcow2::engine::converter::convert_to_raw(&qcow2, &raw, None).unwrap();
 
     let raw_data = std::fs::read(&raw).unwrap();
     assert_eq!(raw_data.len(), 1 << 20);
@@ -231,7 +231,7 @@ fn convert_with_compression() {
     data[..CS].fill(0xCC);
     std::fs::write(&raw, &data).unwrap();
 
-    qcow2_lib::engine::converter::convert_from_raw(&raw, &qcow2, true, None, None, None).unwrap();
+    qcow2::engine::converter::convert_from_raw(&raw, &qcow2, true, None, None, None).unwrap();
 
     let mut image = Qcow2Image::open(&qcow2).unwrap();
     let mut buf = vec![0u8; CS];
@@ -258,7 +258,7 @@ fn qemu_check_our_converted_image() {
     data[..CS].fill(0xDD);
     std::fs::write(&raw, &data).unwrap();
 
-    qcow2_lib::engine::converter::convert_from_raw(&raw, &qcow2, false, None, None, None).unwrap();
+    qcow2::engine::converter::convert_from_raw(&raw, &qcow2, false, None, None, None).unwrap();
 
     let output = std::process::Command::new("qemu-img")
         .args(["check", "-f", "qcow2"])
@@ -287,7 +287,7 @@ fn cross_validate_convert_roundtrip() {
 
     // Convert to raw with our code
     let raw = dir.path().join("roundtrip.raw");
-    qcow2_lib::engine::converter::convert_to_raw(&source.path, &raw, None).unwrap();
+    qcow2::engine::converter::convert_to_raw(&source.path, &raw, None).unwrap();
 
     let raw_data = std::fs::read(&raw).unwrap();
     assert!(raw_data[..CS].iter().all(|&b| b == 0xEE));

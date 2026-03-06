@@ -5,7 +5,7 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
 
 #[test]
 fn qemu_check_our_created_image() {

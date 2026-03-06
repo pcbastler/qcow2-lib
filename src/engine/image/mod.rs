@@ -51,7 +51,7 @@ use crate::io::IoBackend;
 /// # Example
 ///
 /// ```no_run
-/// use qcow2_lib::engine::image::Qcow2Image;
+/// use qcow2::engine::image::Qcow2Image;
 ///
 /// let mut image = Qcow2Image::open("disk.qcow2").unwrap();
 /// let mut buf = vec![0u8; 512];
@@ -80,6 +80,18 @@ pub struct Qcow2Image {
     has_hashes: bool,
     /// Encryption context (set when image has crypt_method=2 and password provided).
     crypt_context: Option<crate::engine::encryption::CryptContext>,
+    /// Compression backend for deflate/zstd.
+    compressor: compression::StdCompressor,
+}
+
+impl crate::io::BackingImage for Qcow2Image {
+    fn virtual_size(&self) -> u64 {
+        self.header.virtual_size
+    }
+
+    fn read_at(&mut self, buf: &mut [u8], guest_offset: u64) -> crate::error::Result<()> {
+        Qcow2Image::read_at(self, buf, guest_offset)
+    }
 }
 
 /// Options for creating a new QCOW2 image.
@@ -323,9 +335,9 @@ impl Qcow2Image {
                     .ok_or(Error::MissingExternalDataFilePath)?;
                 let data_path = dir.join(&data_file_name);
                 let db = SyncFileBackend::open(&data_path).map_err(|e| {
-                    if let Error::Io { source, .. } = e {
+                    if let Error::Io { message, .. } = &e {
                         Error::ExternalDataFileOpen {
-                            source,
+                            message: message.clone(),
                             path: data_path.display().to_string(),
                         }
                     } else {
@@ -391,6 +403,7 @@ impl Qcow2Image {
             has_auto_bitmaps,
             has_hashes,
             crypt_context,
+            compressor: compression::StdCompressor,
         })
     }
 
@@ -418,8 +431,9 @@ impl Qcow2Image {
             self.header.compression_type,
             self.read_mode,
             &mut self.warnings,
-            self.backing_image.as_deref_mut(),
+            self.backing_image.as_deref_mut().map(|b| b as &mut dyn crate::io::BackingImage),
             self.crypt_context.as_ref(),
+            &self.compressor,
         );
         reader.read_at(buf, guest_offset)
     }
@@ -543,9 +557,9 @@ impl Qcow2Image {
                 .ok_or(Error::MissingExternalDataFilePath)?;
             let data_path = image_dir.join(&data_file_name);
             let db = SyncFileBackend::open_rw(&data_path).map_err(|e| {
-                if let Error::Io { source, .. } = e {
+                if let Error::Io { message, .. } = &e {
                     Error::ExternalDataFileOpen {
-                        source,
+                        message: message.clone(),
                         path: data_path.display().to_string(),
                     }
                 } else {
@@ -618,8 +632,9 @@ impl Qcow2Image {
             self.header.virtual_size,
             self.header.compression_type,
             raw_external,
-            self.backing_image.as_deref_mut(),
+            self.backing_image.as_deref_mut().map(|b| b as &mut dyn crate::io::BackingImage),
             self.crypt_context.as_ref(),
+            &self.compressor,
         );
         writer.write_at(buf, guest_offset)?;
 
@@ -670,6 +685,7 @@ impl Qcow2Image {
                 virtual_size,
                 compression_type,
                 self.crypt_context.as_ref(),
+                &self.compressor,
             );
             mgr.update_hashes_for_range(guest_offset, buf.len() as u64)?;
         }
@@ -849,8 +865,9 @@ impl Qcow2Image {
             self.header.virtual_size,
             self.header.compression_type,
             false,
-            self.backing_image.as_deref_mut(),
+            self.backing_image.as_deref_mut().map(|b| b as &mut dyn crate::io::BackingImage),
             self.crypt_context.as_ref(),
+            &self.compressor,
         );
         writer.set_compressed_cursor(self.compressed_cursor);
         let result = writer.write_compressed_at(compressed_data, guest_offset);

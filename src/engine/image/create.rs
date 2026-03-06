@@ -9,7 +9,7 @@ use crate::engine::cache::{CacheConfig, MetadataCache};
 use crate::engine::cluster_mapping::ClusterMapper;
 use crate::engine::read_mode::ReadMode;
 use crate::engine::refcount_manager::RefcountManager;
-use crate::error::{Error, Result};
+use crate::error::{external_data_error, Error, Result};
 use crate::format::feature_flags::{AutoclearFeatures, IncompatibleFeatures};
 use crate::format::header::Header;
 use crate::format::header_extension::HeaderExtension;
@@ -18,6 +18,7 @@ use crate::format::types::{ClusterGeometry, ClusterOffset};
 use crate::io::sync_backend::SyncFileBackend;
 use crate::io::IoBackend;
 
+use crate::engine::compression;
 use super::{CreateOptions, Qcow2Image};
 
 impl Qcow2Image {
@@ -36,9 +37,9 @@ impl Qcow2Image {
         let virtual_size = options.virtual_size;
 
         let backend = SyncFileBackend::create(path).map_err(|e| {
-            if let Error::Io { source, .. } = e {
+            if let Error::Io { message, .. } = &e {
                 Error::CreateFailed {
-                    source,
+                    message: message.clone(),
                     path: path.display().to_string(),
                 }
             } else {
@@ -58,15 +59,10 @@ impl Qcow2Image {
                 .create(true)
                 .truncate(true)
                 .open(&data_path)
-                .map_err(|source| Error::ExternalDataFileOpen {
-                    source,
-                    path: data_path.display().to_string(),
-                })?;
+                .map_err(|e| external_data_error(e, data_path.display().to_string()))?;
             // Pre-allocate to virtual_size so guest offsets are valid
-            file.set_len(virtual_size).map_err(|source| Error::ExternalDataFileOpen {
-                source,
-                path: data_path.display().to_string(),
-            })?;
+            file.set_len(virtual_size)
+                .map_err(|e| external_data_error(e, data_path.display().to_string()))?;
             image.data_backend = Some(Box::new(SyncFileBackend::from_file(file)));
         }
 
@@ -298,6 +294,7 @@ impl Qcow2Image {
             has_auto_bitmaps: false,
             has_hashes: false,
             crypt_context,
+            compressor: compression::StdCompressor,
         })
     }
 
@@ -314,9 +311,9 @@ impl Qcow2Image {
         let backing_path = backing_path.as_ref();
 
         let backend = SyncFileBackend::create(path).map_err(|e| {
-            if let Error::Io { source, .. } = e {
+            if let Error::Io { message, .. } = &e {
                 Error::CreateFailed {
-                    source,
+                    message: message.clone(),
                     path: path.display().to_string(),
                 }
             } else {
@@ -453,6 +450,7 @@ impl Qcow2Image {
             has_auto_bitmaps: false,
             has_hashes: false,
             crypt_context: None,
+            compressor: compression::StdCompressor,
         })
     }
 }

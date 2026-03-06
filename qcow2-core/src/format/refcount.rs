@@ -8,6 +8,11 @@
 //! Refcount width is variable in v3 (1, 2, 4, 8, 16, 32, or 64 bits)
 //! and fixed at 16 bits in v2.
 
+extern crate alloc;
+
+use alloc::vec;
+use alloc::vec::Vec;
+
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::error::{Error, Result};

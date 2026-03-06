@@ -1,16 +1,17 @@
-//! # qcow2-lib
+//! # qcow2
 //!
 //! A textbook-quality QCOW2 image format library for Rust.
 //!
-//! This crate provides three layers:
-//! - **format**: Pure data structures for on-disk format parsing (no I/O, no state)
-//! - **io**: I/O backend abstraction (trait-based, mockable)
-//! - **engine**: Stateful read engine combining format + I/O
+//! Built on [`qcow2_core`] (a `no_std` + `alloc` crate), this library adds:
+//! - File-based and in-memory I/O backends
+//! - Deflate (flate2) and Zstandard (zstd) compression
+//! - Full LUKS1/LUKS2 encryption support (including Argon2id)
+//! - Backing chain, converter, and integrity checking
 //!
 //! # Quick start
 //!
 //! ```no_run
-//! use qcow2_lib::Qcow2Image;
+//! use qcow2::Qcow2Image;
 //!
 //! let mut image = Qcow2Image::open("disk.qcow2").unwrap();
 //! let mut sector = vec![0u8; 512];
@@ -25,4 +26,5 @@ pub mod format;
 pub mod io;
 
 pub use engine::Qcow2Image;
-pub use error::{Error, Result};
+pub use error::{Error, IoErrorKind, Result};
+pub use qcow2_core::io::{BackingImage, Compressor, IoBackend};

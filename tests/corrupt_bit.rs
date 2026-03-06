@@ -6,9 +6,9 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::format::feature_flags::{IncompatibleFeatures, SUPPORTED_INCOMPATIBLE_FEATURES};
-use qcow2_lib::io::MemoryBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::format::feature_flags::{IncompatibleFeatures, SUPPORTED_INCOMPATIBLE_FEATURES};
+use qcow2::io::MemoryBackend;
 
 /// Helper: create a 1 MB in-memory image and return the raw bytes.
 fn create_raw_image() -> Vec<u8> {
@@ -29,7 +29,7 @@ fn create_raw_image() -> Vec<u8> {
     let backend = image.backend();
     let size = backend.file_size().unwrap() as usize;
     let mut data = vec![0u8; size];
-    qcow2_lib::io::IoBackend::read_exact_at(backend, &mut data, 0).unwrap();
+    qcow2::io::IoBackend::read_exact_at(backend, &mut data, 0).unwrap();
     data
 }
 

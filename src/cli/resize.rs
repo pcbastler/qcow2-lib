@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-use qcow2_lib::engine::image::Qcow2Image;
-use qcow2_lib::error::Result;
+use qcow2::engine::image::Qcow2Image;
+use qcow2::error::Result;
 
 /// Run the resize subcommand.
 pub fn run(path: &Path, size_str: &str) -> Result<()> {
-    let new_size = parse_size(size_str).map_err(|msg| qcow2_lib::error::Error::ConversionFailed {
+    let new_size = parse_size(size_str).map_err(|msg| qcow2::error::Error::ConversionFailed {
         message: msg,
     })?;
 

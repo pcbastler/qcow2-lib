@@ -4,6 +4,11 @@
 //! Each 64-bit entry either points to an L2 table or indicates that the
 //! entire range covered by that L2 table is unallocated.
 
+extern crate alloc;
+
+use alloc::vec;
+use alloc::vec::Vec;
+
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::error::{Error, Result};

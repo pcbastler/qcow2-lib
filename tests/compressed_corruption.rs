@@ -3,9 +3,9 @@
 //! Verifies that decompress_cluster returns proper errors for invalid data,
 //! and that CompressedClusterDescriptor encode/decode round-trips correctly.
 
-use qcow2_lib::engine::compression::{compress_cluster, decompress_cluster};
-use qcow2_lib::format::compressed::CompressedClusterDescriptor;
-use qcow2_lib::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
+use qcow2::engine::compression::{compress_cluster, decompress_cluster};
+use qcow2::format::compressed::CompressedClusterDescriptor;
+use qcow2::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
 
 const CLUSTER_SIZE: usize = 65536;
 

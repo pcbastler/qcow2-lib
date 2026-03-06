@@ -5,9 +5,9 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::format::feature_flags::{AutoclearFeatures, IncompatibleFeatures};
-use qcow2_lib::io::MemoryBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::format::feature_flags::{AutoclearFeatures, IncompatibleFeatures};
+use qcow2::io::MemoryBackend;
 
 
 /// Helper: create a 1 MB in-memory image.
@@ -50,7 +50,7 @@ fn extract_raw(image: &Qcow2Image) -> Vec<u8> {
     let backend = image.backend();
     let size = backend.file_size().unwrap() as usize;
     let mut data = vec![0u8; size];
-    qcow2_lib::io::IoBackend::read_exact_at(backend, &mut data, 0).unwrap();
+    qcow2::io::IoBackend::read_exact_at(backend, &mut data, 0).unwrap();
     data
 }
 

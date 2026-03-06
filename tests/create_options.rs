@@ -5,10 +5,10 @@
 
 mod common;
 
-use qcow2_lib::engine::encryption::CipherMode;
-use qcow2_lib::engine::image::{CreateOptions, EncryptionOptions, Qcow2Image};
-use qcow2_lib::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
-use qcow2_lib::io::MemoryBackend;
+use qcow2::engine::encryption::CipherMode;
+use qcow2::engine::image::{CreateOptions, EncryptionOptions, Qcow2Image};
+use qcow2::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
+use qcow2::io::MemoryBackend;
 
 const CS: usize = 65536;
 

@@ -7,8 +7,8 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::io::MemoryBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::io::MemoryBackend;
 
 const CLUSTER_SIZE: u64 = 65536;
 

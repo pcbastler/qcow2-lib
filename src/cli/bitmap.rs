@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use qcow2_lib::engine::image::Qcow2Image;
-use qcow2_lib::error::Result;
+use qcow2::engine::image::Qcow2Image;
+use qcow2::error::Result;
 
 /// List all bitmaps in the image.
 pub fn run_list(path: &Path) -> Result<()> {
@@ -69,7 +69,7 @@ pub fn run_dump(path: &Path, name: &str) -> Result<()> {
     let info = bitmaps
         .iter()
         .find(|b| b.name == name)
-        .ok_or_else(|| qcow2_lib::error::Error::BitmapNotFound {
+        .ok_or_else(|| qcow2::error::Error::BitmapNotFound {
             name: name.to_string(),
         })?;
 

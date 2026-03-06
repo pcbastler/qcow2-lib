@@ -1,11 +1,11 @@
 //! Integration tests for BLAKE3 per-hash-chunk hashes.
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::engine::integrity::check_integrity;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::engine::integrity::check_integrity;
 
 fn create_test_image(virtual_size: u64) -> Qcow2Image {
     Qcow2Image::create_on_backend(
-        Box::new(qcow2_lib::io::MemoryBackend::zeroed(0)),
+        Box::new(qcow2::io::MemoryBackend::zeroed(0)),
         CreateOptions {
             virtual_size,
             cluster_bits: None,
@@ -18,7 +18,7 @@ fn create_test_image(virtual_size: u64) -> Qcow2Image {
 
 fn create_test_image_with_cluster_bits(virtual_size: u64, cluster_bits: u32) -> Qcow2Image {
     Qcow2Image::create_on_backend(
-        Box::new(qcow2_lib::io::MemoryBackend::zeroed(0)),
+        Box::new(qcow2::io::MemoryBackend::zeroed(0)),
         CreateOptions {
             virtual_size,
             cluster_bits: Some(cluster_bits),
@@ -494,7 +494,7 @@ fn hash_with_small_clusters() {
 
 #[test]
 fn open_rejects_misaligned_hash_table_offset() {
-    use qcow2_lib::io::MemoryBackend;
+    use qcow2::io::MemoryBackend;
 
     // Create a valid image with hashes, then corrupt the hash_table_offset
     // to be 512-aligned but not cluster-aligned (cluster_bits=16 → 64KB alignment).

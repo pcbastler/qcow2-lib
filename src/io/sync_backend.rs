@@ -7,7 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-use crate::error::{Error, Result};
+use crate::error::{io_error, Result};
 use crate::io::IoBackend;
 
 /// Synchronous I/O backend backed by a standard library [`File`].
@@ -21,11 +21,10 @@ pub struct SyncFileBackend {
 impl SyncFileBackend {
     /// Open a file at the given path for reading.
     pub fn open(path: &Path) -> Result<Self> {
-        let file = OpenOptions::new().read(true).open(path).map_err(|e| Error::Io {
-            source: e,
-            offset: 0,
-            context: "opening file",
-        })?;
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|e| io_error(e, 0, "opening file"))?;
         Ok(Self { file })
     }
 
@@ -35,11 +34,7 @@ impl SyncFileBackend {
             .read(true)
             .write(true)
             .open(path)
-            .map_err(|e| Error::Io {
-                source: e,
-                offset: 0,
-                context: "opening file for read-write",
-            })?;
+            .map_err(|e| io_error(e, 0, "opening file for read-write"))?;
         Ok(Self { file })
     }
 
@@ -52,11 +47,7 @@ impl SyncFileBackend {
             .write(true)
             .create_new(true)
             .open(path)
-            .map_err(|e| Error::Io {
-                source: e,
-                offset: 0,
-                context: "creating new file",
-            })?;
+            .map_err(|e| io_error(e, 0, "creating new file"))?;
         Ok(Self { file })
     }
 
@@ -68,43 +59,34 @@ impl SyncFileBackend {
 
 impl IoBackend for SyncFileBackend {
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-        self.file.read_exact_at(buf, offset).map_err(|e| Error::Io {
-            source: e,
-            offset,
-            context: "SyncFileBackend::read_exact_at",
-        })
+        self.file
+            .read_exact_at(buf, offset)
+            .map_err(|e| io_error(e, offset, "SyncFileBackend::read_exact_at"))
     }
 
     fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<()> {
-        self.file.write_all_at(buf, offset).map_err(|e| Error::Io {
-            source: e,
-            offset,
-            context: "SyncFileBackend::write_all_at",
-        })
+        self.file
+            .write_all_at(buf, offset)
+            .map_err(|e| io_error(e, offset, "SyncFileBackend::write_all_at"))
     }
 
     fn flush(&self) -> Result<()> {
-        self.file.sync_data().map_err(|e| Error::Io {
-            source: e,
-            offset: 0,
-            context: "SyncFileBackend::flush",
-        })
+        self.file
+            .sync_data()
+            .map_err(|e| io_error(e, 0, "SyncFileBackend::flush"))
     }
 
     fn file_size(&self) -> Result<u64> {
-        self.file.metadata().map(|m| m.len()).map_err(|e| Error::Io {
-            source: e,
-            offset: 0,
-            context: "SyncFileBackend::file_size",
-        })
+        self.file
+            .metadata()
+            .map(|m| m.len())
+            .map_err(|e| io_error(e, 0, "SyncFileBackend::file_size"))
     }
 
     fn set_len(&self, size: u64) -> Result<()> {
-        self.file.set_len(size).map_err(|e| Error::Io {
-            source: e,
-            offset: size,
-            context: "SyncFileBackend::set_len",
-        })
+        self.file
+            .set_len(size)
+            .map_err(|e| io_error(e, size, "SyncFileBackend::set_len"))
     }
 }
 

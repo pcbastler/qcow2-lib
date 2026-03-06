@@ -5,10 +5,10 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::format::feature_flags::{AutoclearFeatures, IncompatibleFeatures};
-use qcow2_lib::format::header_extension::HeaderExtension;
-use qcow2_lib::io::MemoryBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::format::feature_flags::{AutoclearFeatures, IncompatibleFeatures};
+use qcow2::format::header_extension::HeaderExtension;
+use qcow2::io::MemoryBackend;
 
 // ---- Library-only tests (no QEMU needed) ----
 
@@ -187,7 +187,7 @@ fn create_with_compression_and_external_data_fails() {
             virtual_size: 1024 * 1024,
             cluster_bits: None,
             extended_l2: false,
-            compression_type: Some(qcow2_lib::format::constants::COMPRESSION_ZSTD),
+            compression_type: Some(qcow2::format::constants::COMPRESSION_ZSTD),
             data_file: Some("data.raw".to_string()), encryption: None,
         },
     );
@@ -241,7 +241,7 @@ fn convert_raw_to_qcow2_with_data_file() {
     std::fs::write(&raw_path, &raw_data).unwrap();
 
     let qcow2_path = dir.path().join("output.qcow2");
-    qcow2_lib::engine::converter::convert_from_raw(
+    qcow2::engine::converter::convert_from_raw(
         &raw_path,
         &qcow2_path,
         false,

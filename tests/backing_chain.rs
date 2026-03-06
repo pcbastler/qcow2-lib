@@ -5,8 +5,8 @@ mod common;
 
 use std::path::Path;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::error::Error;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::error::Error;
 
 /// Helper: run `qemu-img check` and assert success.
 fn assert_qemu_check(path: &Path) {
@@ -430,7 +430,7 @@ fn commit_without_backing_fails() {
     .unwrap();
 
     match image.commit() {
-        Err(qcow2_lib::error::Error::CommitNoBacking) => {}
+        Err(qcow2::error::Error::CommitNoBacking) => {}
         other => panic!("expected CommitNoBacking, got {other:?}"),
     }
 }

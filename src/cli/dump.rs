@@ -4,12 +4,12 @@ use std::path::Path;
 
 use byteorder::{BigEndian, ByteOrder};
 
-use qcow2_lib::engine::image::Qcow2Image;
-use qcow2_lib::error::Result;
-use qcow2_lib::format::constants::*;
-use qcow2_lib::format::l1::L1Entry;
-use qcow2_lib::format::l2::L2Entry;
-use qcow2_lib::format::refcount::RefcountTableEntry;
+use qcow2::engine::image::Qcow2Image;
+use qcow2::error::Result;
+use qcow2::format::constants::*;
+use qcow2::format::l1::L1Entry;
+use qcow2::format::l2::L2Entry;
+use qcow2::format::refcount::RefcountTableEntry;
 
 /// Run the dump subcommand.
 pub fn run(path: &Path, target: &super::DumpTarget) -> Result<()> {
@@ -78,7 +78,7 @@ fn dump_l2(image: &Qcow2Image) -> Result<()> {
     let mut l2_buf = vec![0u8; cluster_size];
     backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
 
-    let l2_table = qcow2_lib::format::l2::L2Table::read_from(&l2_buf, header.geometry())?;
+    let l2_table = qcow2::format::l2::L2Table::read_from(&l2_buf, header.geometry())?;
     let entries_per_table = header.geometry().l2_entries_per_table() as usize;
 
     println!("L2 Table (L1[0] -> offset 0x{:x}, {} entries):",
@@ -87,7 +87,7 @@ fn dump_l2(image: &Qcow2Image) -> Result<()> {
     println!("{:-<6}  {:-<18}  {:-<12}", "", "", "");
 
     for i in 0..entries_per_table {
-        let entry = l2_table.get(qcow2_lib::format::types::L2Index(i as u32))?;
+        let entry = l2_table.get(qcow2::format::types::L2Index(i as u32))?;
 
         match entry {
             L2Entry::Unallocated => continue,

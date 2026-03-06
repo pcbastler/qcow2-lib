@@ -3,8 +3,8 @@
 //! Tests create QCOW2 images with extended_l2=true and verify correct behavior
 //! of subcluster-granular reads and writes.
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::io::MemoryBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::io::MemoryBackend;
 
 const KB: u64 = 1024;
 const MB: u64 = 1024 * 1024;

@@ -4,6 +4,12 @@
 //! given in the main header. Each entry has fixed-length fields followed
 //! by variable-length ID and name strings, padded to an 8-byte boundary.
 
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::error::{Error, Result};
@@ -251,6 +257,7 @@ impl SnapshotHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     fn make_test_snapshot() -> SnapshotHeader {
         SnapshotHeader {

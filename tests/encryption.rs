@@ -1,8 +1,8 @@
 //! Integration tests for LUKS encryption support.
 
-use qcow2_lib::engine::encryption::CipherMode;
-use qcow2_lib::engine::image::{CreateOptions, EncryptionOptions, Qcow2Image};
-use qcow2_lib::io::MemoryBackend;
+use qcow2::engine::encryption::CipherMode;
+use qcow2::engine::image::{CreateOptions, EncryptionOptions, Qcow2Image};
+use qcow2::io::MemoryBackend;
 use tempfile::TempDir;
 
 /// Helper to create an encrypted image on a memory backend.
@@ -220,7 +220,7 @@ fn encryption_with_compression_rejected() {
             virtual_size: 1 << 20,
             cluster_bits: None,
             extended_l2: false,
-            compression_type: Some(qcow2_lib::format::constants::COMPRESSION_ZSTD),
+            compression_type: Some(qcow2::format::constants::COMPRESSION_ZSTD),
             data_file: None,
             encryption: encryption_options(b"pw"),
         },

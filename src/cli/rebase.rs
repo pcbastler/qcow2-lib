@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use qcow2_lib::engine::image::Qcow2Image;
-use qcow2_lib::error::Result;
+use qcow2::engine::image::Qcow2Image;
+use qcow2::error::Result;
 
 /// Run the rebase subcommand.
 pub fn run(path: &Path, backing: Option<&PathBuf>) -> Result<()> {

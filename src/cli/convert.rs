@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use qcow2_lib::engine::converter;
-use qcow2_lib::error::Result;
+use qcow2::engine::converter;
+use qcow2::error::Result;
 
 /// Detected input format.
 enum InputFormat {
@@ -29,7 +29,7 @@ pub fn run(
     compression_type: Option<u8>,
     data_file: Option<String>,
     password: Option<&[u8]>,
-    encryption: Option<qcow2_lib::engine::image::EncryptionOptions>,
+    encryption: Option<qcow2::engine::image::EncryptionOptions>,
 ) -> Result<()> {
     let input_format = detect_format(input)?;
 
@@ -63,7 +63,7 @@ pub fn run(
             );
         }
         (InputFormat::Raw, OutputFormat::Raw) => {
-            return Err(qcow2_lib::error::Error::ConversionFailed {
+            return Err(qcow2::error::Error::ConversionFailed {
                 message: "raw-to-raw conversion is not supported".to_string(),
             });
         }
@@ -77,7 +77,7 @@ fn detect_format(path: &Path) -> Result<InputFormat> {
     use std::fs::File;
     use std::io::Read;
 
-    let mut file = File::open(path).map_err(|source| qcow2_lib::error::Error::Io {
+    let mut file = File::open(path).map_err(|source| qcow2::error::Error::Io {
         source,
         offset: 0,
         context: "opening input file for format detection",

@@ -2,7 +2,7 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
 
 /// Helper: run `qemu-img check` and assert success.
 fn assert_qemu_check(path: &std::path::Path) {

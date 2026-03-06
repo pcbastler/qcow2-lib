@@ -306,17 +306,17 @@ fn main() {
             encrypt_password,
         } => {
             let ct = compression_type.map(|ct| match ct {
-                CompressionType::Deflate => qcow2_lib::format::constants::COMPRESSION_DEFLATE,
-                CompressionType::Zstd => qcow2_lib::format::constants::COMPRESSION_ZSTD,
+                CompressionType::Deflate => qcow2::format::constants::COMPRESSION_DEFLATE,
+                CompressionType::Zstd => qcow2::format::constants::COMPRESSION_ZSTD,
             });
             let pw = password.as_deref().map(|s| s.as_bytes());
             let enc = if encrypt {
                 let enc_pw = encrypt_password.as_deref().unwrap_or_else(|| {
                     password.as_deref().expect("--encrypt requires --encrypt-password or --password")
                 });
-                Some(qcow2_lib::engine::image::EncryptionOptions {
+                Some(qcow2::engine::image::EncryptionOptions {
                     password: enc_pw.as_bytes().to_vec(),
-                    cipher: qcow2_lib::engine::encryption::CipherMode::AesXtsPlain64,
+                    cipher: qcow2::engine::encryption::CipherMode::AesXtsPlain64,
                     luks_version: 1,
                     iter_time_ms: Some(1000),
                 })

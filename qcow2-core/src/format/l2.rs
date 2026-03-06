@@ -11,6 +11,11 @@
 //! The [`L2Entry`] enum makes every cluster state an explicit variant,
 //! enabling exhaustive pattern matching in the engine's read path.
 
+extern crate alloc;
+
+use alloc::vec;
+use alloc::vec::Vec;
+
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::error::{Error, Result};

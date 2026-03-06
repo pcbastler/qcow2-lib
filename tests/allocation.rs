@@ -1,6 +1,6 @@
 //! Integration tests for the ScanningAllocator (cluster reuse).
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
 use tempfile::TempDir;
 
 fn create_test_image(size: u64) -> (TempDir, std::path::PathBuf) {

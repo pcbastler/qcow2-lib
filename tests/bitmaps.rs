@@ -4,8 +4,8 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::engine::integrity::check_integrity;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::engine::integrity::check_integrity;
 
 /// Create a bitmap with our library, verify with qemu-img bitmap --list.
 #[test]

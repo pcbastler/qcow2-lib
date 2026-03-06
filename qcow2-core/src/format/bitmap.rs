@@ -4,6 +4,12 @@
 //! Each bitmap tracks which regions of the virtual disk have been modified,
 //! using a two-level structure: a bitmap table pointing to bitmap data clusters.
 
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::error::{Error, Result};

@@ -6,12 +6,12 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
-use qcow2_lib::format::header::Header;
-use qcow2_lib::io::MemoryBackend;
-use qcow2_lib::io::IoBackend;
-use qcow2_lib::io::sync_backend::SyncFileBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
+use qcow2::format::header::Header;
+use qcow2::io::MemoryBackend;
+use qcow2::io::IoBackend;
+use qcow2::io::sync_backend::SyncFileBackend;
 
 // =====================================================================
 // 1. Magic number validation
@@ -293,7 +293,7 @@ fn compression_type_zstd_sets_feature_bit() {
     )
     .unwrap();
     assert_eq!(image.header().compression_type, COMPRESSION_ZSTD);
-    use qcow2_lib::format::feature_flags::IncompatibleFeatures;
+    use qcow2::format::feature_flags::IncompatibleFeatures;
     assert!(image.header().incompatible_features.contains(IncompatibleFeatures::COMPRESSION_TYPE));
 }
 

@@ -6,8 +6,8 @@
 
 use std::path::Path;
 
-use qcow2_lib::engine::converter;
-use qcow2_lib::error::Result;
+use qcow2::engine::converter;
+use qcow2::error::Result;
 
 /// Run the compact subcommand.
 pub fn run(input: &Path, output: &Path, compress: bool) -> Result<()> {

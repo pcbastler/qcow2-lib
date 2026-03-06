@@ -6,10 +6,10 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::engine::integrity::RepairMode;
-use qcow2_lib::io::IoBackend;
-use qcow2_lib::io::sync_backend::SyncFileBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::engine::integrity::RepairMode;
+use qcow2::io::IoBackend;
+use qcow2::io::sync_backend::SyncFileBackend;
 
 const CLUSTER_SIZE: u64 = 65536;
 const IMAGE_SIZE: u64 = 4 * 1024 * 1024;

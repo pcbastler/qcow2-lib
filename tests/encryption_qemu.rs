@@ -6,12 +6,12 @@
 mod common;
 
 use common::{has_qemu_io, EncryptedTestImage};
-use qcow2_lib::engine::encryption::CipherMode;
-use qcow2_lib::engine::encryption::af_splitter;
-use qcow2_lib::engine::encryption::create;
-use qcow2_lib::engine::encryption::key_derivation;
-use qcow2_lib::engine::encryption::luks_header::LuksHeader;
-use qcow2_lib::engine::image::{CreateOptions, EncryptionOptions, Qcow2Image};
+use qcow2::engine::encryption::CipherMode;
+use qcow2::engine::encryption::af_splitter;
+use qcow2::engine::encryption::create;
+use qcow2::engine::encryption::key_derivation;
+use qcow2::engine::encryption::luks_header::LuksHeader;
+use qcow2::engine::image::{CreateOptions, EncryptionOptions, Qcow2Image};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -399,7 +399,7 @@ fn debug_qemu_key_recovery_step_by_step() {
             }
 
             // Also try full recovery
-            let result = qcow2_lib::engine::encryption::recover_master_key(luks_data, b"debugpw");
+            let result = qcow2::engine::encryption::recover_master_key(luks_data, b"debugpw");
             match result {
                 Ok(ctx) => eprintln!("\nrecover_master_key: SUCCESS (key_len={})", ctx.key_len()),
                 Err(e) => eprintln!("\nrecover_master_key: FAILED: {e}"),
@@ -431,7 +431,7 @@ fn debug_qemu_key_recovery_step_by_step() {
 
                         if offset + total_luks_size <= raw_file.len() {
                             let full_luks = &raw_file[offset..offset + total_luks_size];
-                            let result = qcow2_lib::engine::encryption::recover_master_key(full_luks, b"debugpw");
+                            let result = qcow2::engine::encryption::recover_master_key(full_luks, b"debugpw");
                             match result {
                                 Ok(ctx) => eprintln!("recover_master_key: SUCCESS (key_len={})", ctx.key_len()),
                                 Err(e) => eprintln!("recover_master_key: FAILED: {e}"),
@@ -480,7 +480,7 @@ fn integrity_check_encrypted_image() {
 
     // Check integrity (doesn't need password — just checks refcounts)
     let image = Qcow2Image::open_with_password(&path, b"intpw").unwrap();
-    let report = qcow2_lib::engine::integrity::check_integrity(
+    let report = qcow2::engine::integrity::check_integrity(
         image.backend(),
         image.header(),
     )

@@ -4,6 +4,10 @@
 //! - **AES-XTS-plain64**: QEMU default, recommended. Uses sector number as tweak.
 //! - **AES-CBC-ESSIV**: Legacy mode with Encrypted Salt-Sector IV generation.
 
+extern crate alloc;
+
+use alloc::format;
+
 use aes::Aes128;
 use aes::Aes256;
 use cbc::cipher::block_padding::NoPadding;
@@ -205,6 +209,7 @@ fn compute_essiv(key: &[u8], sector_num: u64) -> Result<[u8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn xts_256_encrypt_decrypt_round_trip() {

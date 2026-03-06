@@ -11,8 +11,9 @@ use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use std::io::{Read, Write};
 
-use crate::error::{Error, Result};
+use crate::error::{decompress_error, io_error, Error, Result};
 use crate::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
+use crate::io::Compressor;
 
 /// Decompress a QCOW2 compressed cluster.
 ///
@@ -31,33 +32,19 @@ pub fn decompress_cluster(
         COMPRESSION_DEFLATE => {
             let mut decoder = DeflateDecoder::new(compressed_data);
             let mut decompressed = vec![0u8; cluster_size];
-            decoder.read_exact(&mut decompressed).map_err(|e| {
-                Error::DecompressionFailed {
-                    source: e,
-                    guest_offset,
-                }
-            })?;
+            decoder
+                .read_exact(&mut decompressed)
+                .map_err(|e| decompress_error(e, guest_offset))?;
             Ok(decompressed)
         }
         COMPRESSION_ZSTD => {
-            // QCOW2 stores sector-aligned compressed sizes, so the buffer
-            // may contain trailing padding beyond the zstd frame.
-            // Use a Decoder that reads only a single frame and stops,
-            // ignoring any trailing padding bytes.
             let cursor = std::io::Cursor::new(compressed_data);
-            let mut decoder = zstd::Decoder::new(cursor).map_err(|e| {
-                Error::DecompressionFailed {
-                    source: e,
-                    guest_offset,
-                }
-            })?;
+            let mut decoder =
+                zstd::Decoder::new(cursor).map_err(|e| decompress_error(e, guest_offset))?;
             let mut decompressed = vec![0u8; cluster_size];
-            decoder.read_exact(&mut decompressed).map_err(|e| {
-                Error::DecompressionFailed {
-                    source: e,
-                    guest_offset,
-                }
-            })?;
+            decoder
+                .read_exact(&mut decompressed)
+                .map_err(|e| decompress_error(e, guest_offset))?;
             Ok(decompressed)
         }
         _ => Err(Error::UnsupportedCompressionType { compression_type }),
@@ -67,13 +54,7 @@ pub fn decompress_cluster(
 /// Compress a full cluster of data.
 ///
 /// Returns `Some(compressed_bytes)` if compression reduces the size below
-/// `cluster_size`. Returns `None` if the compressed output is not smaller
-/// (e.g., for random or already-compressed data).
-///
-/// # Arguments
-/// * `data` - Uncompressed cluster data (typically `cluster_size` bytes)
-/// * `cluster_size` - The cluster size for the size comparison threshold
-/// * `compression_type` - 0 = deflate, 1 = zstandard
+/// `cluster_size`. Returns `None` if the compressed output is not smaller.
 pub fn compress_cluster(
     data: &[u8],
     cluster_size: usize,
@@ -82,25 +63,15 @@ pub fn compress_cluster(
     let compressed = match compression_type {
         COMPRESSION_DEFLATE => {
             let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(data).map_err(|e| Error::Io {
-                source: e,
-                offset: 0,
-                context: "compressing cluster data",
-            })?;
-            encoder.finish().map_err(|e| Error::Io {
-                source: e,
-                offset: 0,
-                context: "finishing deflate compression",
-            })?
+            encoder
+                .write_all(data)
+                .map_err(|e| io_error(e, 0, "compressing cluster data"))?;
+            encoder
+                .finish()
+                .map_err(|e| io_error(e, 0, "finishing deflate compression"))?
         }
-        COMPRESSION_ZSTD => {
-            // Level 3 is the default, matching QEMU's behavior.
-            zstd::bulk::compress(data, 3).map_err(|e| Error::Io {
-                source: e,
-                offset: 0,
-                context: "zstd compression",
-            })?
-        }
+        COMPRESSION_ZSTD => zstd::bulk::compress(data, 3)
+            .map_err(|e| io_error(e, 0, "zstd compression"))?,
         _ => return Err(Error::UnsupportedCompressionType { compression_type }),
     };
 
@@ -109,6 +80,45 @@ pub fn compress_cluster(
     }
 
     Ok(Some(compressed))
+}
+
+/// Standard compression backend implementing the core [`Compressor`] trait.
+///
+/// Provides deflate (flate2) and zstandard (zstd) support for the core engine.
+pub struct StdCompressor;
+
+impl Compressor for StdCompressor {
+    fn decompress(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+        compression_type: u8,
+    ) -> qcow2_core::Result<usize> {
+        let cluster_size = output.len();
+        let decompressed = decompress_cluster(input, cluster_size, 0, compression_type)?;
+        output.copy_from_slice(&decompressed);
+        Ok(cluster_size)
+    }
+
+    fn compress(
+        &self,
+        input: &[u8],
+        output: &mut [u8],
+        compression_type: u8,
+    ) -> qcow2_core::Result<usize> {
+        match compress_cluster(input, input.len(), compression_type)? {
+            Some(compressed) => {
+                let len = compressed.len();
+                output[..len].copy_from_slice(&compressed);
+                Ok(len)
+            }
+            None => Err(Error::CompressionTooLarge {
+                compressed_size: input.len(),
+                cluster_size: input.len(),
+                guest_offset: 0,
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -344,14 +354,12 @@ mod tests {
 
     #[test]
     fn zstd_decompress_with_sector_padding() {
-        // Simulate QCOW2 behavior: compress, pad to sector alignment, decompress
         let cluster_size = 65536;
         let original = vec![0xCC; cluster_size];
         let compressed = compress_cluster(&original, cluster_size, COMPRESSION_ZSTD)
             .unwrap()
             .unwrap();
 
-        // Pad to sector boundary (as QCOW2 stores sector-aligned sizes)
         let sector_aligned = ((compressed.len() + 511) & !511).max(512);
         let mut padded = vec![0u8; sector_aligned];
         padded[..compressed.len()].copy_from_slice(&compressed);

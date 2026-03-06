@@ -5,6 +5,10 @@
 //! In lenient mode, unreadable regions are filled with zeros and
 //! [`ReadWarning`]s are collected for later inspection.
 
+extern crate alloc;
+
+use alloc::string::String;
+
 /// Controls how the library handles corrupt or inconsistent metadata
 /// during read operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -34,6 +38,8 @@ pub struct ReadWarning {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
 
     #[test]
     fn read_mode_default_is_strict() {

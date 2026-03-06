@@ -5,6 +5,13 @@
 //! and independent of the image's cluster size. Uses a two-level structure:
 //! a hash table (Level 1) pointing to hash data clusters (Level 2).
 
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use byteorder::{BigEndian, ByteOrder};
 
 use crate::error::{Error, Result};

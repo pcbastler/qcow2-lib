@@ -6,10 +6,10 @@ mod common;
 use std::path::Path;
 
 use byteorder::{BigEndian, ByteOrder};
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::engine::integrity::RepairMode;
-use qcow2_lib::io::sync_backend::SyncFileBackend;
-use qcow2_lib::io::IoBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::engine::integrity::RepairMode;
+use qcow2::io::sync_backend::SyncFileBackend;
+use qcow2::io::IoBackend;
 
 /// Helper: run `qemu-img check` and assert success.
 fn assert_qemu_check(path: &Path) {
@@ -265,7 +265,7 @@ fn compact_produces_valid_image() {
     );
 
     let output = dir.path().join("compacted.qcow2");
-    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&input, &output, false, None, None, None, None).unwrap();
+    qcow2::engine::converter::convert_qcow2_to_qcow2(&input, &output, false, None, None, None, None).unwrap();
 
     assert_qemu_check(&output);
 }
@@ -285,7 +285,7 @@ fn compact_preserves_data() {
     );
 
     let output = dir.path().join("compacted.qcow2");
-    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&input, &output, false, None, None, None, None).unwrap();
+    qcow2::engine::converter::convert_qcow2_to_qcow2(&input, &output, false, None, None, None, None).unwrap();
 
     // Read back from compacted image
     let mut image = Qcow2Image::open(&output).unwrap();
@@ -311,7 +311,7 @@ fn compact_compressed_passes_qemu_check() {
     );
 
     let output = dir.path().join("compressed.qcow2");
-    qcow2_lib::engine::converter::convert_qcow2_to_qcow2(&input, &output, true, None, None, None, None).unwrap();
+    qcow2::engine::converter::convert_qcow2_to_qcow2(&input, &output, true, None, None, None, None).unwrap();
 
     assert_qemu_check(&output);
 

@@ -1,44 +1,15 @@
 //! I/O backend abstraction for positioned reads and writes.
 //!
-//! The [`IoBackend`] trait decouples the engine from any specific I/O
-//! implementation. This enables:
-//! - File-based I/O via [`SyncFileBackend`](sync_backend::SyncFileBackend)
-//! - In-memory I/O for testing via [`MemoryBackend`]
-//! - Future async backends (tokio, io_uring)
-//!
-//! All operations are offset-based (positioned) and do not maintain a
-//! file cursor, making them safe for concurrent use without locking.
+//! Re-exports the core traits from [`qcow2_core::io`] and provides
+//! concrete implementations:
+//! - [`SyncFileBackend`](sync_backend::SyncFileBackend) for file-based I/O
+//! - [`MemoryBackend`] for in-memory testing
 
 pub mod sync_backend;
 
-use crate::error::Result;
+pub use qcow2_core::io::{BackingImage, Compressor, IoBackend};
 
-/// Abstraction over positioned I/O operations.
-///
-/// Implementations must be `Send + Sync` to support future concurrent
-/// and async engine designs.
-pub trait IoBackend: Send + Sync {
-    /// Read exactly `buf.len()` bytes starting at the given offset.
-    ///
-    /// Returns an error if the full read cannot be satisfied (e.g., EOF).
-    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()>;
-
-    /// Write exactly `buf.len()` bytes starting at the given offset.
-    ///
-    /// Returns an error if the full write cannot be completed.
-    fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<()>;
-
-    /// Flush any buffered writes to the underlying storage.
-    fn flush(&self) -> Result<()>;
-
-    /// Total size of the backing storage in bytes.
-    fn file_size(&self) -> Result<u64>;
-
-    /// Resize the backing storage to exactly `size` bytes.
-    ///
-    /// Extends with zeros or truncates as appropriate.
-    fn set_len(&self, size: u64) -> Result<()>;
-}
+use crate::error::{io_error, Result};
 
 /// In-memory I/O backend for testing.
 ///
@@ -77,8 +48,8 @@ impl IoBackend for MemoryBackend {
             None => data.len() + 1, // force EOF error below
         };
         if end > data.len() {
-            return Err(crate::error::Error::Io {
-                source: std::io::Error::new(
+            return Err(io_error(
+                std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     format!(
                         "read of {} bytes at offset 0x{:x} exceeds data size {}",
@@ -88,8 +59,8 @@ impl IoBackend for MemoryBackend {
                     ),
                 ),
                 offset,
-                context: "MemoryBackend::read_exact_at",
-            });
+                "MemoryBackend::read_exact_at",
+            ));
         }
         buf.copy_from_slice(&data[start..end]);
         Ok(())
@@ -99,14 +70,14 @@ impl IoBackend for MemoryBackend {
         let mut data = self.data.write().unwrap();
         let start = offset as usize;
         let end = start.checked_add(buf.len()).ok_or_else(|| {
-            crate::error::Error::Io {
-                source: std::io::Error::new(
+            io_error(
+                std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "write offset + length overflows usize",
                 ),
                 offset,
-                context: "MemoryBackend::write_all_at",
-            }
+                "MemoryBackend::write_all_at",
+            )
         })?;
         if end > data.len() {
             data.resize(end, 0);
@@ -172,7 +143,6 @@ mod tests {
         let backend = MemoryBackend::zeroed(100);
         backend.set_len(200).unwrap();
         assert_eq!(backend.file_size().unwrap(), 200);
-        // New bytes should be zero
         let mut buf = [0u8; 10];
         backend.read_exact_at(&mut buf, 150).unwrap();
         assert!(buf.iter().all(|&b| b == 0));
@@ -184,7 +154,6 @@ mod tests {
         backend.write_all_at(&[0xAA; 50], 0).unwrap();
         backend.set_len(100).unwrap();
         assert_eq!(backend.file_size().unwrap(), 100);
-        // Original data in range should be preserved
         let mut buf = [0u8; 50];
         backend.read_exact_at(&mut buf, 0).unwrap();
         assert!(buf.iter().all(|&b| b == 0xAA));

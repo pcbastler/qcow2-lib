@@ -3,7 +3,7 @@
 //! These newtypes prevent accidental mixing of host offsets, guest offsets,
 //! and table indices at compile time. All offset types display in hexadecimal.
 
-use std::fmt;
+use core::fmt;
 
 /// A byte offset within the host (image) file.
 ///
@@ -284,6 +284,7 @@ impl ClusterOffset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
 
     // ---- GuestOffset::split tests ----
 

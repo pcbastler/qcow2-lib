@@ -5,8 +5,8 @@
 
 mod common;
 
-use qcow2_lib::engine::encryption::CipherMode;
-use qcow2_lib::engine::image::{CreateOptions, EncryptionOptions, Qcow2Image};
+use qcow2::engine::encryption::CipherMode;
+use qcow2::engine::image::{CreateOptions, EncryptionOptions, Qcow2Image};
 
 const CS: usize = 65536;
 const CSU: u64 = CS as u64;

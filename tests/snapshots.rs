@@ -5,7 +5,7 @@
 
 mod common;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
 
 /// Helper: create, write, flush, and drop an image, returning the path.
 fn create_image_with_data(dir: &std::path::Path, name: &str, data: &[(u64, &[u8])]) -> std::path::PathBuf {

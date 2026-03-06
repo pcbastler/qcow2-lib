@@ -1,5 +1,9 @@
+[workspace]
+members = ["qcow2-core", "."]
+resolver = "2"
+
 [package]
-name = "qcow2-lib"
+name = "qcow2"
 version = "0.1.0"
 edition = "2021"
 description = "A textbook-quality QCOW2 image format library for Rust"
@@ -7,6 +11,7 @@ license-file = "LICENSE"
 rust-version = "1.70"
 
 [dependencies]
+qcow2-core = { path = "qcow2-core" }
 thiserror = "2"
 byteorder = "1"
 bitflags = "2"

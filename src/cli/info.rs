@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use qcow2_lib::engine::image::Qcow2Image;
-use qcow2_lib::error::Result;
+use qcow2::engine::image::Qcow2Image;
+use qcow2::error::Result;
 
 /// Run the info subcommand, printing header details to stdout.
 pub fn run(path: &Path) -> Result<()> {
@@ -35,7 +35,7 @@ pub fn run(path: &Path) -> Result<()> {
         match header.compression_type {
             0 => "deflate",
             1 => "zstd",
-            t => return Err(qcow2_lib::error::Error::UnsupportedCompressionType {
+            t => return Err(qcow2::error::Error::UnsupportedCompressionType {
                 compression_type: t,
             }),
         },
@@ -46,7 +46,7 @@ pub fn run(path: &Path) -> Result<()> {
     }
     if image.has_external_data_file() {
         let data_file_name = image.extensions().iter().find_map(|e| {
-            if let qcow2_lib::format::header_extension::HeaderExtension::ExternalDataFile(name) = e {
+            if let qcow2::format::header_extension::HeaderExtension::ExternalDataFile(name) = e {
                 Some(name.as_str())
             } else {
                 None
