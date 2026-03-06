@@ -93,10 +93,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn af_split_merge_round_trip() {
+    fn af_split_merge_round_trip_sha256() {
         let key = b"0123456789abcdef0123456789abcdef";
         let material = af_split(key, 4000, AfHash::Sha256).unwrap();
-        let recovered = af_merge(&material, key.len(), 4000, AfHash::Sha256).unwrap();
+        assert_eq!(material.len(), 32 * 4000);
+        let recovered = af_merge(&material, 32, 4000, AfHash::Sha256).unwrap();
         assert_eq!(&recovered, key);
+    }
+
+    #[test]
+    fn af_split_merge_round_trip_sha1() {
+        let key = vec![0xAA; 32];
+        let material = af_split(&key, 4000, AfHash::Sha1).unwrap();
+        let recovered = af_merge(&material, 32, 4000, AfHash::Sha1).unwrap();
+        assert_eq!(recovered, key);
+    }
+
+    #[test]
+    fn af_split_merge_round_trip_sha512() {
+        let key = vec![0xBB; 64];
+        let material = af_split(&key, 4000, AfHash::Sha512).unwrap();
+        let recovered = af_merge(&material, 64, 4000, AfHash::Sha512).unwrap();
+        assert_eq!(recovered, key);
+    }
+
+    #[test]
+    fn af_split_produces_different_material_each_time() {
+        let key = vec![0xCC; 32];
+        let split1 = af_split(&key, 100, AfHash::Sha256).unwrap();
+        let split2 = af_split(&key, 100, AfHash::Sha256).unwrap();
+        assert_ne!(split1, split2);
     }
 }

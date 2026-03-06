@@ -8,11 +8,13 @@
 
 // Re-export core types and sub-modules
 pub use qcow2_core::engine::encryption::{
-    cipher, key_derivation, CipherMode, CryptContext,
+    cipher, CipherMode, CryptContext,
 };
 
 // Local af_splitter with working af_split (uses rand, not available in no_std core)
 pub mod af_splitter;
+// Local key_derivation with Argon2id support (not available in no_std core)
+pub mod key_derivation;
 
 // Std-only modules
 #[allow(missing_docs)]

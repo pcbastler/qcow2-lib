@@ -153,7 +153,36 @@ fn free_cluster_sets_refcount_to_zero() {
     assert_eq!(mgr.get_refcount(0, &backend, &mut cache).unwrap(), 0);
 }
 
-// cluster_to_refcount_index_calculation: removed (accesses private method across crate boundary)
+/// Test that refcounts for clusters at different offsets are stored correctly.
+/// This is the behavioral equivalent of the original cluster_to_refcount_index test.
+#[test]
+fn refcount_mapping_across_block_boundary() {
+    let block_offset = 3 * CLUSTER_SIZE as u64;
+    let header = make_header(2);
+    // Two refcount table entries, second pointing to cluster 4
+    let backend = make_backend(2, &[(0, block_offset), (1, 4 * CLUSTER_SIZE as u64)]);
+    let mut mgr = RefcountManager::load(&backend, &header).unwrap();
+    let mut cache = MetadataCache::new(CacheConfig::default());
+
+    // Set refcount for cluster 0 (in first block)
+    mgr.set_refcount(0, 5, &backend, &mut cache).unwrap();
+    assert_eq!(mgr.get_refcount(0, &backend, &mut cache).unwrap(), 5);
+
+    // Set refcount for cluster 1 (also in first block)
+    mgr.set_refcount(CLUSTER_SIZE as u64, 3, &backend, &mut cache).unwrap();
+    assert_eq!(mgr.get_refcount(CLUSTER_SIZE as u64, &backend, &mut cache).unwrap(), 3);
+
+    // 16-bit refcounts in 64KB cluster = 32768 entries per block
+    // Cluster 32768 should be in the second refcount block
+    let entries_per_block = CLUSTER_SIZE * 8 / 16; // 32768
+    let cross_boundary_offset = entries_per_block as u64 * CLUSTER_SIZE as u64;
+    mgr.set_refcount(cross_boundary_offset, 7, &backend, &mut cache).unwrap();
+    assert_eq!(mgr.get_refcount(cross_boundary_offset, &backend, &mut cache).unwrap(), 7);
+
+    // Verify the first block entries weren't clobbered
+    assert_eq!(mgr.get_refcount(0, &backend, &mut cache).unwrap(), 5);
+    assert_eq!(mgr.get_refcount(CLUSTER_SIZE as u64, &backend, &mut cache).unwrap(), 3);
+}
 
 #[test]
 fn ensure_coverage_allocates_new_block() {
