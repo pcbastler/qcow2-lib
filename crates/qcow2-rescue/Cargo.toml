@@ -19,6 +19,10 @@ byteorder = "1"
 tempfile = "3"
 flate2 = "1"
 
+[lib]
+name = "qcow2_rescue"
+path = "src/lib.rs"
+
 [[bin]]
 name = "qcow2-rescue"
 path = "src/main.rs"
