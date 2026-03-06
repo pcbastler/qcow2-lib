@@ -238,16 +238,21 @@ fn t04_header_virtual_size_corrupted() {
     let img = create_test_image(dir.path());
     let original = read_original_data(&img);
 
-    // virtual_size at offset 24, 8 bytes. Set to 0.
-    corrupt_bytes(&img, 24, &0u64.to_be_bytes());
+    // virtual_size at offset 24, 8 bytes. Set to half the real size (4 clusters
+    // instead of 8). This is plausible enough to pass header parsing but too small
+    // to cover all mappings — recovery should detect this and use mapping-derived size.
+    let wrong_size = (NUM_DATA_CLUSTERS / 2) * CLUSTER_SIZE;
+    corrupt_bytes(&img, 24, &wrong_size.to_be_bytes());
 
     let out_dir = dir.path().join("out");
     let (out_path, report) = run_recovery(&img, &out_dir);
+    let recovered = read_recovered_raw(&out_path);
 
-    // With virtual_size=0 in header, the recovery uses it as output size (0 bytes).
-    // L2 mappings exist but the output file is 0-sized, so nothing gets written.
-    // This test verifies recovery completes without crashing.
-    let _ = report;
+    // Header says 256KB but mappings cover 512KB — recovery should use the larger value
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover all data via mapping-inferred virtual_size");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
 }
 
 #[test]

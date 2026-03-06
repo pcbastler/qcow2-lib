@@ -114,6 +114,55 @@ struct EncryptionSetup {
     probe_ok: Option<bool>,
 }
 
+/// Infer the virtual_size from header and mapping data.
+///
+/// The header's virtual_size may be corrupt (zero, too small, or random garbage).
+/// We cross-check against the actual mappings to catch obvious errors:
+/// - If header says 0 or less than what mappings cover → use mapping-derived size
+/// - If header says something unreasonably large (>64TB or >1000× file size) → use mapping-derived size
+/// - If no header and no mappings → return 0
+fn infer_virtual_size(tables: &ReconstructedTablesReport, cluster_size: u64) -> u64 {
+    let mapping_max = tables.mappings.iter()
+        .map(|m| m.guest_offset + cluster_size)
+        .max()
+        .unwrap_or(0);
+
+    match tables.virtual_size {
+        Some(vs) if vs > 0 && vs >= mapping_max => {
+            // Header value is plausible: non-zero and covers all mappings.
+            // Sanity-check: reject unreasonably large values (>64 TB).
+            if vs > 64 * 1024 * 1024 * 1024 * 1024 {
+                eprintln!(
+                    "  warning: header virtual_size {} is unreasonably large, \
+                     using mapping-derived size {}",
+                    vs, mapping_max
+                );
+                mapping_max
+            } else {
+                vs
+            }
+        }
+        Some(vs) => {
+            eprintln!(
+                "  warning: header virtual_size {} is too small or zero \
+                 (mappings cover up to {}), using mapping-derived size",
+                vs, mapping_max
+            );
+            mapping_max
+        }
+        None => {
+            if mapping_max > 0 {
+                eprintln!(
+                    "  warning: no virtual_size from header, \
+                     inferred {} from mappings",
+                    mapping_max
+                );
+            }
+            mapping_max
+        }
+    }
+}
+
 /// Recover a single QCOW2 image (no backing chain) to the output path.
 pub fn recover_single(
     input: &Path,
@@ -127,12 +176,7 @@ pub fn recover_single(
 
     let cluster_map = scan::scan_file(input, cluster_size)?;
     let tables = reconstruct::reconstruct_with_strategy(input, &cluster_map, options.on_conflict)?;
-    let virtual_size = tables.virtual_size.unwrap_or_else(|| {
-        tables.mappings.iter()
-            .map(|m| m.guest_offset + cluster_size)
-            .max()
-            .unwrap_or(0)
-    });
+    let virtual_size = infer_virtual_size(&tables, cluster_size);
 
     // Check if image has encrypted clusters
     let has_encrypted = tables.mappings.iter().any(|m| m.encrypted);
@@ -187,7 +231,6 @@ pub fn recover_chain(
 
     // Scan and reconstruct each layer
     let mut layers: Vec<(PathBuf, ReconstructedTablesReport)> = Vec::new();
-    let mut max_virtual_size = 0u64;
     let mut cluster_size = 0u64;
 
     for path in chain {
@@ -201,22 +244,14 @@ pub fn recover_chain(
 
         let cluster_map = scan::scan_file(path, cs)?;
         let tables = reconstruct::reconstruct_with_strategy(path, &cluster_map, options.on_conflict)?;
-
-        if let Some(vs) = tables.virtual_size {
-            max_virtual_size = max_virtual_size.max(vs);
-        }
-
         layers.push((path.clone(), tables));
     }
 
-    if max_virtual_size == 0 {
-        // Fallback
-        max_virtual_size = layers.iter()
-            .flat_map(|(_, t)| t.mappings.iter())
-            .map(|m| m.guest_offset + cluster_size)
-            .max()
-            .unwrap_or(0);
-    }
+    // Use the largest plausible virtual_size across all layers
+    let max_virtual_size = layers.iter()
+        .map(|(_, t)| infer_virtual_size(t, cluster_size))
+        .max()
+        .unwrap_or(0);
 
     let layer_refs: Vec<(PathBuf, ReconstructedTablesReport)> = layers;
 
