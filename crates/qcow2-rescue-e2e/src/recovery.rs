@@ -45,6 +45,48 @@ pub fn run_rescue(
     Ok(recovered)
 }
 
+/// Run `qemu-img check -r all` on a corrupted image, then convert to raw.
+/// Returns the path to the repaired raw file, or an error description.
+pub fn run_qemu_repair(
+    corrupt_image: &Path,
+    output_dir: &Path,
+) -> Result<std::path::PathBuf, String> {
+    let repaired = output_dir.join("qemu-repaired.qcow2");
+    std::fs::copy(corrupt_image, &repaired)
+        .map_err(|e| format!("copy for qemu repair: {e}"))?;
+
+    // Run qemu-img check -r all (ignore exit code, it returns non-zero for corruptions)
+    let _ = Command::new("qemu-img")
+        .args(["check", "-r", "all", &repaired.display().to_string()])
+        .output();
+
+    // Try to convert repaired image to raw
+    let raw_path = output_dir.join("qemu-recovered.raw");
+    let output = Command::new("qemu-img")
+        .args([
+            "convert",
+            "-f", "qcow2",
+            "-O", "raw",
+            &repaired.display().to_string(),
+            &raw_path.display().to_string(),
+        ])
+        .output()
+        .map_err(|e| format!("qemu-img convert failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "qemu-img convert after repair failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    if !raw_path.exists() {
+        return Err("qemu-img convert produced no output".into());
+    }
+
+    Ok(raw_path)
+}
+
 /// Convert a QCOW2 to raw using qemu-img for comparison.
 pub fn qcow2_to_raw(qcow2_path: &Path, raw_path: &Path) -> Result<(), String> {
     let output = Command::new("qemu-img")

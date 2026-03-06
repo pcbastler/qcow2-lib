@@ -11,8 +11,8 @@ use std::process;
 
 fn usage() -> ! {
     eprintln!("Usage:");
-    eprintln!("  qcow2-rescue-e2e generate <output-dir>     Generate test images (needs root/Docker)");
-    eprintln!("  qcow2-rescue-e2e test <images-dir>         Run corruption + recovery tests (host)");
+    eprintln!("  qcow2-rescue-e2e generate <output-dir>             Generate test images (needs root/Docker)");
+    eprintln!("  qcow2-rescue-e2e test <images-dir> [--compare-qemu] Run corruption + recovery tests (host)");
     process::exit(2);
 }
 
@@ -38,7 +38,11 @@ fn main() {
             println!("=== generation complete ===");
         }
         "test" => {
+            let compare_qemu = args.iter().any(|a| a == "--compare-qemu");
             println!("=== qcow2-rescue e2e: running tests ===");
+            if compare_qemu {
+                println!("  (with qemu-img repair comparison)");
+            }
             println!("images: {}", dir.display());
 
             let rescue_bin = PathBuf::from(
@@ -46,7 +50,7 @@ fn main() {
                     .unwrap_or_else(|_| "qcow2-rescue".into()),
             );
 
-            let results = runner::test_all(&dir, &rescue_bin);
+            let results = runner::test_all(&dir, &rescue_bin, compare_qemu);
 
             println!();
             runner::print_matrix(&results);

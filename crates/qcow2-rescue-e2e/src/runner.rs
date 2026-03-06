@@ -27,6 +27,7 @@ pub struct TestResult {
     pub corruption: String,
     pub passed: bool,
     pub match_pct: f64,
+    pub qemu_match_pct: Option<f64>,
     pub error: Option<String>,
 }
 
@@ -137,7 +138,8 @@ fn generate_one(img_dir: &Path, spec: &ImageSpec) -> Result<ImageEntry, String> 
 // ---------------------------------------------------------------------------
 
 /// Load manifest, then for each image try all corruption types.
-pub fn test_all(images_dir: &Path, rescue_bin: &Path) -> Vec<TestResult> {
+/// If `compare_qemu` is true, also run `qemu-img check -r all` + convert for comparison.
+pub fn test_all(images_dir: &Path, rescue_bin: &Path, compare_qemu: bool) -> Vec<TestResult> {
     let manifest_path = images_dir.join("manifest.json");
     let manifest_data = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
         eprintln!("cannot read {}: {e}", manifest_path.display());
@@ -170,63 +172,114 @@ pub fn test_all(images_dir: &Path, rescue_bin: &Path) -> Vec<TestResult> {
             let test_name = format!("{}_{corr}", entry.name);
             println!("[{idx}/{total}] {test_name} ...");
 
-            match run_corruption_test(&qcow2_path, &reference_path, corr, rescue_bin) {
-                Ok((details, pct)) => {
-                    println!("  PASS: {details}");
-                    results.push(TestResult {
-                        name: test_name,
-                        image: entry.name.clone(),
-                        corruption: corr.to_string(),
-                        passed: true,
-                        match_pct: pct,
-                        error: None,
-                    });
+            let r = run_corruption_test(&qcow2_path, &reference_path, corr, rescue_bin, compare_qemu);
+
+            if compare_qemu {
+                let qemu_str = match r.qemu_pct {
+                    Some(q) => format!("{q:.0}%"),
+                    None => "FAIL".into(),
+                };
+                if r.passed {
+                    println!("  PASS: rescue={:.0}% qemu={}", r.rescue_pct, qemu_str);
+                } else {
+                    println!("  FAIL: rescue={:.0}% qemu={}", r.rescue_pct, qemu_str);
                 }
-                Err((e, pct)) => {
-                    println!("  FAIL: {e}");
-                    results.push(TestResult {
-                        name: test_name,
-                        image: entry.name.clone(),
-                        corruption: corr.to_string(),
-                        passed: false,
-                        match_pct: pct,
-                        error: Some(e),
-                    });
-                }
+            } else if r.passed {
+                println!("  PASS: {:.0}%", r.rescue_pct);
+            } else {
+                println!("  FAIL: {:.0}% | {}", r.rescue_pct, r.error.as_deref().unwrap_or(""));
             }
+
+            results.push(TestResult {
+                name: test_name,
+                image: entry.name.clone(),
+                corruption: corr.to_string(),
+                passed: r.passed,
+                match_pct: r.rescue_pct,
+                qemu_match_pct: r.qemu_pct,
+                error: r.error,
+            });
         }
     }
 
     results
 }
 
-/// Returns Ok((description, match_pct)) or Err((description, match_pct)).
+/// Result of a single corruption test with both rescue and qemu results.
+struct CorruptionTestResult {
+    rescue_pct: f64,
+    qemu_pct: Option<f64>,
+    passed: bool,
+    error: Option<String>,
+}
+
 fn run_corruption_test(
     qcow2_path: &Path,
     reference_path: &Path,
     corruption: CorruptionType,
     rescue_bin: &Path,
-) -> Result<(String, f64), (String, f64)> {
+    compare_qemu: bool,
+) -> CorruptionTestResult {
     let test_dir = std::env::temp_dir().join(format!(
         "qcow2-e2e-{}-{corruption}",
         qcow2_path.parent().unwrap().file_name().unwrap().to_string_lossy()
     ));
     let _ = std::fs::remove_dir_all(&test_dir);
-    std::fs::create_dir_all(&test_dir).map_err(|e| (format!("mkdir: {e}"), 0.0))?;
+    if let Err(e) = std::fs::create_dir_all(&test_dir) {
+        return CorruptionTestResult {
+            rescue_pct: 0.0, qemu_pct: None,
+            passed: false, error: Some(format!("mkdir: {e}")),
+        };
+    }
 
     let corrupt_path = test_dir.join("corrupt.qcow2");
     let recovery_dir = test_dir.join("recovery");
+    let qemu_dir = test_dir.join("qemu");
+    let _ = std::fs::create_dir_all(&qemu_dir);
 
-    std::fs::copy(qcow2_path, &corrupt_path)
-        .map_err(|e| (format!("copy qcow2: {e}"), 0.0))?;
-    let corruption_desc =
-        corruptor::corrupt(&corrupt_path, corruption).map_err(|e| (e, 0.0))?;
+    if let Err(e) = std::fs::copy(qcow2_path, &corrupt_path) {
+        return CorruptionTestResult {
+            rescue_pct: 0.0, qemu_pct: None,
+            passed: false, error: Some(format!("copy qcow2: {e}")),
+        };
+    }
 
-    let recovered_raw =
-        recovery::run_rescue(rescue_bin, &corrupt_path, &recovery_dir).map_err(|e| (e, 0.0))?;
+    let corruption_desc = match corruptor::corrupt(&corrupt_path, corruption) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&test_dir);
+            return CorruptionTestResult {
+                rescue_pct: 0.0, qemu_pct: None,
+                passed: false, error: Some(e),
+            };
+        }
+    };
 
-    let cmp =
-        validator::compare_raw_images(reference_path, &recovered_raw).map_err(|e| (e, 0.0))?;
+    // --- qcow2-rescue ---
+    let rescue_pct = match recovery::run_rescue(rescue_bin, &corrupt_path, &recovery_dir) {
+        Ok(recovered_raw) => {
+            match validator::compare_raw_images(reference_path, &recovered_raw) {
+                Ok(cmp) => cmp.match_percent(),
+                Err(_) => 0.0,
+            }
+        }
+        Err(_) => 0.0,
+    };
+
+    // --- qemu-img repair (optional) ---
+    let qemu_pct = if compare_qemu {
+        match recovery::run_qemu_repair(&corrupt_path, &qemu_dir) {
+            Ok(qemu_raw) => {
+                match validator::compare_raw_images(reference_path, &qemu_raw) {
+                    Ok(cmp) => Some(cmp.match_percent()),
+                    Err(_) => Some(0.0),
+                }
+            }
+            Err(_) => None, // qemu couldn't even open/convert
+        }
+    } else {
+        None
+    };
 
     let _ = std::fs::remove_dir_all(&test_dir);
 
@@ -237,15 +290,19 @@ fn run_corruption_test(
         CorruptionType::AllMetadata => 50.0,
     };
 
-    let pct = cmp.match_percent();
-    if pct < min_match {
-        return Err((
-            format!("{corruption_desc} -> {pct:.1}% (need {min_match}%): {cmp}"),
-            pct,
-        ));
-    }
+    let passed = rescue_pct >= min_match;
+    let error = if !passed {
+        Some(format!("{corruption_desc} -> {rescue_pct:.1}% (need {min_match}%)"))
+    } else {
+        None
+    };
 
-    Ok((format!("{corruption_desc} -> {cmp}"), pct))
+    CorruptionTestResult {
+        rescue_pct,
+        qemu_pct,
+        passed,
+        error,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +325,8 @@ const COL_WIDTH: usize = 10;
 pub fn print_matrix(results: &[TestResult]) {
     use std::collections::HashMap;
 
+    let has_qemu = results.iter().any(|r| r.qemu_match_pct.is_some());
+
     let mut images: Vec<String> = Vec::new();
     for r in results {
         if !images.contains(&r.image) {
@@ -275,62 +334,153 @@ pub fn print_matrix(results: &[TestResult]) {
         }
     }
 
-    let mut lookup: HashMap<(&str, &str), (bool, f64)> = HashMap::new();
+    type Lookup<'a> = HashMap<(&'a str, &'a str), (bool, f64, Option<f64>)>;
+    let mut lookup: Lookup = HashMap::new();
     for r in results {
         lookup.insert(
             (r.image.as_str(), r.corruption.as_str()),
-            (r.passed, r.match_pct),
+            (r.passed, r.match_pct, r.qemu_match_pct),
         );
     }
 
     let nw = images.iter().map(|s| s.len()).max().unwrap_or(20).max(5) + 2;
 
-    // Header
-    print!("{:<nw$} |", "Image");
-    for hdr in COL_HEADERS {
-        print!("{:^width$}|", hdr, width = COL_WIDTH);
-    }
-    println!();
-    print!("{:-<nw$}-+", "");
-    for _ in COL_HEADERS {
-        print!("{:-<width$}+", "", width = COL_WIDTH);
-    }
-    println!();
+    if has_qemu {
+        // Comparison matrix: each cell shows "rescue/qemu"
+        let cw = 13; // column width for "100/  0" style
 
-    // Rows
-    for img in &images {
-        print!("{:<nw$} |", img);
-        for &corr in CORRUPTION_COLS {
-            if let Some(&(passed, pct)) = lookup.get(&(img.as_str(), corr)) {
-                let cell = if passed {
-                    format!("{:3.0}% OK", pct)
+        println!();
+        println!("=== Comparison: qcow2-rescue vs qemu-img repair ===");
+        println!("  (cell format: rescue% / qemu%)");
+        println!();
+
+        // Header
+        print!("{:<nw$} |", "Image");
+        for hdr in COL_HEADERS {
+            print!("{:^width$}|", hdr, width = cw);
+        }
+        println!();
+        print!("{:-<nw$}-+", "");
+        for _ in COL_HEADERS {
+            print!("{:-<width$}+", "", width = cw);
+        }
+        println!();
+
+        // Rows
+        for img in &images {
+            print!("{:<nw$} |", img);
+            for &corr in CORRUPTION_COLS {
+                if let Some(&(_, rpct, qpct)) = lookup.get(&(img.as_str(), corr)) {
+                    let qstr = match qpct {
+                        Some(q) => format!("{q:3.0}"),
+                        None => " --".into(),
+                    };
+                    let cell = format!("{:3.0} / {}", rpct, qstr);
+                    print!("{:^width$}|", cell, width = cw);
                 } else {
-                    format!("{:3.0}% FAIL", pct)
-                };
-                print!("{:^width$}|", cell, width = COL_WIDTH);
+                    print!("{:^width$}|", "-", width = cw);
+                }
+            }
+            println!();
+        }
+
+        // Separator
+        print!("{:-<nw$}-+", "");
+        for _ in COL_HEADERS {
+            print!("{:-<width$}+", "", width = cw);
+        }
+        println!();
+
+        // Summary: average per corruption
+        print!("{:<nw$} |", "avg rescue");
+        for &corr in CORRUPTION_COLS {
+            let vals: Vec<f64> = results.iter()
+                .filter(|r| r.corruption == corr)
+                .map(|r| r.match_pct)
+                .collect();
+            let avg = if vals.is_empty() { 0.0 } else { vals.iter().sum::<f64>() / vals.len() as f64 };
+            print!("{:^width$}|", format!("{avg:5.1}%"), width = cw);
+        }
+        println!();
+
+        print!("{:<nw$} |", "avg qemu");
+        for &corr in CORRUPTION_COLS {
+            let vals: Vec<f64> = results.iter()
+                .filter(|r| r.corruption == corr)
+                .filter_map(|r| r.qemu_match_pct)
+                .collect();
+            if vals.is_empty() {
+                print!("{:^width$}|", "--", width = cw);
             } else {
-                print!("{:^width$}|", "-", width = COL_WIDTH);
+                let avg = vals.iter().sum::<f64>() / vals.len() as f64;
+                print!("{:^width$}|", format!("{avg:5.1}%"), width = cw);
             }
         }
         println!();
-    }
 
-    // Separator
-    print!("{:-<nw$}-+", "");
-    for _ in COL_HEADERS {
-        print!("{:-<width$}+", "", width = COL_WIDTH);
-    }
-    println!();
+        // Wins comparison
+        println!();
+        let mut rescue_wins = 0u32;
+        let mut qemu_wins = 0u32;
+        let mut ties = 0u32;
+        for r in results {
+            if let Some(q) = r.qemu_match_pct {
+                if r.match_pct > q + 0.1 {
+                    rescue_wins += 1;
+                } else if q > r.match_pct + 0.1 {
+                    qemu_wins += 1;
+                } else {
+                    ties += 1;
+                }
+            }
+        }
+        println!("  rescue wins: {rescue_wins} | qemu wins: {qemu_wins} | ties: {ties}");
+    } else {
+        // Original rescue-only matrix
+        println!();
+        print!("{:<nw$} |", "Image");
+        for hdr in COL_HEADERS {
+            print!("{:^width$}|", hdr, width = COL_WIDTH);
+        }
+        println!();
+        print!("{:-<nw$}-+", "");
+        for _ in COL_HEADERS {
+            print!("{:-<width$}+", "", width = COL_WIDTH);
+        }
+        println!();
 
-    // Per-corruption summary
-    print!("{:<nw$} |", "PASSED");
-    for &corr in CORRUPTION_COLS {
-        let p = results.iter().filter(|r| r.corruption == corr && r.passed).count();
-        let t = results.iter().filter(|r| r.corruption == corr).count();
-        let cell = format!("{p}/{t}");
-        print!("{:^width$}|", cell, width = COL_WIDTH);
+        for img in &images {
+            print!("{:<nw$} |", img);
+            for &corr in CORRUPTION_COLS {
+                if let Some(&(passed, pct, _)) = lookup.get(&(img.as_str(), corr)) {
+                    let cell = if passed {
+                        format!("{:3.0}% OK", pct)
+                    } else {
+                        format!("{:3.0}% FAIL", pct)
+                    };
+                    print!("{:^width$}|", cell, width = COL_WIDTH);
+                } else {
+                    print!("{:^width$}|", "-", width = COL_WIDTH);
+                }
+            }
+            println!();
+        }
+
+        print!("{:-<nw$}-+", "");
+        for _ in COL_HEADERS {
+            print!("{:-<width$}+", "", width = COL_WIDTH);
+        }
+        println!();
+
+        print!("{:<nw$} |", "PASSED");
+        for &corr in CORRUPTION_COLS {
+            let p = results.iter().filter(|r| r.corruption == corr && r.passed).count();
+            let t = results.iter().filter(|r| r.corruption == corr).count();
+            let cell = format!("{p}/{t}");
+            print!("{:^width$}|", cell, width = COL_WIDTH);
+        }
+        println!();
     }
-    println!();
 
     let total = results.len();
     let passed = results.iter().filter(|r| r.passed).count();
