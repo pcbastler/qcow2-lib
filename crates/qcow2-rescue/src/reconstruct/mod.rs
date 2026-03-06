@@ -95,6 +95,7 @@ pub fn reconstruct_with_strategy(
     )> = None;
 
     for try_extended in [false, true] {
+      for validate_l1_against_scan in [false, true] {
         let geo = ClusterGeometry {
             cluster_bits,
             extended_l2: try_extended,
@@ -110,9 +111,10 @@ pub fn reconstruct_with_strategy(
             geo,
             is_encrypted,
             conflict_strategy,
+            validate_l1_against_scan,
         );
 
-        let score = score_plausibility(
+        let mut score = score_plausibility(
             &mappings,
             file_size,
             virtual_size,
@@ -120,6 +122,21 @@ pub fn reconstruct_with_strategy(
             &valid_data_offsets,
             header_extended_l2 == Some(try_extended),
         );
+        // Penalize configurations with many suspicious (unconfirmed) L2 tables —
+        // a sign that L1 entries are garbage pointing to random data
+        score.0 -= suspicious as i64 * 10;
+
+        // Bonus for recoverable orphan data clusters: each orphan that could
+        // be assigned via heuristic is valuable. This makes the validated
+        // variant win when garbage L1 entries create false mappings that
+        // block orphan recovery.
+        let referenced: HashSet<u64> = mappings.values().map(|m| m.host_offset).collect();
+        let potential_orphans = cluster_map.clusters.iter()
+            .filter(|c| matches!(c.cluster_type, ClusterTypeReport::Data | ClusterTypeReport::Compressed { .. })
+                && !referenced.contains(&c.offset))
+            .count();
+        score.0 += potential_orphans as i64 * 2;
+
 
         let is_better = match &best_result {
             None => true,
@@ -129,9 +146,10 @@ pub fn reconstruct_with_strategy(
         if is_better {
             best_result = Some((mappings, verified, suspicious, l1_entries, conflicts, geo, score));
         }
+      }
     }
 
-    let (mappings, l2_tables_verified, l2_tables_suspicious, l1_entries_found, total_conflicts, _geo, _score) =
+    let (mut mappings, l2_tables_verified, l2_tables_suspicious, l1_entries_found, total_conflicts, _geo, _score) =
         best_result.unwrap_or_else(|| {
             let geo = ClusterGeometry { cluster_bits, extended_l2: false };
             (BTreeMap::new(), 0, 0, 0, 0, geo, (0, false))
@@ -143,14 +161,45 @@ pub fn reconstruct_with_strategy(
         .map(|m| m.host_offset)
         .collect();
 
-    let orphan_data_clusters = cluster_map
+    let mut orphan_data_offsets: Vec<u64> = cluster_map
         .clusters
         .iter()
         .filter(|c| {
             matches!(c.cluster_type, ClusterTypeReport::Data | ClusterTypeReport::Compressed { .. })
                 && !referenced_hosts.contains(&c.offset)
         })
-        .count() as u64;
+        .map(|c| c.offset)
+        .collect();
+    orphan_data_offsets.sort();
+
+    let orphan_data_clusters = orphan_data_offsets.len() as u64;
+
+    // Phase 2c2: Positional heuristic for orphan data clusters.
+    // When L2 tables are missing/corrupted, try to assign orphan data clusters
+    // to unmapped guest offsets by their sequential disk position.
+    if !orphan_data_offsets.is_empty() {
+        let occupied_guests: HashSet<u64> = mappings.keys().copied().collect();
+        let mut next_guest = 0u64;
+        for host_offset in &orphan_data_offsets {
+            // Skip guest offsets that already have a mapping
+            while occupied_guests.contains(&(next_guest * cluster_size)) {
+                next_guest += 1;
+            }
+            let guest_offset = next_guest * cluster_size;
+            mappings.entry(guest_offset).or_insert(MappingEntry {
+                guest_offset,
+                host_offset: *host_offset,
+                compressed: false,
+                encrypted: false,
+                source: MappingSource::Heuristic,
+                subclusters: None,
+            });
+            next_guest += 1;
+        }
+        eprintln!("  WARNING: {} orphan data clusters found without L2 mapping — \
+            assigning to guest offsets by disk position (heuristic, may be wrong!)",
+            orphan_data_offsets.len());
+    }
 
     let mappings_from_l2 = mappings
         .values()
@@ -191,6 +240,7 @@ fn reconstruct_with_geometry(
     geo: ClusterGeometry,
     is_encrypted: bool,
     conflict_strategy: ConflictStrategy,
+    validate_l1_against_scan: bool,
 ) -> (BTreeMap<u64, MappingEntry>, u32, u32, u32, u64) {
     let file_size = file.seek(SeekFrom::End(0)).unwrap_or(0);
     let mut mappings: BTreeMap<u64, MappingEntry> = BTreeMap::new();
@@ -218,6 +268,16 @@ fn reconstruct_with_geometry(
             }
 
             let verified = scan_l2_offsets.contains(&l2_offset);
+
+            // When validation is enabled and the scanner found L2 clusters,
+            // only follow L1 entries that point to scanner-confirmed L2 offsets.
+            // This prevents garbage L1 entries from reading random data as L2
+            // tables and creating false mappings.
+            if !verified && validate_l1_against_scan && !scan_l2_offsets.is_empty() {
+                l2_tables_suspicious += 1;
+                continue;
+            }
+
             l1_referenced_l2.insert(l2_offset);
 
             match read_l2_table(file, l2_offset, cluster_size, geo) {
@@ -250,45 +310,100 @@ fn reconstruct_with_geometry(
         }
     }
 
-    // Orphan L2 tables from the scanner
+    // Orphan L2 tables from the scanner.
+    // Two-pass approach: first validate which orphan L2s are real (entries point
+    // to known data clusters), then infer L1 indices from the validated set only.
     let l2_entries_per_table = geo.l2_entries_per_table();
+
+    // Pass 1: Read and validate orphan L2 tables
+    let mut validated_orphan_l2: Vec<(u64, Vec<(u32, L2Entry)>)> = Vec::new();
 
     for &l2_offset in scan_l2_offsets {
         if l1_referenced_l2.contains(&l2_offset) {
             continue;
         }
 
-        let inferred_l1_idx = infer_l1_index_for_orphan_l2(
-            l2_offset,
-            l1_result,
-            scan_l2_offsets,
-            cluster_size,
-        );
-
         match read_l2_table(file, l2_offset, cluster_size, geo) {
             Ok(entries) => {
-                l2_tables_verified += 1;
-
-                if let Some(l1_idx) = inferred_l1_idx {
-                    conflicts += add_l2_mappings(
-                        &entries,
-                        l1_idx,
-                        l2_entries_per_table,
-                        cluster_size,
-                        cluster_bits,
-                        MappingSource::Heuristic,
-                        geo.extended_l2,
-                        file_size,
-                        valid_data_offsets,
-                        is_encrypted,
-                        conflict_strategy,
-                        &mut mappings,
-                    );
+                // Validate orphan L2: check that entries produce sensible offsets.
+                // A real L2 table should have entries that are:
+                //  - cluster-aligned (for standard entries)
+                //  - within the file bounds
+                //  - pointing to known Data/Compressed clusters (if scanner data available)
+                let mut hits = 0usize;
+                let mut plausible = 0usize;
+                let mut nonzero = 0usize;
+                for &(_, ref entry) in &entries {
+                    let host = match entry {
+                        L2Entry::Standard { host_offset, .. } if host_offset.0 > 0 => {
+                            Some(host_offset.0)
+                        }
+                        L2Entry::Compressed(desc) if desc.host_offset > 0 => {
+                            Some(desc.host_offset & !(cluster_size - 1))
+                        }
+                        _ => None,
+                    };
+                    if let Some(h) = host {
+                        nonzero += 1;
+                        // Basic plausibility: cluster-aligned and within file
+                        let aligned = h % cluster_size == 0;
+                        let in_file = h < file_size;
+                        if aligned && in_file {
+                            plausible += 1;
+                            // Stronger check: points to scanner-confirmed data cluster
+                            if !valid_data_offsets.is_empty() && valid_data_offsets.contains(&h) {
+                                hits += 1;
+                            }
+                        }
+                    }
                 }
+                // Reject if most nonzero entries aren't even plausible offsets
+                if nonzero > 0 && plausible * 2 < nonzero {
+                    l2_tables_suspicious += 1;
+                    continue;
+                }
+                // Reject if scanner data available but <25% of entries point to known data
+                if nonzero > 0 && !valid_data_offsets.is_empty() && hits * 4 < nonzero {
+                    l2_tables_suspicious += 1;
+                    continue;
+                }
+
+                validated_orphan_l2.push((l2_offset, entries));
             }
             Err(_) => {
                 l2_tables_suspicious += 1;
             }
+        }
+    }
+
+    // Pass 2: Infer L1 indices from validated orphan L2 offsets only
+    let validated_offsets: Vec<u64> = validated_orphan_l2.iter().map(|(off, _)| *off).collect();
+
+    for (l2_offset, entries) in validated_orphan_l2 {
+        l2_tables_verified += 1;
+
+        let inferred_l1_idx = infer_l1_index_for_orphan_l2(
+            l2_offset,
+            l1_result,
+            &validated_offsets,
+            cluster_size,
+        );
+
+        if let Some(l1_idx) = inferred_l1_idx {
+            conflicts += add_l2_mappings(
+                &entries,
+                l1_idx,
+                l2_entries_per_table,
+                cluster_size,
+                cluster_bits,
+                MappingSource::Heuristic,
+                geo.extended_l2,
+                file_size,
+                valid_data_offsets,
+                is_encrypted,
+                conflict_strategy,
+                &mut mappings,
+            );
         }
     }
 
@@ -1175,9 +1290,11 @@ mod tests {
         let cluster_map = crate::scan::scan_file(tmpfile.path(), cluster_size).unwrap();
         let report = reconstruct(tmpfile.path(), &cluster_map).unwrap();
 
-        // Only the valid mapping should survive plausibility filtering
-        assert_eq!(report.mappings_total, 1);
-        assert_eq!(report.mappings[0].guest_offset, 0);
+        // Only the valid mapping should survive L2 plausibility filtering
+        assert_eq!(report.mappings_from_l2, 1);
+        // First mapping (from L2) should be at guest offset 0
+        assert!(report.mappings.iter().any(|m|
+            m.guest_offset == 0 && matches!(m.source, MappingSource::L2Table)));
     }
 
     #[test]
@@ -1230,9 +1347,10 @@ mod tests {
         let cluster_map = crate::scan::scan_file(tmpfile.path(), cluster_size).unwrap();
         let report = reconstruct(tmpfile.path(), &cluster_map).unwrap();
 
-        // Only L2[2] (pointing to actual data) should survive
-        assert_eq!(report.mappings_total, 1);
-        assert_eq!(report.mappings[0].guest_offset, 2 * cluster_size);
+        // Only L2[2] (pointing to actual data) should survive from L2
+        assert_eq!(report.mappings_from_l2, 1);
+        assert!(report.mappings.iter().any(|m|
+            m.guest_offset == 2 * cluster_size && matches!(m.source, MappingSource::L2Table)));
     }
 
     #[test]

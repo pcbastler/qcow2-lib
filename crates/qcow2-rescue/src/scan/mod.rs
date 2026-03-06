@@ -143,6 +143,11 @@ pub fn scan_file(path: &Path, cluster_size: u64) -> Result<ClusterMapReport> {
         eprintln!("\r  scanning: 100%");
     }
 
+    // Post-scan validation: reclassify L2 tables whose entries don't point to
+    // known Data/Compressed clusters. This catches false positives where PRNG or
+    // other structured data passes the L2 heuristic.
+    refine_l2_classification(&mut clusters, &mut summary, cluster_size);
+
     let cluster_size_source = "auto-detected".to_string();
 
     Ok(ClusterMapReport {
@@ -154,6 +159,80 @@ pub fn scan_file(path: &Path, cluster_size: u64) -> Result<ClusterMapReport> {
         summary,
         clusters,
     })
+}
+
+/// Post-scan refinement: reclassify false-positive L2 tables as Data.
+///
+/// In a healthy QCOW2, each L2 table maps up to cluster_size/8 data clusters,
+/// so the number of L2 tables should be much smaller than the number of
+/// data+compressed clusters. When L2 tables outnumber data clusters, most are
+/// false positives (structured data that passes the L2 heuristic).
+///
+/// We keep only a plausible number of L2 tables (the earliest ones by offset,
+/// since real L2s are allocated near the metadata area) and reclassify the rest.
+fn refine_l2_classification(
+    clusters: &mut [ClusterInfo],
+    summary: &mut ClusterSummary,
+    cluster_size: u64,
+) {
+    use crate::report::ClusterTypeReport;
+
+    let l2_count = clusters
+        .iter()
+        .filter(|c| matches!(c.cluster_type, ClusterTypeReport::L2Table { .. }))
+        .count();
+
+    if l2_count <= 1 {
+        return; // Nothing to refine
+    }
+
+    let data_count = clusters
+        .iter()
+        .filter(|c| matches!(c.cluster_type, ClusterTypeReport::Data | ClusterTypeReport::Compressed { .. }))
+        .count();
+
+    // In a normal image, 1 L2 table maps cluster_size/8 data clusters.
+    // So we expect at most ceil(data_count / entries_per_l2) L2 tables.
+    // If there's no data at all, we expect at most 1 L2 table per
+    // non-metadata cluster as a generous upper bound.
+    let entries_per_l2 = (cluster_size / 8) as usize;
+    let expected_l2 = if data_count > 0 {
+        (data_count + entries_per_l2 - 1) / entries_per_l2
+    } else {
+        // No data clusters found — all "L2" tables might be misclassified data.
+        // Keep at most 1 L2 (the one closest to the header area).
+        1
+    };
+
+    // Allow some slack: keep up to 2x expected or at least 2
+    let keep = (expected_l2 * 2).max(2).min(l2_count);
+    if l2_count <= keep {
+        return;
+    }
+
+    // L2 tables sorted by index (= by offset). Keep the first `keep`, reclassify rest.
+    let l2_indices: Vec<usize> = clusters
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c.cluster_type, ClusterTypeReport::L2Table { .. }))
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut reclassified = 0u32;
+    for &idx in &l2_indices[keep..] {
+        clusters[idx].cluster_type = ClusterTypeReport::Data;
+        reclassified += 1;
+    }
+
+    if reclassified > 0 {
+        summary.l2_tables -= reclassified as u64;
+        summary.data += reclassified as u64;
+        eprintln!(
+            "  info: reclassified {} false-positive L2 tables as Data \
+             (found {} L2 but expected ~{} for {} data clusters, keeping {})",
+            reclassified, l2_count, expected_l2, data_count, keep
+        );
+    }
 }
 
 fn update_summary(summary: &mut ClusterSummary, ct: &crate::report::ClusterTypeReport) {

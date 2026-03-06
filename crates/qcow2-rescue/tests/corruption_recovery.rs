@@ -219,21 +219,39 @@ fn t03_header_cluster_bits_corrupted() {
     corrupt_bytes(&img, 20, &0u32.to_be_bytes());
 
     let out_dir = dir.path().join("out");
-    let out_path = out_dir.join("recovered.raw");
     // We provide cluster_size override, so it should still work
-    let options = default_options();
-    let result = recover_single(&img, &out_path, &options);
-    if let Ok(report) = result {
-        let recovered = read_recovered_raw(&out_path);
-        let matches = count_matching_clusters(&recovered, &original);
-        // Should recover most data since we override cluster size
-        assert!(matches >= NUM_DATA_CLUSTERS as usize / 2,
-            "should recover at least half the clusters with cluster_size override");
-    }
+    let (out_path, report) = run_recovery(&img, &out_dir);
+    let recovered = read_recovered_raw(&out_path);
+
+    // cluster_bits=0 in header but override provides correct size — full recovery
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover all data with cluster_size override");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
 }
 
 #[test]
 fn t04_header_virtual_size_corrupted() {
+    let dir = TempDir::new().unwrap();
+    let img = create_test_image(dir.path());
+    let original = read_original_data(&img);
+
+    // virtual_size at offset 24, 8 bytes. Set to 0 (completely invalid).
+    corrupt_bytes(&img, 24, &0u64.to_be_bytes());
+
+    let out_dir = dir.path().join("out");
+    let (out_path, report) = run_recovery(&img, &out_dir);
+    let recovered = read_recovered_raw(&out_path);
+
+    // virtual_size=0 is obviously wrong; recovery should infer size from mappings
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover all data via mapping-inferred virtual_size");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
+}
+
+#[test]
+fn t04b_header_virtual_size_plausible_but_wrong() {
     let dir = TempDir::new().unwrap();
     let img = create_test_image(dir.path());
     let original = read_original_data(&img);
@@ -360,8 +378,11 @@ fn t09_l1_table_filled_with_garbage() {
     let (out_path, report) = run_recovery(&img, &out_dir);
     let recovered = read_recovered_raw(&out_path);
 
-    // Recovery should not crash; it may find data via heuristic scan
-    assert!(report.clusters_written >= 0); // always true, just checking no panic
+    // L1 garbage is filtered out, scanner finds real L2 + data clusters,
+    // orphan L2 validation rejects false-positive L2 tables, full recovery works
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize,
+        "should recover all clusters despite garbage L1, got {matches}/{}", NUM_DATA_CLUSTERS);
 }
 
 // ============================================================================
@@ -408,9 +429,12 @@ fn t11_l2_table_entirely_zeroed() {
         let (out_path, report) = run_recovery(&img, &out_dir);
         let recovered = read_recovered_raw(&out_path);
 
-        // All mappings from this L2 are lost, but data clusters still exist on disk
-        // Heuristic recovery may still find orphan data clusters
-        assert!(report.clusters_written > 0 || report.clusters_zeroed > 0);
+        // L2 zeroed but data clusters still on disk — orphan heuristic assigns
+        // them by disk position, recovering all data
+        assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+            "should recover all data via orphan heuristic");
+        let matches = count_matching_clusters(&recovered, &original);
+        assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
     }
 }
 
@@ -659,17 +683,15 @@ fn t19_header_and_l2_corrupted() {
     }
 
     let out_dir = dir.path().join("out");
-    fs::create_dir_all(&out_dir).unwrap();
-    let out_path = out_dir.join("recovered.raw");
-    let options = default_options();
-    let result = recover_single(&img, &out_path, &options);
+    let (out_path, report) = run_recovery(&img, &out_dir);
+    let recovered = read_recovered_raw(&out_path);
 
-    // Header AND L2 both corrupted — no way to find guest-to-host mappings.
-    // Recovery should complete without crash.
-    match result {
-        Ok(report) => { let _ = report; }
-        Err(_) => {}
-    }
+    // Header AND L2 both corrupted — but orphan heuristic finds data clusters
+    // and assigns them by disk position
+    assert!(report.clusters_written >= NUM_DATA_CLUSTERS,
+        "should recover all data via orphan heuristic");
+    let matches = count_matching_clusters(&recovered, &original);
+    assert_eq!(matches, NUM_DATA_CLUSTERS as usize);
 }
 
 #[test]
