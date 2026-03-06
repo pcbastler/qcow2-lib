@@ -8,6 +8,7 @@ rust-version = "1.70"
 
 [dependencies]
 qcow2-format = { path = "../qcow2-format" }
+qcow2-core = { path = "../qcow2-core" }
 qcow2 = { path = "../qcow2" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -16,6 +17,7 @@ byteorder = "1"
 
 [dev-dependencies]
 tempfile = "3"
+flate2 = "1"
 
 [[bin]]
 name = "qcow2-rescue"

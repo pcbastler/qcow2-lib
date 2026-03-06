@@ -297,12 +297,65 @@ pub struct ReconstructedTablesReport {
     pub mappings_from_l2: u64,
     /// Orphan data clusters (not referenced by any L2).
     pub orphan_data_clusters: u64,
-    /// Refcount mismatches found.
-    pub refcount_mismatches: u64,
+    /// Refcount cross-check results (None if refcount table unreadable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refcount_check: Option<RefcountCheckReport>,
+    /// Content validation results (decompression/decryption probes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_validation: Option<ContentValidationReport>,
     /// All mappings.
     pub mappings: Vec<MappingEntry>,
     /// Virtual size from header (if readable).
     pub virtual_size: Option<u64>,
+}
+
+/// Refcount cross-check results.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RefcountCheckReport {
+    /// Refcount order used (from header).
+    pub refcount_order: u32,
+    /// Total clusters checked.
+    pub clusters_checked: u64,
+    /// Clusters with correct refcount (== 1).
+    pub correct: u64,
+    /// Clusters with refcount == 0 (leaked — referenced by L2 but refcount says free).
+    pub leaked: u64,
+    /// Clusters with refcount > 1 (shared — possible snapshot or corruption).
+    pub shared: u64,
+    /// Clusters whose refcount block was unreadable.
+    pub unreadable: u64,
+    /// Per-mismatch details (capped to avoid giant reports).
+    pub mismatches: Vec<RefcountMismatch>,
+}
+
+/// A single refcount mismatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefcountMismatch {
+    /// Host cluster offset.
+    pub host_offset: u64,
+    /// Guest offset that references this cluster.
+    pub guest_offset: u64,
+    /// Expected refcount (1 for normal mapping).
+    pub expected: u64,
+    /// Actual refcount found on disk.
+    pub actual: u64,
+}
+
+/// Content validation results from decompression/decryption probes.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ContentValidationReport {
+    /// Compressed clusters probed.
+    pub compressed_probed: u64,
+    /// Compressed clusters that decompressed successfully.
+    pub compressed_ok: u64,
+    /// Compressed clusters that failed to decompress.
+    pub compressed_failed: u64,
+    /// Encrypted clusters probed.
+    pub encrypted_probed: u64,
+    /// Encrypted clusters that decrypted successfully.
+    pub encrypted_ok: u64,
+    /// Encrypted clusters that failed to decrypt.
+    pub encrypted_failed: u64,
 }
 
 /// A node in the backing file tree.
@@ -333,4 +386,60 @@ pub struct TreeReport {
     pub roots: Vec<TreeNode>,
     /// All recoverable paths (leaf → root chains).
     pub paths: Vec<Vec<String>>,
+}
+
+/// Phase 4 output: recovery result for a single layer or flattened chain.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecoveryReport {
+    /// Output file path.
+    pub output_path: String,
+    /// Output format used.
+    pub output_format: String,
+    /// Virtual size of the output image.
+    pub virtual_size: u64,
+    /// Cluster size used.
+    pub cluster_size: u64,
+    /// Source files involved (base → leaf order).
+    pub source_files: Vec<String>,
+    /// Total guest clusters written (non-zero).
+    pub clusters_written: u64,
+    /// Clusters skipped due to read errors.
+    pub clusters_failed: u64,
+    /// Clusters that were zero-filled (unallocated or read error with skip_corrupt).
+    pub clusters_zeroed: u64,
+    /// Bytes written to output.
+    pub bytes_written: u64,
+    /// Per-layer statistics.
+    pub layer_stats: Vec<LayerRecoveryStat>,
+    /// Encryption recovery info (if the source had encrypted clusters).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption_info: Option<EncryptionRecoveryInfo>,
+}
+
+/// Encryption recovery information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptionRecoveryInfo {
+    /// Whether a LUKS header was found.
+    pub luks_header_found: bool,
+    /// Offset of the LUKS header in the source image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub luks_header_offset: Option<u64>,
+    /// Whether clusters were decrypted (password worked).
+    pub decrypted: bool,
+    /// Whether the decryption probe showed valid data structure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_ok: Option<bool>,
+}
+
+/// Per-layer recovery statistics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerRecoveryStat {
+    /// Source file path.
+    pub file_path: String,
+    /// Mappings found in this layer.
+    pub mappings_found: u64,
+    /// Mappings contributed to final output (not overridden by higher layer).
+    pub mappings_used: u64,
+    /// Clusters that failed to read from this layer.
+    pub read_failures: u64,
 }

@@ -5,10 +5,12 @@
 
 mod config;
 mod error;
+mod recover;
 mod reconstruct;
 mod report;
 mod scan;
 mod tree;
+mod validate;
 
 use std::path::PathBuf;
 
@@ -226,7 +228,80 @@ fn count_tree_nodes(nodes: &[report::TreeNode]) -> usize {
         .sum()
 }
 
-fn run_recover(_config: RescueConfig) -> Result<()> {
-    println!("recover: not yet implemented (analyze works)");
+fn run_recover(config: RescueConfig) -> Result<()> {
+    let input = &config.input;
+    if !input.exists() {
+        return Err(RescueError::InputNotFound { path: input.clone() });
+    }
+
+    std::fs::create_dir_all(&config.output).map_err(|e| RescueError::OutputDirFailed {
+        path: config.output.clone(),
+        reason: e.to_string(),
+    })?;
+
+    let format = config.format.unwrap_or(OutputFormat::Raw);
+
+    let options = recover::RecoverOptions {
+        format,
+        skip_corrupt: true,
+        password: config.password,
+        cluster_size_override: config.cluster_size_override,
+    };
+
+    // Determine if we have a chain or a single file
+    let report = if input.is_dir() {
+        // Directory: detect backing chain
+        println!("detecting backing file tree...");
+        let tree_report = tree::build_tree(input)?;
+
+        if tree_report.paths.is_empty() {
+            return Err(RescueError::NoHeaderFound);
+        }
+
+        // Use the first path (leaf → root). Reverse to get base → leaf.
+        let chain: Vec<PathBuf> = tree_report.paths[0]
+            .iter()
+            .rev()
+            .map(PathBuf::from)
+            .collect();
+
+        println!(
+            "recovering chain of {} layers: {}",
+            chain.len(),
+            chain.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string()).collect::<Vec<_>>().join(" → "),
+        );
+
+        let ext = match format {
+            OutputFormat::Raw => "raw",
+            OutputFormat::Qcow2 | OutputFormat::Chain => "qcow2",
+        };
+        let out_path = config.output.join(format!("recovered.{ext}"));
+
+        recover::recover_chain(&chain, &out_path, &options)?
+    } else {
+        // Single file
+        println!("recovering single image: {}", input.display());
+
+        let ext = match format {
+            OutputFormat::Raw => "raw",
+            OutputFormat::Qcow2 | OutputFormat::Chain => "qcow2",
+        };
+        let out_path = config.output.join(format!("recovered.{ext}"));
+
+        recover::recover_single(input, &out_path, &options)?
+    };
+
+    println!(
+        "recovery complete: {} clusters written, {} failed, {} zeroed",
+        report.clusters_written, report.clusters_failed, report.clusters_zeroed,
+    );
+    println!("output: {}", report.output_path);
+
+    // Write report
+    let report_path = config.output.join("recovery_report.json");
+    let json = serde_json::to_string_pretty(&report)?;
+    std::fs::write(&report_path, json)?;
+    println!("wrote {}", report_path.display());
+
     Ok(())
 }

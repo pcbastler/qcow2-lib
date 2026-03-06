@@ -19,6 +19,7 @@ use byteorder::{BigEndian, ByteOrder};
 
 use qcow2_format::constants::*;
 use qcow2_format::l2::L2Entry;
+use qcow2_format::refcount::{read_refcount_table, RefcountBlock};
 use qcow2_format::types::ClusterGeometry;
 
 use crate::error::Result;
@@ -49,6 +50,9 @@ pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<Recons
 
     // Detect extended_l2 from header (may be corrupt).
     let header_extended_l2 = detect_extended_l2(&mut file, cluster_size);
+
+    // Detect encryption from header.
+    let is_encrypted = detect_encryption(&mut file, cluster_size);
 
     // Build set of offsets that are valid mapping targets (Data or Compressed clusters).
     // An L2 entry pointing to a Header, L1, L2, Refcount, or Empty cluster is implausible.
@@ -92,6 +96,7 @@ pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<Recons
             cluster_size,
             cluster_bits,
             geo,
+            is_encrypted,
         );
 
         let score = score_plausibility(
@@ -141,6 +146,9 @@ pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<Recons
 
     let mappings_vec: Vec<MappingEntry> = mappings.into_values().collect();
 
+    // Phase 2d: Refcount cross-check
+    let refcount_check = cross_check_refcounts(&mut file, cluster_size, &mappings_vec);
+
     Ok(ReconstructedTablesReport {
         file_path: cluster_map.file_path.clone(),
         l1_entries: l1_entries_found,
@@ -149,7 +157,8 @@ pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<Recons
         mappings_total: mappings_vec.len() as u64,
         mappings_from_l2,
         orphan_data_clusters,
-        refcount_mismatches: 0, // TODO: refcount cross-check
+        refcount_check,
+        content_validation: None, // Filled in later by content validation pass
         mappings: mappings_vec,
         virtual_size,
     })
@@ -166,6 +175,7 @@ fn reconstruct_with_geometry(
     cluster_size: u64,
     cluster_bits: u32,
     geo: ClusterGeometry,
+    is_encrypted: bool,
 ) -> (BTreeMap<u64, MappingEntry>, u32, u32, u32) {
     let file_size = file.seek(SeekFrom::End(0)).unwrap_or(0);
     let mut mappings: BTreeMap<u64, MappingEntry> = BTreeMap::new();
@@ -212,6 +222,7 @@ fn reconstruct_with_geometry(
                         geo.extended_l2,
                         file_size,
                         valid_data_offsets,
+                        is_encrypted,
                         &mut mappings,
                     );
                 }
@@ -251,6 +262,7 @@ fn reconstruct_with_geometry(
                         geo.extended_l2,
                         file_size,
                         valid_data_offsets,
+                        is_encrypted,
                         &mut mappings,
                     );
                 }
@@ -345,6 +357,21 @@ fn detect_extended_l2(file: &mut std::fs::File, cluster_size: u64) -> Option<boo
     file.read_exact(&mut header_buf).ok()?;
     let header = qcow2_format::Header::read_from(&header_buf).ok()?;
     Some(header.has_extended_l2())
+}
+
+/// Detect whether the image uses LUKS encryption from the header.
+fn detect_encryption(file: &mut std::fs::File, cluster_size: u64) -> bool {
+    let mut header_buf = vec![0u8; 4096.min(cluster_size as usize)];
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return false;
+    }
+    if file.read_exact(&mut header_buf).is_err() {
+        return false;
+    }
+    match qcow2_format::Header::read_from(&header_buf) {
+        Ok(header) => header.crypt_method == CRYPT_LUKS,
+        Err(_) => false,
+    }
 }
 
 /// Extract the virtual_size from the first header found in the cluster map.
@@ -448,6 +475,7 @@ fn add_l2_mappings(
     extended_l2: bool,
     file_size: u64,
     valid_data_offsets: &HashSet<u64>,
+    is_encrypted: bool,
     mappings: &mut BTreeMap<u64, MappingEntry>,
 ) {
     for &(l2_idx, ref entry) in entries {
@@ -484,7 +512,7 @@ fn add_l2_mappings(
                         host_offset: host_offset.0,
                         source,
                         compressed: false,
-                        encrypted: false,
+                        encrypted: is_encrypted,
                         subclusters,
                     });
                 }
@@ -501,7 +529,7 @@ fn add_l2_mappings(
                         host_offset: desc.host_offset,
                         source,
                         compressed: true,
-                        encrypted: false,
+                        encrypted: is_encrypted,
                         subclusters: None,
                     });
                 }
@@ -536,6 +564,153 @@ fn infer_l1_index_for_orphan_l2(
     // Without L1 data, we cannot determine the guest address range.
     // Future enhancement: use data pattern matching or known file signatures.
     None
+}
+
+/// Cross-check refcounts for all mapped host clusters.
+///
+/// Reads the refcount table and blocks from the image (via header), then
+/// looks up the refcount for each host offset in the reconstructed mappings.
+/// Normal allocated clusters should have refcount == 1.
+///
+/// Returns `None` if the header or refcount table is unreadable.
+fn cross_check_refcounts(
+    file: &mut std::fs::File,
+    cluster_size: u64,
+    mappings: &[MappingEntry],
+) -> Option<RefcountCheckReport> {
+    if mappings.is_empty() {
+        return None;
+    }
+
+    // Read header for refcount table location and order
+    let mut header_buf = vec![0u8; 4096.min(cluster_size as usize)];
+    file.seek(SeekFrom::Start(0)).ok()?;
+    file.read_exact(&mut header_buf).ok()?;
+    let header = qcow2_format::Header::read_from(&header_buf).ok()?;
+
+    let rt_offset = header.refcount_table_offset.0;
+    let rt_clusters = header.refcount_table_clusters;
+    let refcount_order = header.refcount_order;
+
+    if rt_offset == 0 || rt_clusters == 0 {
+        return None;
+    }
+
+    // Read refcount table
+    let rt_entry_count = (rt_clusters as u64 * cluster_size / REFCOUNT_TABLE_ENTRY_SIZE as u64) as u32;
+    let rt_byte_size = rt_entry_count as usize * REFCOUNT_TABLE_ENTRY_SIZE;
+    let mut rt_buf = vec![0u8; rt_byte_size];
+    file.seek(SeekFrom::Start(rt_offset)).ok()?;
+    file.read_exact(&mut rt_buf).ok()?;
+
+    let rt_entries = read_refcount_table(&rt_buf, rt_entry_count).ok()?;
+
+    // Number of clusters covered by one refcount block
+    let refcount_bits = 1u32 << refcount_order;
+    let entries_per_block = (cluster_size as u32 * 8) / refcount_bits;
+
+    let mut correct = 0u64;
+    let mut leaked = 0u64;
+    let mut shared = 0u64;
+    let mut unreadable = 0u64;
+    let mut mismatches = Vec::new();
+    let max_mismatches = 1000;
+
+    // Cache for refcount blocks (block_offset → parsed block)
+    let mut block_cache: std::collections::HashMap<u64, Option<RefcountBlock>> =
+        std::collections::HashMap::new();
+
+    for m in mappings {
+        // Which cluster index is this host offset?
+        let cluster_idx = m.host_offset / cluster_size;
+
+        // Which refcount table entry covers this cluster?
+        let rt_idx = (cluster_idx / entries_per_block as u64) as usize;
+        if rt_idx >= rt_entries.len() {
+            unreadable += 1;
+            continue;
+        }
+
+        let block_offset = match rt_entries[rt_idx].block_offset() {
+            Some(off) => off.0,
+            None => {
+                // Refcount table entry is zero → cluster has refcount 0
+                leaked += 1;
+                if mismatches.len() < max_mismatches {
+                    mismatches.push(RefcountMismatch {
+                        host_offset: m.host_offset,
+                        guest_offset: m.guest_offset,
+                        expected: 1,
+                        actual: 0,
+                    });
+                }
+                continue;
+            }
+        };
+
+        // Read or get cached refcount block
+        let block = block_cache.entry(block_offset).or_insert_with(|| {
+            let mut buf = vec![0u8; cluster_size as usize];
+            if file.seek(SeekFrom::Start(block_offset)).is_err() {
+                return None;
+            }
+            if file.read_exact(&mut buf).is_err() {
+                return None;
+            }
+            RefcountBlock::read_from(&buf, refcount_order).ok()
+        });
+
+        let refcount = match block {
+            Some(b) => {
+                let idx_in_block = (cluster_idx % entries_per_block as u64) as u32;
+                match b.get(idx_in_block) {
+                    Ok(rc) => rc,
+                    Err(_) => {
+                        unreadable += 1;
+                        continue;
+                    }
+                }
+            }
+            None => {
+                unreadable += 1;
+                continue;
+            }
+        };
+
+        if refcount == 1 {
+            correct += 1;
+        } else if refcount == 0 {
+            leaked += 1;
+            if mismatches.len() < max_mismatches {
+                mismatches.push(RefcountMismatch {
+                    host_offset: m.host_offset,
+                    guest_offset: m.guest_offset,
+                    expected: 1,
+                    actual: 0,
+                });
+            }
+        } else {
+            shared += 1;
+            if mismatches.len() < max_mismatches {
+                mismatches.push(RefcountMismatch {
+                    host_offset: m.host_offset,
+                    guest_offset: m.guest_offset,
+                    expected: 1,
+                    actual: refcount,
+                });
+            }
+        }
+    }
+
+    Some(RefcountCheckReport {
+        refcount_order,
+        clusters_checked: correct + leaked + shared + unreadable,
+        correct,
+        leaked,
+        shared,
+        unreadable,
+        mismatches,
+    })
 }
 
 #[cfg(test)]
@@ -1000,5 +1175,178 @@ mod tests {
         for m in &report.mappings {
             assert!(m.subclusters.is_none(), "should be standard L2 (no subcluster info)");
         }
+    }
+
+    /// Helper: create a QCOW2 image with proper refcount table and block.
+    ///
+    /// Layout:
+    /// Cluster 0: header
+    /// Cluster 1: refcount table (1 cluster)
+    /// Cluster 2: refcount block (covers all clusters)
+    /// Cluster 3: L1 table
+    /// Cluster 4: L2 table (for L1[0])
+    /// Cluster 5+: data clusters
+    fn create_image_with_refcounts(
+        cluster_bits: u32,
+        virtual_size: u64,
+        l2_mappings: &[(u32, u64)], // (l2_index, host_offset)
+        refcount_overrides: &[(u64, u16)], // (cluster_index, refcount_value)
+    ) -> (tempfile::NamedTempFile, u64) {
+        let cluster_size = 1u64 << cluster_bits;
+        let l2_entries = cluster_size / 8;
+        let l1_entries = ((virtual_size + l2_entries * cluster_size - 1)
+            / (l2_entries * cluster_size)) as u32;
+
+        let rt_offset = cluster_size;       // cluster 1
+        let rb_offset = 2 * cluster_size;   // cluster 2
+        let l1_offset = 3 * cluster_size;   // cluster 3
+        let l2_offset = 4 * cluster_size;   // cluster 4
+        let data_start = 5 * cluster_size;  // cluster 5+
+
+        let num_data_clusters = l2_mappings.len() as u64;
+        let total_clusters = 5 + num_data_clusters;
+        let file_size = total_clusters * cluster_size;
+
+        let mut buf = vec![0u8; file_size as usize];
+
+        // Write QCOW2 header
+        BigEndian::write_u32(&mut buf[0..4], QCOW2_MAGIC);
+        BigEndian::write_u32(&mut buf[4..8], VERSION_3);
+        BigEndian::write_u32(&mut buf[20..24], cluster_bits);
+        BigEndian::write_u64(&mut buf[24..32], virtual_size);
+        BigEndian::write_u32(&mut buf[36..40], l1_entries);
+        BigEndian::write_u64(&mut buf[40..48], l1_offset);
+        // refcount_table_offset
+        BigEndian::write_u64(&mut buf[48..56], rt_offset);
+        // refcount_table_clusters = 1
+        BigEndian::write_u32(&mut buf[56..60], 1);
+        // refcount_order = 4 (16-bit)
+        BigEndian::write_u32(&mut buf[96..100], 4);
+        // v3 header_length
+        BigEndian::write_u32(&mut buf[100..104], 104);
+
+        // Write refcount table: entry 0 points to refcount block at rb_offset
+        BigEndian::write_u64(&mut buf[rt_offset as usize..], rb_offset);
+
+        // Write refcount block: set refcount=1 for all used clusters
+        // Clusters 0-4 are metadata, 5+ are data
+        let rb_base = rb_offset as usize;
+        for i in 0..total_clusters {
+            BigEndian::write_u16(&mut buf[rb_base + i as usize * 2..], 1);
+        }
+
+        // Apply refcount overrides
+        for &(cluster_idx, refcount) in refcount_overrides {
+            BigEndian::write_u16(
+                &mut buf[rb_base + cluster_idx as usize * 2..],
+                refcount,
+            );
+        }
+
+        // Write L1 table
+        let l1_raw = l2_offset | (1u64 << 63);
+        BigEndian::write_u64(&mut buf[l1_offset as usize..], l1_raw);
+
+        // Write L2 table entries
+        for (i, &(l2_idx, host_off)) in l2_mappings.iter().enumerate() {
+            let actual_host = if host_off == 0 {
+                data_start + i as u64 * cluster_size
+            } else {
+                host_off
+            };
+            let l2_raw = actual_host | (1u64 << 63);
+            let entry_offset = l2_offset as usize + l2_idx as usize * 8;
+            BigEndian::write_u64(&mut buf[entry_offset..], l2_raw);
+        }
+
+        // Write data in data clusters
+        for i in 0..num_data_clusters {
+            let off = (data_start + i * cluster_size) as usize;
+            for j in 0..cluster_size as usize {
+                buf[off + j] = ((i as u8).wrapping_mul(7).wrapping_add(j as u8)) | 1;
+            }
+        }
+
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(&buf).unwrap();
+        tmpfile.flush().unwrap();
+
+        (tmpfile, cluster_size)
+    }
+
+    #[test]
+    fn refcount_check_all_correct() {
+        let cluster_bits = 16u32;
+        let cluster_size = 1u64 << cluster_bits;
+        let virtual_size = 1u64 << 20;
+
+        let (tmpfile, _cs) = create_image_with_refcounts(
+            cluster_bits,
+            virtual_size,
+            &[(0, 0), (1, 0), (2, 0)],
+            &[], // no overrides, all refcounts = 1
+        );
+
+        let cluster_map = crate::scan::scan_file(tmpfile.path(), cluster_size).unwrap();
+        let report = reconstruct(tmpfile.path(), &cluster_map).unwrap();
+
+        assert_eq!(report.mappings_total, 3);
+        let rc = report.refcount_check.expect("should have refcount check");
+        assert_eq!(rc.refcount_order, 4);
+        assert_eq!(rc.correct, 3);
+        assert_eq!(rc.leaked, 0);
+        assert_eq!(rc.shared, 0);
+        assert!(rc.mismatches.is_empty());
+    }
+
+    #[test]
+    fn refcount_check_leaked_cluster() {
+        let cluster_bits = 16u32;
+        let cluster_size = 1u64 << cluster_bits;
+        let virtual_size = 1u64 << 20;
+
+        // Data cluster at index 5 will have refcount=0 (leaked)
+        let (tmpfile, _cs) = create_image_with_refcounts(
+            cluster_bits,
+            virtual_size,
+            &[(0, 0), (1, 0)],
+            &[(5, 0)], // cluster 5 (first data cluster) has refcount 0
+        );
+
+        let cluster_map = crate::scan::scan_file(tmpfile.path(), cluster_size).unwrap();
+        let report = reconstruct(tmpfile.path(), &cluster_map).unwrap();
+
+        assert_eq!(report.mappings_total, 2);
+        let rc = report.refcount_check.expect("should have refcount check");
+        assert_eq!(rc.leaked, 1);
+        assert_eq!(rc.correct, 1);
+        assert_eq!(rc.mismatches.len(), 1);
+        assert_eq!(rc.mismatches[0].actual, 0);
+        assert_eq!(rc.mismatches[0].expected, 1);
+    }
+
+    #[test]
+    fn refcount_check_shared_cluster() {
+        let cluster_bits = 16u32;
+        let cluster_size = 1u64 << cluster_bits;
+        let virtual_size = 1u64 << 20;
+
+        // Data cluster at index 6 will have refcount=3 (shared, e.g. snapshot)
+        let (tmpfile, _cs) = create_image_with_refcounts(
+            cluster_bits,
+            virtual_size,
+            &[(0, 0), (1, 0)],
+            &[(6, 3)], // cluster 6 (second data cluster) has refcount 3
+        );
+
+        let cluster_map = crate::scan::scan_file(tmpfile.path(), cluster_size).unwrap();
+        let report = reconstruct(tmpfile.path(), &cluster_map).unwrap();
+
+        assert_eq!(report.mappings_total, 2);
+        let rc = report.refcount_check.expect("should have refcount check");
+        assert_eq!(rc.shared, 1);
+        assert_eq!(rc.correct, 1);
+        assert_eq!(rc.mismatches.len(), 1);
+        assert_eq!(rc.mismatches[0].actual, 3);
     }
 }
