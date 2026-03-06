@@ -94,13 +94,19 @@ pub fn reconstruct_with_strategy(
         (i64, bool), // plausibility (score, header_match)
     )> = None;
 
+    // Collect missing L2 info from the validated pass (best L2 reconstruction data).
+    // This is separate from scoring: even if validate=false wins for mappings,
+    // we still want the L1-guided info about which L2 tables are missing.
+    let mut best_missing_l2: Vec<MissingL2Info> = Vec::new();
+
     for try_extended in [false, true] {
+      for validate_l1_against_scan in [false, true] {
         let geo = ClusterGeometry {
             cluster_bits,
             extended_l2: try_extended,
         };
 
-        let (mappings, verified, suspicious, l1_entries, conflicts) = reconstruct_with_geometry(
+        let (mappings, verified, suspicious, l1_entries, conflicts, missing_l2) = reconstruct_with_geometry(
             &mut file,
             &l1_result,
             &scan_l2_offsets,
@@ -110,9 +116,10 @@ pub fn reconstruct_with_strategy(
             geo,
             is_encrypted,
             conflict_strategy,
+            validate_l1_against_scan,
         );
 
-        let score = score_plausibility(
+        let mut score = score_plausibility(
             &mappings,
             file_size,
             virtual_size,
@@ -120,6 +127,34 @@ pub fn reconstruct_with_strategy(
             &valid_data_offsets,
             header_extended_l2 == Some(try_extended),
         );
+        // Penalize configurations with many suspicious (unconfirmed) L2 tables —
+        // a sign that L1 entries are garbage pointing to random data
+        score.0 -= suspicious as i64 * 10;
+
+        // Bonus for recoverable orphan data clusters: each orphan that could
+        // be assigned via heuristic is valuable. This makes the validated
+        // variant win when garbage L1 entries create false mappings that
+        // block orphan recovery.
+        //
+        // Exclude corrupted L2 offsets from orphan counting — those clusters
+        // contain metadata garbage, not user data, and shouldn't inflate the score.
+        let referenced: HashSet<u64> = mappings.values().map(|m| m.host_offset).collect();
+        let corrupt_l2_hosts: HashSet<u64> = missing_l2.iter().map(|m| m.host_offset).collect();
+        let potential_orphans = cluster_map.clusters.iter()
+            .filter(|c| matches!(c.cluster_type, ClusterTypeReport::Data | ClusterTypeReport::Compressed { .. })
+                && !referenced.contains(&c.offset)
+                && !corrupt_l2_hosts.contains(&c.offset))
+            .count();
+        score.0 += potential_orphans as i64 * 2;
+
+        eprintln!("  [scoring] ext={} val={}: mappings={} orphans={} missing_l2={} suspicious={} score={:?}",
+            try_extended, validate_l1_against_scan,
+            mappings.len(), potential_orphans, missing_l2.len(), suspicious, score);
+
+        // Keep the best missing_l2 info from any validated pass
+        if validate_l1_against_scan && missing_l2.len() > best_missing_l2.len() {
+            best_missing_l2 = missing_l2;
+        }
 
         let is_better = match &best_result {
             None => true,
@@ -129,28 +164,167 @@ pub fn reconstruct_with_strategy(
         if is_better {
             best_result = Some((mappings, verified, suspicious, l1_entries, conflicts, geo, score));
         }
+      }
     }
 
-    let (mappings, l2_tables_verified, l2_tables_suspicious, l1_entries_found, total_conflicts, _geo, _score) =
+    let (mut mappings, l2_tables_verified, l2_tables_suspicious, l1_entries_found, total_conflicts, _geo, _score) =
         best_result.unwrap_or_else(|| {
             let geo = ClusterGeometry { cluster_bits, extended_l2: false };
             (BTreeMap::new(), 0, 0, 0, 0, geo, (0, false))
         });
 
-    // Phase 2c: Find orphan data clusters (not referenced by any L2 entry)
+    let missing_l2_info = best_missing_l2;
+
+    // Phase 2c: Find orphan data clusters (not referenced by any L2 entry).
+    //
+    // IMPORTANT: Exclude host offsets of corrupted L2 tables. When L1 points to
+    // an L2 offset that the scanner didn't confirm as L2 (corrupted), that cluster
+    // contains metadata garbage, not user data. Including it in the orphan pool
+    // would inject garbage into the recovered image and shift all subsequent data.
     let referenced_hosts: HashSet<u64> = mappings
         .values()
         .map(|m| m.host_offset)
         .collect();
 
-    let orphan_data_clusters = cluster_map
+    let corrupted_l2_offsets: HashSet<u64> = missing_l2_info
+        .iter()
+        .map(|m| m.host_offset)
+        .collect();
+
+    let mut orphan_data_offsets: Vec<u64> = cluster_map
         .clusters
         .iter()
         .filter(|c| {
             matches!(c.cluster_type, ClusterTypeReport::Data | ClusterTypeReport::Compressed { .. })
                 && !referenced_hosts.contains(&c.offset)
+                && !corrupted_l2_offsets.contains(&c.offset)
         })
-        .count() as u64;
+        .map(|c| c.offset)
+        .collect();
+    orphan_data_offsets.sort();
+
+    let orphan_data_clusters = orphan_data_offsets.len() as u64;
+
+    // Phase 2c2: L1-guided orphan placement.
+    //
+    // When L1 is intact and tells us which L2 tables are missing, we know
+    // exactly which virtual address ranges need data. Assign orphan clusters
+    // to those specific ranges instead of blindly filling from offset 0.
+    //
+    // Strategy:
+    // 1. If we have missing L2 info (L1 intact, specific L2s corrupted):
+    //    a. Detect partition layout from first orphan (MBR/GPT) to find
+    //       the gap between partition table and first partition data.
+    //    b. Place orphan[0] at slot 0 (partition table), skip the gap,
+    //       then assign remaining orphans from the partition start slot.
+    // 2. Fallback: fill remaining orphans into any unmapped guest offsets.
+    if !orphan_data_offsets.is_empty() {
+        let l2_entries_per_table = (cluster_size / 8) as u64; // standard L2
+        let occupied_guests: HashSet<u64> = mappings.keys().copied().collect();
+
+        // Try to detect partition layout from the first orphan cluster.
+        // If the first orphan is an MBR/GPT, we know there's a gap between
+        // the partition table (slot 0) and the first partition's data.
+        let partition_start_slot = detect_partition_gap(
+            &mut file, &orphan_data_offsets, cluster_size,
+        );
+
+        let mut orphan_iter = orphan_data_offsets.iter().peekable();
+
+        if !missing_l2_info.is_empty() {
+            // Sort missing L2 ranges by L1 index for deterministic assignment
+            let mut missing_sorted: Vec<&MissingL2Info> = missing_l2_info.iter().collect();
+            missing_sorted.sort_by_key(|m| m.l1_idx);
+
+            for missing in &missing_sorted {
+                let base_guest = missing.l1_idx * l2_entries_per_table * cluster_size;
+
+                // Build a list of target slots, respecting partition gap
+                let target_slots: Vec<u64> = if let Some(part_start) = partition_start_slot {
+                    // First orphan goes at slot 0 (MBR/GPT), then skip to
+                    // partition start for the rest. After partition start, fill
+                    // sequentially.
+                    let mut slots = Vec::new();
+                    // Slot 0 for the partition table cluster
+                    if !occupied_guests.contains(&base_guest) {
+                        slots.push(0);
+                    }
+                    // Remaining slots from partition start onwards
+                    for s in part_start..l2_entries_per_table {
+                        let guest = base_guest + s * cluster_size;
+                        if !occupied_guests.contains(&guest) {
+                            slots.push(s);
+                        }
+                    }
+                    slots
+                } else {
+                    // No partition table detected — fill sequentially
+                    (0..l2_entries_per_table)
+                        .filter(|&s| !occupied_guests.contains(&(base_guest + s * cluster_size)))
+                        .collect()
+                };
+
+                for l2_slot in target_slots {
+                    let guest_offset = base_guest + l2_slot * cluster_size;
+                    if let Some(&host_offset) = orphan_iter.next() {
+                        mappings.entry(guest_offset).or_insert(MappingEntry {
+                            guest_offset,
+                            host_offset,
+                            compressed: false,
+                            encrypted: false,
+                            source: MappingSource::Heuristic,
+                            subclusters: None,
+                        });
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            let assigned_targeted = orphan_data_offsets.len() - orphan_iter.clone().count();
+            if assigned_targeted > 0 {
+                let gap_info = if let Some(ps) = partition_start_slot {
+                    format!(" (partition gap detected: data starts at slot {})", ps)
+                } else {
+                    String::new()
+                };
+                eprintln!(
+                    "  L2 reconstruction: assigned {} orphan data clusters to {} missing L2 range(s) \
+                     (L1 indices: {}){}",
+                    assigned_targeted,
+                    missing_sorted.len(),
+                    missing_sorted.iter().map(|m| m.l1_idx.to_string()).collect::<Vec<_>>().join(", "),
+                    gap_info,
+                );
+            }
+        }
+
+        // Fallback: assign any remaining orphans to unmapped guest offsets
+        let remaining: Vec<u64> = orphan_iter.copied().collect();
+        if !remaining.is_empty() {
+            let occupied_guests: HashSet<u64> = mappings.keys().copied().collect();
+            let mut next_guest = 0u64;
+            for host_offset in &remaining {
+                while occupied_guests.contains(&(next_guest * cluster_size)) {
+                    next_guest += 1;
+                }
+                let guest_offset = next_guest * cluster_size;
+                mappings.entry(guest_offset).or_insert(MappingEntry {
+                    guest_offset,
+                    host_offset: *host_offset,
+                    compressed: false,
+                    encrypted: false,
+                    source: MappingSource::Heuristic,
+                    subclusters: None,
+                });
+                next_guest += 1;
+            }
+            eprintln!(
+                "  WARNING: {} remaining orphan data clusters assigned by disk position (heuristic)",
+                remaining.len()
+            );
+        }
+    }
 
     let mappings_from_l2 = mappings
         .values()
@@ -178,9 +352,18 @@ pub fn reconstruct_with_strategy(
     })
 }
 
+/// Info about L1 entries whose L2 table is corrupted/missing.
+struct MissingL2Info {
+    /// L1 index of the missing L2 table.
+    l1_idx: u64,
+    /// Host offset where the (corrupted) L2 was/is.
+    host_offset: u64,
+}
+
 /// Run L1→L2 chain reconstruction with a specific geometry.
 ///
-/// Returns (mappings, l2_verified, l2_suspicious, l1_entries).
+/// Returns (mappings, l2_verified, l2_suspicious, l1_entries, conflicts,
+///          corrupted_l2_offsets, missing_l2_ranges).
 fn reconstruct_with_geometry(
     file: &mut std::fs::File,
     l1_result: &Option<Vec<u8>>,
@@ -191,7 +374,8 @@ fn reconstruct_with_geometry(
     geo: ClusterGeometry,
     is_encrypted: bool,
     conflict_strategy: ConflictStrategy,
-) -> (BTreeMap<u64, MappingEntry>, u32, u32, u32, u64) {
+    validate_l1_against_scan: bool,
+) -> (BTreeMap<u64, MappingEntry>, u32, u32, u32, u64, Vec<MissingL2Info>) {
     let file_size = file.seek(SeekFrom::End(0)).unwrap_or(0);
     let mut mappings: BTreeMap<u64, MappingEntry> = BTreeMap::new();
     let mut l2_tables_verified = 0u32;
@@ -199,6 +383,7 @@ fn reconstruct_with_geometry(
     let mut l1_entries_found = 0u32;
     let mut conflicts = 0u64;
     let mut l1_referenced_l2: HashSet<u64> = HashSet::new();
+    let mut missing_l2s: Vec<MissingL2Info> = Vec::new();
 
     if let Some(ref l1_data) = l1_result {
         l1_entries_found = (l1_data.len() / L1_ENTRY_SIZE) as u32;
@@ -214,20 +399,36 @@ fn reconstruct_with_geometry(
             // Plausibility: L2 offset must be cluster-aligned and within file
             if l2_offset % cluster_size != 0 || l2_offset + cluster_size > file_size {
                 l2_tables_suspicious += 1;
+                missing_l2s.push(MissingL2Info {
+                    l1_idx: l1_idx as u64,
+                    host_offset: l2_offset,
+                });
                 continue;
             }
 
             let verified = scan_l2_offsets.contains(&l2_offset);
+
+            // When validation is enabled and the scanner found L2 clusters,
+            // only follow L1 entries that point to scanner-confirmed L2 offsets.
+            // This prevents garbage L1 entries from reading random data as L2
+            // tables and creating false mappings.
+            if !verified && validate_l1_against_scan && !scan_l2_offsets.is_empty() {
+                l2_tables_suspicious += 1;
+                missing_l2s.push(MissingL2Info {
+                    l1_idx: l1_idx as u64,
+                    host_offset: l2_offset,
+                });
+                continue;
+            }
+
             l1_referenced_l2.insert(l2_offset);
 
             match read_l2_table(file, l2_offset, cluster_size, geo) {
                 Ok(entries) => {
-                    if verified {
-                        l2_tables_verified += 1;
-                    } else {
-                        l2_tables_suspicious += 1;
-                    }
+                    let nonzero_entries = entries.len();
 
+                    // Try adding mappings from this L2 table
+                    let mappings_before = mappings.len();
                     conflicts += add_l2_mappings(
                         &entries,
                         l1_idx as u64,
@@ -242,49 +443,109 @@ fn reconstruct_with_geometry(
                         conflict_strategy,
                         &mut mappings,
                     );
+                    let mappings_added = mappings.len() - mappings_before;
+
+                    // Detect garbage L2: if we read many non-zero entries but
+                    // very few produced valid mappings, this L2 is likely corrupted.
+                    // A real L2 table should have most entries map to valid data clusters.
+                    let is_garbage = nonzero_entries >= 4
+                        && mappings_added * 4 < nonzero_entries; // <25% valid
+
+                    if is_garbage {
+                        // Undo the false mappings we just added
+                        let l2_base_guest = l1_idx as u64 * l2_entries_per_table * cluster_size;
+                        let l2_end_guest = l2_base_guest + l2_entries_per_table * cluster_size;
+                        mappings.retain(|guest, m| {
+                            !(*guest >= l2_base_guest && *guest < l2_end_guest
+                                && matches!(m.source, MappingSource::L2Table))
+                        });
+
+                        l2_tables_suspicious += 1;
+                        missing_l2s.push(MissingL2Info {
+                            l1_idx: l1_idx as u64,
+                            host_offset: l2_offset,
+                        });
+                        eprintln!(
+                            "  L2 at offset {:#x} (L1[{}]) detected as garbage: \
+                             {}/{} entries produced valid mappings — treating as corrupted",
+                            l2_offset, l1_idx, mappings_added, nonzero_entries
+                        );
+                    } else if verified {
+                        l2_tables_verified += 1;
+                    } else {
+                        l2_tables_suspicious += 1;
+                    }
                 }
                 Err(_) => {
                     l2_tables_suspicious += 1;
+                    missing_l2s.push(MissingL2Info {
+                        l1_idx: l1_idx as u64,
+                        host_offset: l2_offset,
+                    });
                 }
             }
         }
     }
 
-    // Orphan L2 tables from the scanner
+    // Orphan L2 tables from the scanner.
+    // Two-pass approach: first validate which orphan L2s are real (entries point
+    // to known data clusters), then infer L1 indices from the validated set only.
     let l2_entries_per_table = geo.l2_entries_per_table();
+
+    // Pass 1: Read and validate orphan L2 tables
+    let mut validated_orphan_l2: Vec<(u64, Vec<(u32, L2Entry)>)> = Vec::new();
 
     for &l2_offset in scan_l2_offsets {
         if l1_referenced_l2.contains(&l2_offset) {
             continue;
         }
 
-        let inferred_l1_idx = infer_l1_index_for_orphan_l2(
-            l2_offset,
-            l1_result,
-            scan_l2_offsets,
-            cluster_size,
-        );
-
         match read_l2_table(file, l2_offset, cluster_size, geo) {
             Ok(entries) => {
-                l2_tables_verified += 1;
-
-                if let Some(l1_idx) = inferred_l1_idx {
-                    conflicts += add_l2_mappings(
-                        &entries,
-                        l1_idx,
-                        l2_entries_per_table,
-                        cluster_size,
-                        cluster_bits,
-                        MappingSource::Heuristic,
-                        geo.extended_l2,
-                        file_size,
-                        valid_data_offsets,
-                        is_encrypted,
-                        conflict_strategy,
-                        &mut mappings,
-                    );
+                // Validate orphan L2: check that entries produce sensible offsets.
+                // A real L2 table should have entries that are:
+                //  - cluster-aligned (for standard entries)
+                //  - within the file bounds
+                //  - pointing to known Data/Compressed clusters (if scanner data available)
+                let mut hits = 0usize;
+                let mut plausible = 0usize;
+                let mut nonzero = 0usize;
+                for &(_, ref entry) in &entries {
+                    let host = match entry {
+                        L2Entry::Standard { host_offset, .. } if host_offset.0 > 0 => {
+                            Some(host_offset.0)
+                        }
+                        L2Entry::Compressed(desc) if desc.host_offset > 0 => {
+                            Some(desc.host_offset & !(cluster_size - 1))
+                        }
+                        _ => None,
+                    };
+                    if let Some(h) = host {
+                        nonzero += 1;
+                        // Basic plausibility: cluster-aligned and within file
+                        let aligned = h % cluster_size == 0;
+                        let in_file = h < file_size;
+                        if aligned && in_file {
+                            plausible += 1;
+                            // Stronger check: points to scanner-confirmed data cluster
+                            if !valid_data_offsets.is_empty() && valid_data_offsets.contains(&h) {
+                                hits += 1;
+                            }
+                        }
+                    }
                 }
+                // Reject if most nonzero entries aren't even plausible offsets
+                if nonzero > 0 && plausible * 2 < nonzero {
+                    l2_tables_suspicious += 1;
+                    continue;
+                }
+                // Reject if scanner data available but <25% of entries point to known data
+                if nonzero > 0 && !valid_data_offsets.is_empty() && hits * 4 < nonzero {
+                    l2_tables_suspicious += 1;
+                    continue;
+                }
+
+                validated_orphan_l2.push((l2_offset, entries));
             }
             Err(_) => {
                 l2_tables_suspicious += 1;
@@ -292,7 +553,38 @@ fn reconstruct_with_geometry(
         }
     }
 
-    (mappings, l2_tables_verified, l2_tables_suspicious, l1_entries_found, conflicts)
+    // Pass 2: Infer L1 indices from validated orphan L2 offsets only
+    let validated_offsets: Vec<u64> = validated_orphan_l2.iter().map(|(off, _)| *off).collect();
+
+    for (l2_offset, entries) in validated_orphan_l2 {
+        l2_tables_verified += 1;
+
+        let inferred_l1_idx = infer_l1_index_for_orphan_l2(
+            l2_offset,
+            l1_result,
+            &validated_offsets,
+            cluster_size,
+        );
+
+        if let Some(l1_idx) = inferred_l1_idx {
+            conflicts += add_l2_mappings(
+                &entries,
+                l1_idx,
+                l2_entries_per_table,
+                cluster_size,
+                cluster_bits,
+                MappingSource::Heuristic,
+                geo.extended_l2,
+                file_size,
+                valid_data_offsets,
+                is_encrypted,
+                conflict_strategy,
+                &mut mappings,
+            );
+        }
+    }
+
+    (mappings, l2_tables_verified, l2_tables_suspicious, l1_entries_found, conflicts, missing_l2s)
 }
 
 /// Score a set of mappings for plausibility.
@@ -633,6 +925,66 @@ fn add_l2_mappings(
 /// Try to infer which L1 index an orphan L2 table belongs to.
 ///
 /// Strategy:
+/// Detect partition layout from the first orphan cluster's data.
+///
+/// If the first orphan (by host offset, i.e. the first allocated cluster)
+/// contains an MBR or protective MBR (GPT), parse the partition table to
+/// find where the first partition starts. Returns the L2 slot index of the
+/// first partition, or None if no partition table is detected.
+///
+/// This is critical for L2 reconstruction: qemu-img allocates data clusters
+/// in guest-offset order, so orphan[0] is the lowest-offset non-zero guest
+/// cluster (typically MBR at slot 0). The gap between MBR and the first
+/// partition (usually 1MB = 16 slots for 64K clusters) must be preserved.
+fn detect_partition_gap<R: Read + Seek>(
+    file: &mut R,
+    orphan_offsets: &[u64],
+    cluster_size: u64,
+) -> Option<u64> {
+    if orphan_offsets.is_empty() {
+        return None;
+    }
+
+    // Read the first orphan cluster (lowest host offset = first allocated data)
+    let first_host = orphan_offsets[0];
+    let mut buf = vec![0u8; cluster_size.min(512) as usize];
+    file.seek(SeekFrom::Start(first_host)).ok()?;
+    file.read_exact(&mut buf).ok()?;
+
+    // Check MBR signature: 0x55AA at bytes 510-511
+    if buf.len() < 512 || buf[510] != 0x55 || buf[511] != 0xAA {
+        return None;
+    }
+
+    // Parse first partition entry (MBR offset 446, 16 bytes per entry)
+    // Bytes 8-11 of the entry = start LBA (little-endian u32)
+    let entry_offset = 446;
+    let start_lba = u32::from_le_bytes([
+        buf[entry_offset + 8],
+        buf[entry_offset + 9],
+        buf[entry_offset + 10],
+        buf[entry_offset + 11],
+    ]);
+
+    if start_lba == 0 {
+        return None;
+    }
+
+    let start_byte = start_lba as u64 * 512;
+    let start_slot = start_byte / cluster_size;
+
+    // Sanity: partition start should be within reasonable range
+    if start_slot > 0 && start_slot < 2048 {
+        eprintln!(
+            "  partition table detected: first partition at LBA {} (slot {} for {}K clusters)",
+            start_lba, start_slot, cluster_size / 1024,
+        );
+        Some(start_slot)
+    } else {
+        None
+    }
+}
+
 /// 1. If we have a valid L1 table, scan it for a matching entry.
 /// 2. Otherwise, use the position among all known L2 tables to infer index.
 ///    L2 tables are typically allocated in L1-index order, so sorting
@@ -1175,9 +1527,11 @@ mod tests {
         let cluster_map = crate::scan::scan_file(tmpfile.path(), cluster_size).unwrap();
         let report = reconstruct(tmpfile.path(), &cluster_map).unwrap();
 
-        // Only the valid mapping should survive plausibility filtering
-        assert_eq!(report.mappings_total, 1);
-        assert_eq!(report.mappings[0].guest_offset, 0);
+        // Only the valid mapping should survive L2 plausibility filtering
+        assert_eq!(report.mappings_from_l2, 1);
+        // First mapping (from L2) should be at guest offset 0
+        assert!(report.mappings.iter().any(|m|
+            m.guest_offset == 0 && matches!(m.source, MappingSource::L2Table)));
     }
 
     #[test]
@@ -1230,9 +1584,10 @@ mod tests {
         let cluster_map = crate::scan::scan_file(tmpfile.path(), cluster_size).unwrap();
         let report = reconstruct(tmpfile.path(), &cluster_map).unwrap();
 
-        // Only L2[2] (pointing to actual data) should survive
-        assert_eq!(report.mappings_total, 1);
-        assert_eq!(report.mappings[0].guest_offset, 2 * cluster_size);
+        // Only L2[2] (pointing to actual data) should survive from L2
+        assert_eq!(report.mappings_from_l2, 1);
+        assert!(report.mappings.iter().any(|m|
+            m.guest_offset == 2 * cluster_size && matches!(m.source, MappingSource::L2Table)));
     }
 
     #[test]
