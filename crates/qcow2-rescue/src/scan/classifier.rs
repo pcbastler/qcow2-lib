@@ -112,6 +112,7 @@ fn try_classify_l2(buf: &[u8], cluster_size: u64) -> Option<ClusterTypeReport> {
     let mut valid = 0u32;
     let total = entry_count as u32;
     let mut nonzero = 0u32;
+    let mut distinct_values = std::collections::HashSet::new();
 
     for i in 0..entry_count {
         let raw = BigEndian::read_u64(&buf[i * 8..(i + 1) * 8]);
@@ -120,9 +121,25 @@ fn try_classify_l2(buf: &[u8], cluster_size: u64) -> Option<ClusterTypeReport> {
             continue;
         }
         nonzero += 1;
+        distinct_values.insert(raw);
 
         if is_valid_l2_entry(raw, cluster_size) {
             valid += 1;
+        }
+    }
+
+    // Reject if entries lack diversity: real L2 tables point to different host
+    // offsets, so non-zero values should be mostly unique. Data clusters filled
+    // with uniform bytes (e.g., 0x41 repeated) produce thousands of identical
+    // entries that pass the compressed-flag check.
+    // Exception: zero-flag-only entries (value = L2_ZERO_FLAG without a host
+    // offset) are legitimate — an L2 with all clusters "read as zeros".
+    let distinct = distinct_values.len() as u32;
+    if nonzero >= 8 && distinct * 4 < nonzero {
+        let all_zero_flag = distinct_values.iter().all(|&v|
+            v & L2_ZERO_FLAG != 0 && v & L2_STANDARD_OFFSET_MASK == 0);
+        if !all_zero_flag {
+            return None; // Low diversity + not zero-flag entries → data, not L2
         }
     }
 
@@ -173,6 +190,7 @@ fn try_classify_l2_extended(buf: &[u8], cluster_size: u64) -> Option<ClusterType
     let mut valid = 0u32;
     let total = entry_count as u32;
     let mut nonzero = 0u32;
+    let mut distinct_values = std::collections::HashSet::new();
 
     for i in 0..entry_count {
         let base = i * L2_ENTRY_SIZE_EXTENDED;
@@ -184,10 +202,21 @@ fn try_classify_l2_extended(buf: &[u8], cluster_size: u64) -> Option<ClusterType
             continue;
         }
         nonzero += 1;
+        distinct_values.insert(raw);
 
         // Both the L2 entry and the bitmap must be valid
         if is_valid_l2_entry(raw, cluster_size) && SubclusterBitmap(bitmap_raw).validate() {
             valid += 1;
+        }
+    }
+
+    // Reject uniform data (same check as standard L2)
+    let distinct = distinct_values.len() as u32;
+    if nonzero >= 8 && distinct * 4 < nonzero {
+        let all_zero_flag = distinct_values.iter().all(|&v|
+            v & L2_ZERO_FLAG != 0 && v & L2_STANDARD_OFFSET_MASK == 0);
+        if !all_zero_flag {
+            return None;
         }
     }
 
