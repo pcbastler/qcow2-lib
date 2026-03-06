@@ -1,8 +1,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use qcow2_lib::engine::compression::{compress_cluster, decompress_cluster};
-use qcow2_lib::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
+use qcow2::engine::compression::{compress_cluster, decompress_cluster};
+use qcow2::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {

@@ -1,10 +1,10 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use qcow2_lib::format::bitmap::{
+use qcow2::format::bitmap::{
     BitmapDirectoryEntry, BitmapExtension, BitmapTable, BitmapTableEntry,
 };
-use qcow2_lib::format::types::BitmapIndex;
+use qcow2::format::types::BitmapIndex;
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {

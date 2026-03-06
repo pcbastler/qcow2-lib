@@ -5,11 +5,11 @@
 use std::fs;
 use std::path::Path;
 
-use qcow2_lib::engine::image::{CreateOptions, Qcow2Image};
-use qcow2_lib::format::header_extension::{FeatureNameEntry, HeaderExtension};
-use qcow2_lib::format::snapshot::SnapshotHeader;
-use qcow2_lib::format::types::ClusterOffset;
-use qcow2_lib::io::MemoryBackend;
+use qcow2::engine::image::{CreateOptions, Qcow2Image};
+use qcow2::format::header_extension::{FeatureNameEntry, HeaderExtension};
+use qcow2::format::snapshot::SnapshotHeader;
+use qcow2::format::types::ClusterOffset;
+use qcow2::io::MemoryBackend;
 
 fn main() {
     build_image_open_corpus();
@@ -175,7 +175,7 @@ fn build_refcount_block_corpus() {
     println!("  fuzz_refcount_block: 7 seeds");
 }
 
-fn read_backend_data(backend: &dyn qcow2_lib::io::IoBackend) -> Vec<u8> {
+fn read_backend_data(backend: &dyn qcow2::io::IoBackend) -> Vec<u8> {
     let size = backend.file_size().unwrap() as usize;
     let mut data = vec![0u8; size];
     backend.read_exact_at(&mut data, 0).unwrap();

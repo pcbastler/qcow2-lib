@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use qcow2_lib::format::snapshot::SnapshotHeader;
+use qcow2::format::snapshot::SnapshotHeader;
 
 fuzz_target!(|data: &[u8]| {
     // Single snapshot entry

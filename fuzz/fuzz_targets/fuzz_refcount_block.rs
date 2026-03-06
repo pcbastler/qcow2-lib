@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use qcow2_lib::format::refcount::RefcountBlock;
+use qcow2::format::refcount::RefcountBlock;
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {

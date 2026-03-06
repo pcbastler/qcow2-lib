@@ -11,8 +11,8 @@ cargo-fuzz = true
 libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
 arbitrary = { version = "1", features = ["derive"] }
 
-[dependencies.qcow2-lib]
-path = ".."
+[dependencies.qcow2]
+path = "../crates/qcow2"
 
 [[bin]]
 name = "fuzz_image_open"

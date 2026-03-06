@@ -1,9 +1,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use qcow2_lib::format::compressed::CompressedClusterDescriptor;
-use qcow2_lib::format::l2::{L2Entry, L2Table, SubclusterBitmap};
-use qcow2_lib::format::ClusterGeometry;
+use qcow2::format::compressed::CompressedClusterDescriptor;
+use qcow2::format::l2::{L2Entry, L2Table, SubclusterBitmap};
+use qcow2::format::ClusterGeometry;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {

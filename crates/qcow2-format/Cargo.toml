@@ -1,0 +1,11 @@
+[package]
+name = "qcow2-format"
+version = "0.1.0"
+edition = "2021"
+description = "QCOW2 on-disk format types, constants, and encode/decode — no_std compatible"
+license-file = "../../LICENSE"
+rust-version = "1.70"
+
+[dependencies]
+byteorder = { version = "1", default-features = false }
+bitflags = { version = "2", default-features = false }
