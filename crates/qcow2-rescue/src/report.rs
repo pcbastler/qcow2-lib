@@ -303,6 +303,8 @@ pub struct ReconstructedTablesReport {
     /// Content validation results (decompression/decryption probes).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_validation: Option<ContentValidationReport>,
+    /// Number of guest offsets where multiple L2 tables disagree.
+    pub mapping_conflicts: u64,
     /// All mappings.
     pub mappings: Vec<MappingEntry>,
     /// Virtual size from header (if readable).

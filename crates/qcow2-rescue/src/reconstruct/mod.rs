@@ -22,6 +22,7 @@ use qcow2_format::l2::L2Entry;
 use qcow2_format::refcount::{read_refcount_table, RefcountBlock};
 use qcow2_format::types::ClusterGeometry;
 
+use crate::config::ConflictStrategy;
 use crate::error::Result;
 use crate::report::*;
 
@@ -29,6 +30,15 @@ use crate::report::*;
 ///
 /// Reads the file directly (not from memory) using offsets from the cluster map.
 pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<ReconstructedTablesReport> {
+    reconstruct_with_strategy(path, cluster_map, ConflictStrategy::Ask)
+}
+
+/// Reconstruct with a specific conflict resolution strategy.
+pub fn reconstruct_with_strategy(
+    path: &Path,
+    cluster_map: &ClusterMapReport,
+    conflict_strategy: ConflictStrategy,
+) -> Result<ReconstructedTablesReport> {
     let cluster_size = cluster_map.cluster_size;
     let cluster_bits = cluster_size.trailing_zeros();
 
@@ -78,6 +88,7 @@ pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<Recons
         u32, // l2_tables_verified
         u32, // l2_tables_suspicious
         u32, // l1_entries_found
+        u64, // conflicts
         ClusterGeometry,
         (i64, bool), // plausibility (score, header_match)
     )> = None;
@@ -88,7 +99,7 @@ pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<Recons
             extended_l2: try_extended,
         };
 
-        let (mappings, verified, suspicious, l1_entries) = reconstruct_with_geometry(
+        let (mappings, verified, suspicious, l1_entries, conflicts) = reconstruct_with_geometry(
             &mut file,
             &l1_result,
             &scan_l2_offsets,
@@ -97,6 +108,7 @@ pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<Recons
             cluster_bits,
             geo,
             is_encrypted,
+            conflict_strategy,
         );
 
         let score = score_plausibility(
@@ -114,14 +126,14 @@ pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<Recons
         };
 
         if is_better {
-            best_result = Some((mappings, verified, suspicious, l1_entries, geo, score));
+            best_result = Some((mappings, verified, suspicious, l1_entries, conflicts, geo, score));
         }
     }
 
-    let (mappings, l2_tables_verified, l2_tables_suspicious, l1_entries_found, _geo, _score) =
+    let (mappings, l2_tables_verified, l2_tables_suspicious, l1_entries_found, total_conflicts, _geo, _score) =
         best_result.unwrap_or_else(|| {
             let geo = ClusterGeometry { cluster_bits, extended_l2: false };
-            (BTreeMap::new(), 0, 0, 0, geo, (0, false))
+            (BTreeMap::new(), 0, 0, 0, 0, geo, (0, false))
         });
 
     // Phase 2c: Find orphan data clusters (not referenced by any L2 entry)
@@ -159,6 +171,7 @@ pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<Recons
         orphan_data_clusters,
         refcount_check,
         content_validation: None, // Filled in later by content validation pass
+        mapping_conflicts: total_conflicts,
         mappings: mappings_vec,
         virtual_size,
     })
@@ -176,12 +189,14 @@ fn reconstruct_with_geometry(
     cluster_bits: u32,
     geo: ClusterGeometry,
     is_encrypted: bool,
-) -> (BTreeMap<u64, MappingEntry>, u32, u32, u32) {
+    conflict_strategy: ConflictStrategy,
+) -> (BTreeMap<u64, MappingEntry>, u32, u32, u32, u64) {
     let file_size = file.seek(SeekFrom::End(0)).unwrap_or(0);
     let mut mappings: BTreeMap<u64, MappingEntry> = BTreeMap::new();
     let mut l2_tables_verified = 0u32;
     let mut l2_tables_suspicious = 0u32;
     let mut l1_entries_found = 0u32;
+    let mut conflicts = 0u64;
     let mut l1_referenced_l2: HashSet<u64> = HashSet::new();
 
     if let Some(ref l1_data) = l1_result {
@@ -212,7 +227,7 @@ fn reconstruct_with_geometry(
                         l2_tables_suspicious += 1;
                     }
 
-                    add_l2_mappings(
+                    conflicts += add_l2_mappings(
                         &entries,
                         l1_idx as u64,
                         l2_entries_per_table,
@@ -223,6 +238,7 @@ fn reconstruct_with_geometry(
                         file_size,
                         valid_data_offsets,
                         is_encrypted,
+                        conflict_strategy,
                         &mut mappings,
                     );
                 }
@@ -252,7 +268,7 @@ fn reconstruct_with_geometry(
                 l2_tables_verified += 1;
 
                 if let Some(l1_idx) = inferred_l1_idx {
-                    add_l2_mappings(
+                    conflicts += add_l2_mappings(
                         &entries,
                         l1_idx,
                         l2_entries_per_table,
@@ -263,6 +279,7 @@ fn reconstruct_with_geometry(
                         file_size,
                         valid_data_offsets,
                         is_encrypted,
+                        conflict_strategy,
                         &mut mappings,
                     );
                 }
@@ -273,7 +290,7 @@ fn reconstruct_with_geometry(
         }
     }
 
-    (mappings, l2_tables_verified, l2_tables_suspicious, l1_entries_found)
+    (mappings, l2_tables_verified, l2_tables_suspicious, l1_entries_found, conflicts)
 }
 
 /// Score a set of mappings for plausibility.
@@ -465,6 +482,7 @@ fn read_l2_table(
 /// - Host offset must be cluster-aligned and within the file
 /// - Host offset must point to a cluster classified as Data or Compressed
 ///   (not Header, L1, L2, Refcount, or Empty)
+/// Returns the number of conflicts encountered.
 fn add_l2_mappings(
     entries: &[(u32, L2Entry)],
     l1_idx: u64,
@@ -476,8 +494,11 @@ fn add_l2_mappings(
     file_size: u64,
     valid_data_offsets: &HashSet<u64>,
     is_encrypted: bool,
+    conflict_strategy: ConflictStrategy,
     mappings: &mut BTreeMap<u64, MappingEntry>,
-) {
+) -> u64 {
+    let mut conflicts = 0u64;
+
     for &(l2_idx, ref entry) in entries {
         let guest_offset =
             (l1_idx * l2_entries_per_table + l2_idx as u64) * cluster_size;
@@ -495,50 +516,77 @@ fn add_l2_mappings(
             None
         };
 
-        match entry {
+        let new_entry = match entry {
             L2Entry::Standard { host_offset, .. } => {
-                // Plausibility: must be cluster-aligned, non-zero, within file,
-                // and point to a cluster classified as Data or Compressed.
                 let in_file = host_offset.0 > 0
                     && host_offset.is_cluster_aligned(cluster_bits)
                     && host_offset.0 < file_size;
-                // If we have scan data, cross-check against classified cluster types.
-                // An empty valid_data_offsets means no scan data (shouldn't happen).
                 let target_ok = valid_data_offsets.is_empty()
                     || valid_data_offsets.contains(&host_offset.0);
                 if in_file && target_ok {
-                    mappings.entry(guest_offset).or_insert(MappingEntry {
+                    Some(MappingEntry {
                         guest_offset,
                         host_offset: host_offset.0,
                         source,
                         compressed: false,
                         encrypted: is_encrypted,
                         subclusters,
-                    });
+                    })
+                } else {
+                    None
                 }
             }
             L2Entry::Compressed(desc) => {
-                // Plausibility: host offset must be within the file and
-                // the containing cluster must be classified as Data or Compressed.
                 let containing_cluster = desc.host_offset & !(cluster_size - 1);
                 let target_ok = valid_data_offsets.is_empty()
                     || valid_data_offsets.contains(&containing_cluster);
                 if desc.host_offset < file_size && target_ok {
-                    mappings.entry(guest_offset).or_insert(MappingEntry {
+                    Some(MappingEntry {
                         guest_offset,
                         host_offset: desc.host_offset,
                         source,
                         compressed: true,
                         encrypted: is_encrypted,
                         subclusters: None,
-                    });
+                    })
+                } else {
+                    None
                 }
             }
-            L2Entry::Zero { .. } | L2Entry::Unallocated => {
-                // No host mapping for zero/unallocated entries
+            L2Entry::Zero { .. } | L2Entry::Unallocated => None,
+        };
+
+        if let Some(new) = new_entry {
+            match mappings.entry(guest_offset) {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(new);
+                }
+                std::collections::btree_map::Entry::Occupied(mut e) => {
+                    let existing = e.get();
+                    // Only a conflict if the host offsets differ
+                    if existing.host_offset != new.host_offset {
+                        conflicts += 1;
+                        let replace = match conflict_strategy {
+                            // Ask/Both: keep the first (L2Table source preferred)
+                            ConflictStrategy::Ask | ConflictStrategy::Both => false,
+                            // Newer: higher host_offset wins (written later on disk)
+                            ConflictStrategy::Newer => new.host_offset > existing.host_offset,
+                            // Safer: L2Table > Heuristic (more reliable source)
+                            ConflictStrategy::Safer => matches!(
+                                (&new.source, &existing.source),
+                                (MappingSource::L2Table, MappingSource::Heuristic)
+                            ),
+                        };
+                        if replace {
+                            e.insert(new);
+                        }
+                    }
+                }
             }
         }
     }
+
+    conflicts
 }
 
 /// Try to infer which L1 index an orphan L2 table belongs to.

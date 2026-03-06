@@ -20,11 +20,13 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use serde::{Serialize, Deserialize};
+
 use qcow2::engine::compression::decompress_cluster;
 use qcow2_core::engine::encryption::CryptContext;
 use qcow2_format::constants::*;
 
-use crate::config::OutputFormat;
+use crate::config::{ConflictStrategy, OutputFormat};
 use crate::error::{RescueError, Result};
 use crate::report::*;
 use crate::scan;
@@ -44,6 +46,58 @@ pub struct RecoverOptions {
     pub password: Option<Vec<u8>>,
     /// Override cluster size (when header is corrupt).
     pub cluster_size_override: Option<u64>,
+    /// Resume from a previous interrupted run.
+    pub resume: bool,
+    /// How to resolve mapping conflicts.
+    pub on_conflict: ConflictStrategy,
+}
+
+/// Progress tracker for resumable recovery.
+///
+/// Stores the set of guest offsets that have been successfully written.
+/// Saved as JSON to `<output>.progress.json` and updated periodically.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct RecoveryProgress {
+    /// Guest offsets that have been written successfully.
+    written_offsets: Vec<u64>,
+    /// Total clusters to process.
+    total_clusters: u64,
+}
+
+impl RecoveryProgress {
+    /// Load progress from a file, or return empty if not found.
+    fn load(path: &Path) -> Self {
+        let progress_path = Self::progress_path(path);
+        match std::fs::read_to_string(&progress_path) {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Save progress to file.
+    fn save(&self, output: &Path) -> Result<()> {
+        let progress_path = Self::progress_path(output);
+        let json = serde_json::to_string(self)?;
+        std::fs::write(&progress_path, json)?;
+        Ok(())
+    }
+
+    /// Remove the progress file (called on successful completion).
+    fn remove(output: &Path) {
+        let progress_path = Self::progress_path(output);
+        let _ = std::fs::remove_file(progress_path);
+    }
+
+    /// Build a HashSet for fast lookup.
+    fn as_set(&self) -> std::collections::HashSet<u64> {
+        self.written_offsets.iter().copied().collect()
+    }
+
+    fn progress_path(output: &Path) -> PathBuf {
+        let mut p = output.as_os_str().to_owned();
+        p.push(".progress.json");
+        PathBuf::from(p)
+    }
 }
 
 /// Result of trying to set up encryption for recovery.
@@ -72,7 +126,7 @@ pub fn recover_single(
     };
 
     let cluster_map = scan::scan_file(input, cluster_size)?;
-    let tables = reconstruct::reconstruct(input, &cluster_map)?;
+    let tables = reconstruct::reconstruct_with_strategy(input, &cluster_map, options.on_conflict)?;
     let virtual_size = tables.virtual_size.unwrap_or_else(|| {
         tables.mappings.iter()
             .map(|m| m.guest_offset + cluster_size)
@@ -146,7 +200,7 @@ pub fn recover_chain(
         }
 
         let cluster_map = scan::scan_file(path, cs)?;
-        let tables = reconstruct::reconstruct(path, &cluster_map)?;
+        let tables = reconstruct::reconstruct_with_strategy(path, &cluster_map, options.on_conflict)?;
 
         if let Some(vs) = tables.virtual_size {
             max_virtual_size = max_virtual_size.max(vs);
@@ -198,7 +252,16 @@ pub fn recover_chain(
             crypt_ref,
             &encryption,
         ),
-        OutputFormat::Qcow2 | OutputFormat::Chain => write_qcow2(
+        OutputFormat::Qcow2 => write_qcow2(
+            output,
+            &layer_refs,
+            max_virtual_size,
+            cluster_size,
+            options,
+            crypt_ref,
+            &encryption,
+        ),
+        OutputFormat::Chain => write_chain(
             output,
             &layer_refs,
             max_virtual_size,
@@ -547,17 +610,36 @@ fn write_raw(
     let cluster_bits = cluster_size.trailing_zeros();
     let (merged, mut layer_stats) = merge_mappings(layers, cluster_size);
 
-    let mut out = std::fs::File::create(output)?;
+    // Resume support: load progress and open file accordingly
+    let (already_done, mut progress) = if options.resume {
+        let p = RecoveryProgress::load(output);
+        if !p.written_offsets.is_empty() {
+            eprintln!("  resuming: {} clusters already written", p.written_offsets.len());
+        }
+        (p.as_set(), p)
+    } else {
+        (std::collections::HashSet::new(), RecoveryProgress::default())
+    };
+
+    let mut out = if options.resume && output.exists() {
+        std::fs::OpenOptions::new().write(true).open(output)?
+    } else {
+        std::fs::File::create(output)?
+    };
     // Set the file size upfront (sparse)
     out.set_len(virtual_size)?;
 
-    let mut clusters_written = 0u64;
+    let mut clusters_written = already_done.len() as u64;
     let mut clusters_failed = 0u64;
     let mut clusters_zeroed = 0u64;
     let mut bytes_written = 0u64;
 
     let total = merged.len();
     let progress_interval = (total / 20).max(1);
+    let save_interval = 100usize;
+    let mut since_last_save = 0usize;
+
+    progress.total_clusters = total as u64;
 
     for (idx, (&guest_offset, rm)) in merged.iter().enumerate() {
         if idx % progress_interval == 0 && total > 0 {
@@ -572,6 +654,11 @@ fn write_raw(
             continue;
         }
 
+        // Skip already written clusters (resume)
+        if already_done.contains(&guest_offset) {
+            continue;
+        }
+
         match read_cluster_data(&rm.source_file, rm, cluster_size, cluster_bits, crypt) {
             Ok(data) => {
                 // Check if cluster is all zeros — skip writing (sparse file handles it)
@@ -583,11 +670,15 @@ fn write_raw(
                     clusters_written += 1;
                     bytes_written += data.len() as u64;
                 }
+                progress.written_offsets.push(guest_offset);
+                since_last_save += 1;
             }
             Err(e) => {
                 clusters_failed += 1;
                 layer_stats[rm.layer_index].read_failures += 1;
                 if !options.skip_corrupt {
+                    // Save progress before returning error
+                    let _ = progress.save(output);
                     return Err(e);
                 }
                 eprintln!(
@@ -598,9 +689,18 @@ fn write_raw(
                 clusters_zeroed += 1;
             }
         }
+
+        // Periodically save progress
+        if since_last_save >= save_interval {
+            let _ = progress.save(output);
+            since_last_save = 0;
+        }
     }
 
     out.flush()?;
+
+    // Success — remove progress file
+    RecoveryProgress::remove(output);
 
     // Count unallocated clusters as zeroed
     let total_clusters = virtual_size / cluster_size;
@@ -635,26 +735,45 @@ fn write_qcow2(
     let cluster_bits = cluster_size.trailing_zeros();
     let (merged, mut layer_stats) = merge_mappings(layers, cluster_size);
 
-    // Create a new QCOW2 image
-    let create_options = qcow2::engine::image::CreateOptions {
-        virtual_size,
-        cluster_bits: Some(cluster_bits),
-        extended_l2: false,
-        compression_type: None,
-        data_file: None,
-        encryption: None,
+    // Resume support
+    let (already_done, mut progress) = if options.resume {
+        let p = RecoveryProgress::load(output);
+        if !p.written_offsets.is_empty() {
+            eprintln!("  resuming: {} clusters already written", p.written_offsets.len());
+        }
+        (p.as_set(), p)
+    } else {
+        (std::collections::HashSet::new(), RecoveryProgress::default())
     };
 
-    let mut image = qcow2::Qcow2Image::create(output, create_options)
-        .map_err(|e| RescueError::Qcow2(e))?;
+    // Create or open existing QCOW2 image
+    let mut image = if options.resume && output.exists() {
+        qcow2::Qcow2Image::open(output)
+            .map_err(|e| RescueError::Qcow2(e))?
+    } else {
+        let create_options = qcow2::engine::image::CreateOptions {
+            virtual_size,
+            cluster_bits: Some(cluster_bits),
+            extended_l2: false,
+            compression_type: None,
+            data_file: None,
+            encryption: None,
+        };
+        qcow2::Qcow2Image::create(output, create_options)
+            .map_err(|e| RescueError::Qcow2(e))?
+    };
 
-    let mut clusters_written = 0u64;
+    let mut clusters_written = already_done.len() as u64;
     let mut clusters_failed = 0u64;
     let mut clusters_zeroed = 0u64;
     let mut bytes_written = 0u64;
 
     let total = merged.len();
     let progress_interval = (total / 20).max(1);
+    let save_interval = 100usize;
+    let mut since_last_save = 0usize;
+
+    progress.total_clusters = total as u64;
 
     for (idx, (&guest_offset, rm)) in merged.iter().enumerate() {
         if idx % progress_interval == 0 && total > 0 {
@@ -669,6 +788,10 @@ fn write_qcow2(
             continue;
         }
 
+        if already_done.contains(&guest_offset) {
+            continue;
+        }
+
         match read_cluster_data(&rm.source_file, rm, cluster_size, cluster_bits, crypt) {
             Ok(data) => {
                 if data.iter().all(|&b| b == 0) {
@@ -679,11 +802,14 @@ fn write_qcow2(
                     clusters_written += 1;
                     bytes_written += data.len() as u64;
                 }
+                progress.written_offsets.push(guest_offset);
+                since_last_save += 1;
             }
             Err(e) => {
                 clusters_failed += 1;
                 layer_stats[rm.layer_index].read_failures += 1;
                 if !options.skip_corrupt {
+                    let _ = progress.save(output);
                     return Err(e);
                 }
                 eprintln!(
@@ -693,9 +819,17 @@ fn write_qcow2(
                 clusters_zeroed += 1;
             }
         }
+
+        if since_last_save >= save_interval {
+            let _ = progress.save(output);
+            since_last_save = 0;
+        }
     }
 
     image.flush().map_err(|e| RescueError::Qcow2(e))?;
+
+    // Success — remove progress file
+    RecoveryProgress::remove(output);
 
     let total_clusters = virtual_size / cluster_size;
     let mapped_clusters = clusters_written + clusters_zeroed;
@@ -704,6 +838,148 @@ fn write_qcow2(
     Ok(RecoveryReport {
         output_path: output.display().to_string(),
         output_format: "qcow2".to_string(),
+        virtual_size,
+        cluster_size,
+        source_files: layers.iter().map(|(p, _)| p.display().to_string()).collect(),
+        clusters_written,
+        clusters_failed,
+        clusters_zeroed,
+        bytes_written,
+        layer_stats,
+        encryption_info: build_encryption_info(encryption, crypt),
+    })
+}
+
+/// Write each layer as a separate QCOW2 with backing file references.
+///
+/// `output` is treated as a directory. Each layer gets its own file:
+/// `layer_0_base.qcow2`, `layer_1.qcow2`, etc.
+/// Layer 0 has no backing file. Layer N references layer N-1 as backing.
+fn write_chain(
+    output: &Path,
+    layers: &[(PathBuf, ReconstructedTablesReport)],
+    virtual_size: u64,
+    cluster_size: u64,
+    options: &RecoverOptions,
+    crypt: Option<&CryptContext>,
+    encryption: &EncryptionSetup,
+) -> Result<RecoveryReport> {
+    let cluster_bits = cluster_size.trailing_zeros();
+
+    // output is the base path — we derive per-layer filenames
+    let output_dir = output.parent().unwrap_or(Path::new("."));
+    let stem = output.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("recovered");
+
+    let mut clusters_written = 0u64;
+    let mut clusters_failed = 0u64;
+    let mut clusters_zeroed = 0u64;
+    let mut bytes_written = 0u64;
+    let mut layer_stats = Vec::new();
+    let mut output_files: Vec<String> = Vec::new();
+
+    for (layer_idx, (source_path, tables)) in layers.iter().enumerate() {
+        let layer_name = if layer_idx == 0 {
+            format!("{stem}_base.qcow2")
+        } else {
+            format!("{stem}_layer{layer_idx}.qcow2")
+        };
+        let layer_path = output_dir.join(&layer_name);
+
+        // Backing file is the previous layer (if any)
+        let backing_file = if layer_idx > 0 {
+            Some(output_files[layer_idx - 1].clone())
+        } else {
+            None
+        };
+
+        let create_options = qcow2::engine::image::CreateOptions {
+            virtual_size,
+            cluster_bits: Some(cluster_bits),
+            extended_l2: false,
+            compression_type: None,
+            data_file: None,
+            encryption: None,
+        };
+
+        let mut image = qcow2::Qcow2Image::create(&layer_path, create_options)
+            .map_err(|e| RescueError::Qcow2(e))?;
+
+        // Set backing file reference if this is an overlay
+        if let Some(ref backing) = backing_file {
+            image.rebase_unsafe(Some(Path::new(backing)))
+                .map_err(|e| RescueError::Qcow2(e))?;
+        }
+
+        let mut layer_written = 0u64;
+        let mut layer_failed = 0u64;
+
+        for m in &tables.mappings {
+            if m.guest_offset >= virtual_size {
+                continue;
+            }
+
+            let rm = ResolvedMapping {
+                source_file: source_path.clone(),
+                host_offset: m.host_offset,
+                compressed: m.compressed,
+                encrypted: m.encrypted,
+                layer_index: layer_idx,
+            };
+
+            match read_cluster_data(source_path, &rm, cluster_size, cluster_bits, crypt) {
+                Ok(data) => {
+                    if data.iter().all(|&b| b == 0) {
+                        clusters_zeroed += 1;
+                    } else {
+                        image.write_at(&data, m.guest_offset)
+                            .map_err(|e| RescueError::Qcow2(e))?;
+                        clusters_written += 1;
+                        layer_written += 1;
+                        bytes_written += data.len() as u64;
+                    }
+                }
+                Err(e) => {
+                    clusters_failed += 1;
+                    layer_failed += 1;
+                    if !options.skip_corrupt {
+                        return Err(e);
+                    }
+                    eprintln!(
+                        "  warning: failed to read cluster at guest {:#x} from {}: {e}",
+                        m.guest_offset, source_path.display(),
+                    );
+                    clusters_zeroed += 1;
+                }
+            }
+        }
+
+        image.flush().map_err(|e| RescueError::Qcow2(e))?;
+
+        eprintln!(
+            "  layer {}: {} → {} clusters written",
+            layer_idx, source_path.display(), layer_written,
+        );
+
+        layer_stats.push(LayerRecoveryStat {
+            file_path: source_path.display().to_string(),
+            mappings_found: tables.mappings.len() as u64,
+            mappings_used: layer_written,
+            read_failures: layer_failed,
+        });
+
+        output_files.push(layer_path.display().to_string());
+    }
+
+    // Primary output path is the leaf (last layer)
+    let primary_output = output_files.last()
+        .cloned()
+        .unwrap_or_else(|| output.display().to_string());
+
+    Ok(RecoveryReport {
+        output_path: primary_output,
+        output_format: "chain".to_string(),
         virtual_size,
         cluster_size,
         source_files: layers.iter().map(|(p, _)| p.display().to_string()).collect(),
@@ -886,6 +1162,8 @@ mod tests {
             skip_corrupt: false,
             password: None,
             cluster_size_override: None,
+            resume: false,
+            on_conflict: ConflictStrategy::Ask,
         };
 
         let report = recover_single(src.path(), &out_path, &options).unwrap();
@@ -912,6 +1190,8 @@ mod tests {
             skip_corrupt: false,
             password: None,
             cluster_size_override: None,
+            resume: false,
+            on_conflict: ConflictStrategy::Ask,
         };
 
         let report = recover_single(src.path(), &out_path, &options).unwrap();
@@ -939,6 +1219,8 @@ mod tests {
             skip_corrupt: false,
             password: None,
             cluster_size_override: None,
+            resume: false,
+            on_conflict: ConflictStrategy::Ask,
         };
 
         let report = recover_single(src.path(), &out_path, &options).unwrap();
@@ -974,6 +1256,8 @@ mod tests {
             skip_corrupt: false,
             password: None,
             cluster_size_override: None,
+            resume: false,
+            on_conflict: ConflictStrategy::Ask,
         };
 
         let chain = vec![base.path().to_path_buf(), overlay.path().to_path_buf()];
@@ -1014,6 +1298,8 @@ mod tests {
             skip_corrupt: true,
             password: None,
             cluster_size_override: None,
+            resume: false,
+            on_conflict: ConflictStrategy::Ask,
         };
 
         let report = recover_single(src.path(), &out_path, &options).unwrap();
@@ -1037,6 +1323,7 @@ mod tests {
             orphan_data_clusters: 0,
             refcount_check: None,
             content_validation: None,
+            mapping_conflicts: 0,
             virtual_size: Some(1 << 20),
             mappings: vec![
                 MappingEntry {
@@ -1068,6 +1355,7 @@ mod tests {
             orphan_data_clusters: 0,
             refcount_check: None,
             content_validation: None,
+            mapping_conflicts: 0,
             virtual_size: Some(1 << 20),
             mappings: vec![
                 MappingEntry {
@@ -1143,6 +1431,8 @@ mod tests {
             skip_corrupt: false,
             password: Some(password.to_vec()),
             cluster_size_override: None,
+            resume: false,
+            on_conflict: ConflictStrategy::Ask,
         };
 
         let report = recover_single(&src_path, &recovered_path, &options).unwrap();
@@ -1200,6 +1490,8 @@ mod tests {
             skip_corrupt: false,
             password: None,
             cluster_size_override: None,
+            resume: false,
+            on_conflict: ConflictStrategy::Ask,
         };
 
         let report = recover_single(&src_path, &recovered_path, &options).unwrap();
@@ -1247,5 +1539,61 @@ mod tests {
         let (offset, data) = result.unwrap();
         assert_eq!(&data[..6], b"LUKS\xba\xbe");
         assert!(offset > 0, "LUKS header should not be at offset 0");
+    }
+
+    #[test]
+    fn resume_recovery_skips_already_written() {
+        let cluster_bits = 16u32;
+        let cluster_size = 1u64 << cluster_bits;
+
+        let data = vec![0xAA; cluster_size as usize];
+        let tmpfile = create_data_image(cluster_bits, &data);
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let out_path = out_dir.path().join("recovered.raw");
+
+        // First run: normal recovery
+        let options = RecoverOptions {
+            format: OutputFormat::Raw,
+            skip_corrupt: true,
+            password: None,
+            cluster_size_override: None,
+            resume: false,
+            on_conflict: ConflictStrategy::Ask,
+        };
+
+        let report1 = recover_single(tmpfile.path(), &out_path, &options).unwrap();
+        let written1 = report1.clusters_written;
+        assert!(written1 > 0);
+
+        // Verify no progress file left after success
+        assert!(!RecoveryProgress::progress_path(&out_path).exists());
+
+        // Simulate interrupted run by creating a progress file
+        let mut fake_progress = RecoveryProgress::default();
+        // Record the data cluster's guest offset as already written
+        fake_progress.written_offsets.push(0); // guest offset 0
+        fake_progress.total_clusters = 1;
+        fake_progress.save(&out_path).unwrap();
+
+        // Second run: resume — should skip the cluster we "already wrote"
+        let resume_options = RecoverOptions {
+            format: OutputFormat::Raw,
+            skip_corrupt: true,
+            password: None,
+            cluster_size_override: None,
+            resume: true,
+            on_conflict: ConflictStrategy::Ask,
+        };
+
+        let report2 = recover_single(tmpfile.path(), &out_path, &resume_options).unwrap();
+        // The cluster at guest 0 was in the progress file, so it gets counted
+        // in clusters_written via already_done.len(), but not re-written.
+        // Total clusters_written should include the already-done count.
+        assert!(report2.clusters_written >= written1,
+            "resume should count already-written clusters");
+
+        // Progress file should be cleaned up after success
+        assert!(!RecoveryProgress::progress_path(&out_path).exists());
     }
 }

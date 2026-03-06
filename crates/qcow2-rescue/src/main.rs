@@ -184,7 +184,7 @@ fn run_analyze(path: PathBuf, output: PathBuf, cluster_size: Option<u64>) -> Res
 
     // Phase 2: Metadata reconstruction
     println!("reconstructing metadata...");
-    let tables_report = reconstruct::reconstruct(&path, &cluster_map)?;
+    let mut tables_report = reconstruct::reconstruct(&path, &cluster_map)?;
 
     println!(
         "reconstruction complete: {} L1 entries, {} L2 verified, {} L2 suspicious, {} mappings ({} from L2), {} orphan data clusters",
@@ -195,6 +195,29 @@ fn run_analyze(path: PathBuf, output: PathBuf, cluster_size: Option<u64>) -> Res
         tables_report.mappings_from_l2,
         tables_report.orphan_data_clusters,
     );
+
+    // Phase 2b: Content validation (decompression/decryption probes)
+    let has_compressed = tables_report.mappings.iter().any(|m| m.compressed);
+    let has_encrypted = tables_report.mappings.iter().any(|m| m.encrypted);
+
+    if has_compressed || has_encrypted {
+        println!("validating content ({} compressed, {} encrypted mappings)...",
+            tables_report.mappings.iter().filter(|m| m.compressed).count(),
+            tables_report.mappings.iter().filter(|m| m.encrypted).count(),
+        );
+        let validation = validate::validate_content(
+            &path,
+            cluster_size,
+            &tables_report.mappings,
+            None, // no crypt context in analyze mode
+        )?;
+        println!(
+            "validation: {}/{} compressed OK, {}/{} encrypted OK",
+            validation.compressed_ok, validation.compressed_probed,
+            validation.encrypted_ok, validation.encrypted_probed,
+        );
+        tables_report.content_validation = Some(validation);
+    }
 
     let tables_path = output.join("reconstructed_tables.json");
     let json = serde_json::to_string_pretty(&tables_report)?;
@@ -246,6 +269,8 @@ fn run_recover(config: RescueConfig) -> Result<()> {
         skip_corrupt: true,
         password: config.password,
         cluster_size_override: config.cluster_size_override,
+        resume: config.resume,
+        on_conflict: config.on_conflict,
     };
 
     // Determine if we have a chain or a single file
