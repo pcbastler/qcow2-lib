@@ -4,5 +4,6 @@ members = [
     "crates/qcow2-core",
     "crates/qcow2",
     "crates/qcow2-tool",
+    "crates/qcow2-rescue",
 ]
 resolver = "2"

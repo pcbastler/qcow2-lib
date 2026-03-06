@@ -1,0 +1,22 @@
+[package]
+name = "qcow2-rescue"
+version = "0.1.0"
+edition = "2021"
+description = "Recovery tool for corrupted QCOW2 images"
+license-file = "../../LICENSE"
+rust-version = "1.70"
+
+[dependencies]
+qcow2-format = { path = "../qcow2-format" }
+qcow2 = { path = "../qcow2" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+byteorder = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "qcow2-rescue"
+path = "src/main.rs"
