@@ -5,14 +5,19 @@
 //! encrypted clusters). Successful decompression/decryption is strong
 //! evidence that the mapping is correct.
 
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+mod compression;
+mod structure;
 
-use qcow2::engine::compression::decompress_cluster;
-use qcow2_format::constants::*;
+pub use structure::has_structure;
+
+use std::io::{Seek, SeekFrom};
+use std::path::Path;
 
 use crate::error::Result;
 use crate::report::*;
+
+use compression::{detect_compression_type, try_decompress_cluster};
+use structure::try_decrypt_cluster;
 
 /// Maximum number of clusters to probe per category.
 const MAX_PROBES: usize = 100;
@@ -34,7 +39,6 @@ pub fn validate_content(
     let mut file = std::fs::File::open(path)?;
     let file_size = file.seek(SeekFrom::End(0))?;
 
-    // Detect compression type from header
     let compression_type = detect_compression_type(&mut file, cluster_size);
 
     let mut compressed_probed = 0u64;
@@ -45,13 +49,8 @@ pub fn validate_content(
     let mut encrypted_failed = 0u64;
 
     for m in mappings {
-        // Compressed cluster validation
         if m.compressed && compressed_probed < MAX_PROBES as u64 {
             compressed_probed += 1;
-
-            // Parse the host offset as a compressed descriptor to get the actual
-            // compressed data location and size.
-            // The host_offset in the mapping is already the raw host offset from L2.
             match try_decompress_cluster(
                 &mut file,
                 m.host_offset,
@@ -65,16 +64,10 @@ pub fn validate_content(
             }
         }
 
-        // Encrypted cluster validation
         if m.encrypted && encrypted_probed < MAX_PROBES as u64 {
             if let Some(crypt) = crypt_context {
                 encrypted_probed += 1;
-                match try_decrypt_cluster(
-                    &mut file,
-                    m.host_offset,
-                    cluster_size,
-                    crypt,
-                ) {
+                match try_decrypt_cluster(&mut file, m.host_offset, cluster_size, crypt) {
                     Ok(true) => encrypted_ok += 1,
                     Ok(false) | Err(_) => encrypted_failed += 1,
                 }
@@ -92,121 +85,7 @@ pub fn validate_content(
     })
 }
 
-/// Detect compression type from the QCOW2 header.
-///
-/// Returns 0 (deflate) as default if the header is unreadable.
-fn detect_compression_type(file: &mut std::fs::File, cluster_size: u64) -> u8 {
-    let mut buf = vec![0u8; 4096.min(cluster_size as usize)];
-    if file.seek(SeekFrom::Start(0)).is_err() {
-        return COMPRESSION_DEFLATE;
-    }
-    if file.read_exact(&mut buf).is_err() {
-        return COMPRESSION_DEFLATE;
-    }
-    match qcow2_format::Header::read_from(&buf) {
-        Ok(h) => h.compression_type,
-        Err(_) => COMPRESSION_DEFLATE,
-    }
-}
 
-/// Try to decompress a compressed cluster.
-///
-/// For compressed clusters, the host_offset from the L2 entry is the raw
-/// byte offset where compressed data starts. We need to figure out how many
-/// bytes to read — we read up to `cluster_size` bytes from that offset
-/// (compressed data is always smaller than one cluster).
-///
-/// Returns `Ok(true)` if decompression succeeded.
-fn try_decompress_cluster(
-    file: &mut std::fs::File,
-    host_offset: u64,
-    cluster_size: u64,
-    _cluster_bits: u32,
-    file_size: u64,
-    compression_type: u8,
-) -> Result<bool> {
-    if host_offset >= file_size {
-        return Ok(false);
-    }
-
-    // Read up to cluster_size bytes from the compressed offset.
-    // The actual compressed data is shorter, but the decompressor
-    // will stop at the right boundary.
-    let read_size = cluster_size.min(file_size - host_offset) as usize;
-    let mut buf = vec![0u8; read_size];
-    file.seek(SeekFrom::Start(host_offset))?;
-    file.read_exact(&mut buf)?;
-
-    // Try to decompress
-    match decompress_cluster(&buf, cluster_size as usize, 0, compression_type) {
-        Ok(_) => Ok(true),
-        Err(_) => Ok(false),
-    }
-}
-
-/// Try to decrypt a cluster and check if the result looks like valid data.
-///
-/// We decrypt the cluster and check if the result is not all-zero and not
-/// high-entropy random-looking data (which would suggest wrong key).
-///
-/// Returns `Ok(true)` if decryption succeeded and the result looks plausible.
-fn try_decrypt_cluster(
-    file: &mut std::fs::File,
-    host_offset: u64,
-    cluster_size: u64,
-    crypt: &qcow2_core::engine::encryption::CryptContext,
-) -> Result<bool> {
-    let mut buf = vec![0u8; cluster_size as usize];
-    file.seek(SeekFrom::Start(host_offset))?;
-    file.read_exact(&mut buf)?;
-
-    // Decrypt in place
-    if crypt.decrypt_cluster(host_offset, &mut buf).is_err() {
-        return Ok(false);
-    }
-
-    // After decryption, check if data looks plausible:
-    // With the wrong key, decrypted data looks like random noise.
-    // We check for repeating byte patterns that are common in real disk data
-    // but extremely unlikely in random data.
-    Ok(has_structure(&buf))
-}
-
-/// Heuristic: does the decrypted data show any structure?
-///
-/// Real disk data (filesystems, etc.) typically has runs of identical bytes,
-/// zero regions, or recognizable patterns. Random data from a wrong-key
-/// decryption has very high entropy with no such patterns.
-///
-/// We check for:
-/// - Any run of 8+ identical bytes (very unlikely in random data: ~1/256^7)
-/// - More than 1% zero bytes (common in real filesystem data)
-pub fn has_structure(data: &[u8]) -> bool {
-    if data.is_empty() {
-        return false;
-    }
-
-    // Check for zero byte ratio
-    let zero_count = data.iter().filter(|&&b| b == 0).count();
-    if zero_count * 100 / data.len() > 1 {
-        return true;
-    }
-
-    // Check for runs of identical bytes (>= 8)
-    let mut run_len = 1u32;
-    for i in 1..data.len() {
-        if data[i] == data[i - 1] {
-            run_len += 1;
-            if run_len >= 8 {
-                return true;
-            }
-        } else {
-            run_len = 1;
-        }
-    }
-
-    false
-}
 
 #[cfg(test)]
 mod tests {
