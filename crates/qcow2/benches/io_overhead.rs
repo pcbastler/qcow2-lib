@@ -313,31 +313,39 @@ fn bench_cache_mode_comparison(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("cache_mode");
 
-    let size: usize = 5 << 20; // 5 MB
-    group.throughput(Throughput::Bytes(size as u64));
+    for &size in &[5usize << 20, 500 << 20] {
+        let label_mb = size >> 20;
+        group.throughput(Throughput::Bytes(size as u64));
+        if size >= 100 << 20 {
+            group.sample_size(10);
+        }
 
-    for &(label, mode) in &[
-        ("write_back", CacheMode::WriteBack),
-        ("write_through", CacheMode::WriteThrough),
-    ] {
-        group.bench_function(label, |b| {
-            b.iter_with_setup(
-                || {
-                    let (dir, mut image) = create_qcow2(size as u64);
-                    image.set_cache_mode(mode).unwrap();
-                    (dir, image)
-                },
-                |(_dir, mut image)| {
-                    let chunk = vec![0xAAu8; CLUSTER_SIZE];
-                    let mut offset = 0u64;
-                    while offset < size as u64 {
-                        image.write_at(&chunk, offset).unwrap();
-                        offset += CLUSTER_SIZE as u64;
-                    }
-                    image.flush().unwrap();
+        for &(mode_label, mode) in &[
+            ("write_back", CacheMode::WriteBack),
+            ("write_through", CacheMode::WriteThrough),
+        ] {
+            group.bench_function(
+                BenchmarkId::new(mode_label, format!("{}MB", label_mb)),
+                |b| {
+                    b.iter_with_setup(
+                        || {
+                            let (dir, mut image) = create_qcow2(size as u64);
+                            image.set_cache_mode(mode).unwrap();
+                            (dir, image)
+                        },
+                        |(_dir, mut image)| {
+                            let chunk = vec![0xAAu8; CLUSTER_SIZE];
+                            let mut offset = 0u64;
+                            while offset < size as u64 {
+                                image.write_at(&chunk, offset).unwrap();
+                                offset += CLUSTER_SIZE as u64;
+                            }
+                            image.flush().unwrap();
+                        },
+                    );
                 },
             );
-        });
+        }
     }
 
     group.finish();
