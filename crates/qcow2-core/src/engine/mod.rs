@@ -21,7 +21,7 @@ pub mod writer;
 
 // Re-exports for convenience
 pub use bitmap_manager::BitmapInfo;
-pub use cache::{CacheConfig, CacheStats};
+pub use cache::{CacheConfig, CacheMode, CacheStats};
 pub use cluster_mapping::ClusterResolution;
 pub use hash_manager::{HashEntry, HashInfo, HashMismatch};
 pub use read_mode::{ReadMode, ReadWarning};

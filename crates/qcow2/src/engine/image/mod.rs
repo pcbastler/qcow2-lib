@@ -25,7 +25,7 @@ use byteorder::{BigEndian, ByteOrder};
 
 use crate::engine::backing::{self as backing_mod, BackingChain};
 use crate::engine::bitmap_manager::BitmapManager;
-use crate::engine::cache::{CacheConfig, CacheStats, MetadataCache};
+use crate::engine::cache::{CacheConfig, CacheMode, CacheStats, MetadataCache};
 use crate::engine::cluster_mapping::ClusterMapper;
 use crate::engine::compression;
 use crate::engine::hash_manager::{self, HashManager};
@@ -476,6 +476,28 @@ impl Qcow2Image {
     /// Current cache statistics for diagnostics.
     pub fn cache_stats(&self) -> &CacheStats {
         self.cache.stats()
+    }
+
+    /// Current cache write mode.
+    pub fn cache_mode(&self) -> CacheMode {
+        self.cache.mode()
+    }
+
+    /// Set the cache write mode.
+    ///
+    /// When switching from WriteBack to WriteThrough, all dirty entries are
+    /// flushed to disk first. Switching from WriteThrough to WriteBack is
+    /// always safe (no flush needed).
+    pub fn set_cache_mode(&mut self, mode: CacheMode) -> Result<()> {
+        if self.cache.mode() == mode {
+            return Ok(());
+        }
+        // Flush dirty entries before switching to WriteThrough
+        if mode == CacheMode::WriteThrough {
+            self.flush_dirty_metadata()?;
+        }
+        self.cache.set_mode(mode);
+        Ok(())
     }
 
     /// Access the underlying I/O backend.
@@ -1524,5 +1546,44 @@ mod tests {
 
         image.flush().unwrap();
         assert!(!image.is_dirty());
+    }
+
+    #[test]
+    fn default_cache_mode_is_writeback() {
+        let backend = build_writable_test_image();
+        let image = Qcow2Image::from_backend_rw(Box::new(backend)).unwrap();
+        assert_eq!(image.cache_mode(), CacheMode::WriteBack);
+    }
+
+    #[test]
+    fn set_cache_mode_writethrough() {
+        let backend = build_writable_test_image();
+        let mut image = Qcow2Image::from_backend_rw(Box::new(backend)).unwrap();
+
+        image.write_at(&[0xAA; 64], 0).unwrap();
+        // Switch to WriteThrough — should flush dirty entries
+        image.set_cache_mode(CacheMode::WriteThrough).unwrap();
+        assert_eq!(image.cache_mode(), CacheMode::WriteThrough);
+
+        // Data should still be readable
+        let mut buf = vec![0u8; 64];
+        image.read_at(&mut buf, 0).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAA));
+    }
+
+    #[test]
+    fn writeback_cache_improves_hit_rate() {
+        let backend = build_writable_test_image();
+        let mut image = Qcow2Image::from_backend_rw(Box::new(backend)).unwrap();
+        assert_eq!(image.cache_mode(), CacheMode::WriteBack);
+
+        // Multiple writes to the same cluster should hit the cached L2 table
+        for i in 0..10u8 {
+            image.write_at(&[i; 64], i as u64 * 64).unwrap();
+        }
+
+        let stats = image.cache_stats();
+        assert!(stats.l2_hits >= 9, "expected >= 9 L2 hits, got {}", stats.l2_hits);
+        assert_eq!(stats.l2_misses, 1, "expected 1 L2 miss (first load)");
     }
 }

@@ -23,7 +23,7 @@ pub mod integrity;
 
 // Re-exports for convenience
 pub use qcow2_core::engine::{
-    BitmapInfo, CacheConfig, CacheStats, ClusterResolution, HashEntry, HashInfo, HashMismatch,
+    BitmapInfo, CacheConfig, CacheMode, CacheStats, ClusterResolution, HashEntry, HashInfo, HashMismatch,
     ReadMode, ReadWarning, SnapshotInfo,
 };
 pub use image::Qcow2Image;
