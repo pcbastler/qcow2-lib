@@ -1,7 +1,9 @@
 //! QCOW2 write engine: translates guest writes into host cluster operations.
 //!
-//! Handles cluster allocation, L1/L2 table updates, and write-through
-//! metadata persistence. Supports writing to unallocated, zero, and
+//! Handles cluster allocation, L1/L2 table updates, and metadata
+//! persistence. In **WriteBack** mode, L2 modifications stay in the cache
+//! and are flushed lazily; in **WriteThrough** mode, every L2 update is
+//! written to disk immediately. Supports writing to unallocated, zero, and
 //! standard (copied) clusters. Compressed clusters are decompressed
 //! before applying the write.
 
@@ -236,6 +238,16 @@ impl<'a> Qcow2Writer<'a> {
         old_offset: ClusterOffset,
     ) -> Result<ClusterOffset> {
         let cluster_size = 1usize << self.cluster_bits;
+
+        // Flush dirty L2 to disk before COW reads from disk, otherwise
+        // dirty modifications would be lost (the disk read would see stale data).
+        self.cache.flush_single_l2(old_offset, |offset, table| {
+            let mut buf = vec![0u8; cluster_size];
+            // flush_single_l2 only calls us if dirty, ignore write errors
+            // (they'll surface on the next explicit write).
+            let _ = table.write_to(&mut buf);
+            let _ = self.backend.write_all_at(&buf, offset);
+        });
 
         // Read existing L2 table
         let mut l2_data = vec![0u8; cluster_size];
@@ -693,13 +705,25 @@ impl<'a> Qcow2Writer<'a> {
         Ok(())
     }
 
-    /// Write a single L2 entry to disk and evict the L2 table from cache.
+    /// Update a single L2 entry.
+    ///
+    /// In **WriteBack** mode: modifies the entry in the cache and marks it dirty.
+    /// In **WriteThrough** mode: writes to disk and evicts the cache entry (legacy).
     fn write_l2_entry(
         &mut self,
         l2_table_offset: ClusterOffset,
         index: L2Index,
         entry: L2Entry,
     ) -> Result<()> {
+        // WriteBack path: modify in-place in cache
+        if let Some(cache_entry) = self.cache.get_l2_entry_mut(l2_table_offset) {
+            cache_entry.value.set(index, entry)?;
+            cache_entry.dirty = true;
+            return Ok(());
+        }
+
+        // WriteThrough path (or WriteBack cache miss — shouldn't happen after load_l2_table):
+        // write entry bytes to disk
         let geo = self.mapper.geometry();
         let entry_size = geo.l2_entry_size() as u64;
         let offset = l2_table_offset.0 + (index.0 as u64 * entry_size);
@@ -731,8 +755,21 @@ impl<'a> Qcow2Writer<'a> {
         self.backend.read_exact_at(&mut buf, offset.0)?;
         let table = L2Table::read_from(&buf, self.mapper.geometry())?;
 
-        self.cache.insert_l2_table(offset, table.clone());
+        self.cache.insert_l2_table(offset, table.clone(), false);
+        self.flush_pending_l2_evictions()?;
         Ok(table)
+    }
+
+    /// Write any dirty L2 tables that were evicted from the cache by LRU pressure.
+    fn flush_pending_l2_evictions(&mut self) -> Result<()> {
+        let pending = self.cache.take_pending_l2_evictions();
+        let cluster_size = 1usize << self.cluster_bits;
+        for (offset, table) in &pending {
+            let mut buf = vec![0u8; cluster_size];
+            table.write_to(&mut buf)?;
+            self.backend.write_all_at(&buf, *offset)?;
+        }
+        Ok(())
     }
 
     /// Write a pre-compressed cluster to the image.

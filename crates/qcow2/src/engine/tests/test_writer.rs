@@ -1,6 +1,6 @@
 //! Tests for writer (originally in engine/writer.rs)
 
-use crate::engine::cache::{CacheConfig, MetadataCache};
+use crate::engine::cache::{CacheConfig, CacheMode, MetadataCache};
 use crate::engine::cluster_mapping::ClusterMapper;
 use crate::engine::refcount_manager::RefcountManager;
 use crate::engine::writer::Qcow2Writer;
@@ -108,7 +108,10 @@ fn setup_with_l2(l2_entries: Option<&[(u32, L2Entry)]>) -> TestSetup {
 
     let header = make_header();
     let refcount_manager = RefcountManager::load(&backend, &header).unwrap();
-    let cache = MetadataCache::new(CacheConfig::default());
+    let cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     TestSetup {
         backend,
@@ -311,7 +314,10 @@ fn setup_with_shared_data(pattern: u8) -> TestSetup {
     let header = make_header();
     let refcount_manager =
         RefcountManager::load(&backend, &header).unwrap();
-    let cache = MetadataCache::new(CacheConfig::default());
+    let cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     TestSetup {
         backend,
@@ -684,7 +690,10 @@ fn cow_l2_table_when_l1_not_copied() {
     let mapper = ClusterMapper::new(l1_table, GEO_STD, file_size);
     let header = make_header();
     let refcount_manager = RefcountManager::load(&backend, &header).unwrap();
-    let cache = MetadataCache::new(CacheConfig::default());
+    let cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     let mut s = TestSetup {
         backend,
@@ -761,7 +770,10 @@ fn cow_l2_table_preserves_existing_entries() {
     let mapper = ClusterMapper::new(l1_table, GEO_STD, file_size);
     let header = make_header();
     let refcount_manager = RefcountManager::load(&backend, &header).unwrap();
-    let cache = MetadataCache::new(CacheConfig::default());
+    let cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     let mut s = TestSetup {
         backend,

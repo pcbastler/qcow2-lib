@@ -367,7 +367,7 @@ impl RefcountManager {
         backend.read_exact_at(&mut buf, offset.0)?;
         let block = RefcountBlock::read_from(&buf, self.state.refcount_order)?;
 
-        cache.insert_refcount_block(offset, block.clone());
+        cache.insert_refcount_block(offset, block.clone(), false);
         Ok(block)
     }
 
@@ -388,6 +388,9 @@ impl RefcountManager {
     }
 
     /// Internal set_refcount that assumes coverage already exists.
+    ///
+    /// In WriteBack mode, modifies the refcount block in-place in the cache
+    /// and marks it dirty. In WriteThrough mode, writes to disk immediately.
     fn set_refcount_internal(
         &self,
         cluster_offset: u64,
@@ -407,10 +410,43 @@ impl RefcountManager {
                 ),
             })?;
 
+        // WriteBack: modify in cache if possible
+        if let Some(entry) = cache.get_refcount_entry_mut(block_offset) {
+            entry.value.set(block_index, value)?;
+            entry.dirty = true;
+            return Ok(());
+        }
+
+        // Load from disk (or cache in WriteThrough where get_mut returns None)
         let mut block = self.load_refcount_block(block_offset, backend, cache)?;
         block.set(block_index, value)?;
-        self.write_refcount_block(block_offset, &block, backend, cache)?;
 
+        if cache.is_write_back() {
+            // Insert as dirty — will be flushed later
+            cache.insert_refcount_block(block_offset, block, true);
+            // Handle pending evictions
+            self.flush_pending_refcount_evictions(backend, cache)?;
+        } else {
+            // WriteThrough: write to disk immediately
+            self.write_refcount_block(block_offset, &block, backend, cache)?;
+        }
+
+        Ok(())
+    }
+
+    /// Write any pending dirty refcount blocks that were evicted by LRU pressure.
+    fn flush_pending_refcount_evictions(
+        &self,
+        backend: &dyn IoBackend,
+        cache: &mut MetadataCache,
+    ) -> Result<()> {
+        let pending = cache.take_pending_refcount_evictions();
+        let cluster_size = 1usize << self.state.cluster_bits;
+        for (offset, block) in &pending {
+            let mut buf = vec![0u8; cluster_size];
+            block.write_to(&mut buf)?;
+            backend.write_all_at(&buf, *offset)?;
+        }
         Ok(())
     }
 
@@ -466,18 +502,23 @@ impl RefcountManager {
         let (self_table_index, self_block_index) =
             self.cluster_to_refcount_index(block_offset);
         if self_table_index == table_index {
-            // The new block covers itself — load it, set refcount, write back
+            // The new block covers itself — set its own refcount
             let mut block = RefcountBlock::new_empty(
                 cluster_size as usize,
                 self.state.refcount_order,
             );
             block.set(self_block_index, 1)?;
-            self.write_refcount_block(
-                ClusterOffset(block_offset),
-                &block,
-                backend,
-                cache,
-            )?;
+            if cache.is_write_back() {
+                cache.insert_refcount_block(ClusterOffset(block_offset), block, true);
+                self.flush_pending_refcount_evictions(backend, cache)?;
+            } else {
+                self.write_refcount_block(
+                    ClusterOffset(block_offset),
+                    &block,
+                    backend,
+                    cache,
+                )?;
+            }
         }
 
         Ok(())

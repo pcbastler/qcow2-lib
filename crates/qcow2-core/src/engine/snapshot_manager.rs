@@ -272,6 +272,7 @@ impl<'a> SnapshotManager<'a> {
             self.free_snapshot_table_clusters(old_offset, &all_snaps[..all_snaps.len() - 1])?;
         }
 
+        self.flush_dirty_cache()?;
         self.backend.flush()?;
         Ok(())
     }
@@ -323,6 +324,7 @@ impl<'a> SnapshotManager<'a> {
         old_snaps_for_size.push(target);
         self.free_snapshot_table_clusters(old_table_offset, &old_snaps_for_size)?;
 
+        self.flush_dirty_cache()?;
         self.backend.flush()?;
         Ok(())
     }
@@ -390,7 +392,9 @@ impl<'a> SnapshotManager<'a> {
         // Phase D2: Restore hash table from snapshot.
         self.apply_snapshot_hash_table(target, cluster_size)?;
 
-        // Evict all cached L2 tables (active state changed entirely)
+        // Flush dirty metadata created during refcount adjustments,
+        // then clear the cache (active L1/L2 state changed entirely).
+        self.flush_dirty_cache()?;
         self.cache.clear();
 
         self.backend.flush()?;
@@ -398,6 +402,44 @@ impl<'a> SnapshotManager<'a> {
     }
 
     // ---- Internal helpers ----
+
+    /// Flush all dirty L2 tables and refcount blocks from cache to disk.
+    fn flush_dirty_cache(&mut self) -> Result<()> {
+        let cluster_size = 1usize << self.cluster_bits;
+
+        // Pending evictions first
+        let pending_rc = self.cache.take_pending_refcount_evictions();
+        for (offset, block) in &pending_rc {
+            let mut buf = vec![0u8; cluster_size];
+            block.write_to(&mut buf)?;
+            self.backend.write_all_at(&buf, *offset)?;
+        }
+        let pending_l2 = self.cache.take_pending_l2_evictions();
+        for (offset, table) in &pending_l2 {
+            let mut buf = vec![0u8; cluster_size];
+            table.write_to(&mut buf)?;
+            self.backend.write_all_at(&buf, *offset)?;
+        }
+
+        // In-cache dirty entries
+        let backend = self.backend;
+        self.cache
+            .flush_refcount_blocks(&mut |offset: u64, block: &crate::format::refcount::RefcountBlock| -> Result<()> {
+                let mut buf = vec![0u8; cluster_size];
+                block.write_to(&mut buf)?;
+                backend.write_all_at(&buf, offset)?;
+                Ok(())
+            })?;
+        self.cache
+            .flush_l2_tables(&mut |offset: u64, table: &crate::format::l2::L2Table| -> Result<()> {
+                let mut buf = vec![0u8; cluster_size];
+                table.write_to(&mut buf)?;
+                backend.write_all_at(&buf, offset)?;
+                Ok(())
+            })?;
+
+        Ok(())
+    }
 
     /// Generate the next snapshot ID (max existing + 1).
     fn next_snapshot_id(&self, existing: &[SnapshotHeader]) -> u64 {

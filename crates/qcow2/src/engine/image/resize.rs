@@ -49,6 +49,9 @@ impl Qcow2Image {
             self.grow_l1_table(new_l1_entries, old_l1_entries, cluster_size)?;
         }
 
+        // Flush dirty metadata before writing header and syncing
+        self.flush_dirty_metadata()?;
+
         // Update header
         self.header.virtual_size = new_virtual_size;
         self.write_header_resize_fields()?;
@@ -234,8 +237,10 @@ impl Qcow2Image {
         self.mapper.l1_table_mut().shrink(new_l1_entries);
         self.header.l1_table_entries = new_l1_entries;
 
-        // Invalidate cache — L2 tables and refcount blocks may reference
+        // Flush dirty refcount blocks from shrink operations, then
+        // invalidate cache — L2 tables and refcount blocks may reference
         // clusters that no longer exist after shrink.
+        self.flush_dirty_metadata()?;
         self.cache.clear();
 
         Ok(())
@@ -289,7 +294,9 @@ impl Qcow2Image {
         // Update mapper's file size
         self.mapper.set_file_size(new_file_size);
 
-        // Invalidate cache — refcount blocks may reference truncated regions.
+        // Flush dirty entries, then invalidate cache — refcount blocks may
+        // reference truncated regions.
+        self.flush_dirty_metadata()?;
         self.cache.clear();
 
         Ok(saved)

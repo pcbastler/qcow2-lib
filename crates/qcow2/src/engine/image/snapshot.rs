@@ -51,6 +51,9 @@ impl Qcow2Image {
             return Err(Error::ReadOnly);
         }
 
+        // Flush dirty metadata so snapshot sees current on-disk state
+        self.flush_dirty_metadata()?;
+
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -79,6 +82,9 @@ impl Qcow2Image {
             return Err(Error::ReadOnly);
         }
 
+        // Flush dirty metadata so snapshot sees current on-disk state
+        self.flush_dirty_metadata()?;
+
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -106,6 +112,9 @@ impl Qcow2Image {
             return Err(Error::ReadOnly);
         }
 
+        // Flush dirty metadata so snapshot sees current on-disk state
+        self.flush_dirty_metadata()?;
+
         let refcount_manager = self
             .refcount_manager
             .as_mut()
@@ -125,6 +134,10 @@ impl Qcow2Image {
 
         // Re-detect hash state after apply (snapshot may have/not have hashes)
         self.has_hashes = hash_manager::detect_hashes(&self.extensions);
+
+        // apply_snapshot calls cache.clear() which drops dirty entries created
+        // during refcount adjustments — no further flush needed since clear()
+        // already happened. But we DO need to flush after create/delete.
         Ok(())
     }
 }

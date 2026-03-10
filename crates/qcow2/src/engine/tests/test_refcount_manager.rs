@@ -1,6 +1,6 @@
 //! Tests for refcount_manager (originally in engine/refcount_manager.rs)
 
-use crate::engine::cache::{CacheConfig, MetadataCache};
+use crate::engine::cache::{CacheConfig, CacheMode, MetadataCache};
 use crate::engine::refcount_manager::{AllocationMode, RefcountManager};
 use crate::error::Error;
 use crate::format::constants::REFCOUNT_TABLE_ENTRY_SIZE;
@@ -73,7 +73,10 @@ fn get_refcount_unallocated_returns_zero() {
     let header = make_header(1);
     let backend = make_backend(1, &[]);
     let mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     let rc = mgr.get_refcount(5 * CLUSTER_SIZE as u64, &backend, &mut cache).unwrap();
     assert_eq!(rc, 0);
@@ -84,7 +87,10 @@ fn get_refcount_beyond_table_returns_zero() {
     let header = make_header(1);
     let backend = make_backend(1, &[]);
     let mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Way beyond what the table covers
     let rc = mgr
@@ -99,7 +105,10 @@ fn set_and_get_refcount() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Cluster 0 maps to refcount table index 0, block index 0
     mgr.set_refcount(0, 42, &backend, &mut cache).unwrap();
@@ -114,7 +123,10 @@ fn append_mode_returns_sequential_offsets() {
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr =
         RefcountManager::load_with_mode(&backend, &header, AllocationMode::Append).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     let initial_end = mgr.state().next_cluster_offset;
     let c1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
@@ -130,7 +142,10 @@ fn allocate_cluster_sets_refcount_to_one() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     let c = mgr.allocate_cluster(&backend, &mut cache).unwrap();
     let rc = mgr.get_refcount(c.0, &backend, &mut cache).unwrap();
@@ -143,7 +158,10 @@ fn free_cluster_sets_refcount_to_zero() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Set refcount to 1 first
     mgr.set_refcount(0, 1, &backend, &mut cache).unwrap();
@@ -162,7 +180,10 @@ fn refcount_mapping_across_block_boundary() {
     // Two refcount table entries, second pointing to cluster 4
     let backend = make_backend(2, &[(0, block_offset), (1, 4 * CLUSTER_SIZE as u64)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Set refcount for cluster 0 (in first block)
     mgr.set_refcount(0, 5, &backend, &mut cache).unwrap();
@@ -190,7 +211,10 @@ fn ensure_coverage_allocates_new_block() {
     // No refcount blocks pre-allocated
     let backend = make_backend(1, &[]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Setting refcount on cluster 0 should trigger block allocation
     mgr.set_refcount(0, 1, &backend, &mut cache).unwrap();
@@ -209,7 +233,10 @@ fn write_through_persists_to_backend() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     mgr.set_refcount(0, 99, &backend, &mut cache).unwrap();
 
@@ -226,7 +253,10 @@ fn evicts_cache_after_write() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Prime the cache
     let _ = mgr.get_refcount(0, &backend, &mut cache).unwrap();
@@ -248,7 +278,10 @@ fn load_with_append_mode() {
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr =
         RefcountManager::load_with_mode(&backend, &header, AllocationMode::Append).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     assert_eq!(mgr.allocation_mode(), AllocationMode::Append);
 
@@ -296,7 +329,10 @@ fn increment_from_zero_returns_one() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     let new_val = mgr.increment_refcount(0, &backend, &mut cache).unwrap();
     assert_eq!(new_val, 1);
@@ -309,7 +345,10 @@ fn increment_from_one_returns_two() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     mgr.set_refcount(0, 1, &backend, &mut cache).unwrap();
     let new_val = mgr.increment_refcount(0, &backend, &mut cache).unwrap();
@@ -322,7 +361,10 @@ fn decrement_from_two_returns_one() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     mgr.set_refcount(0, 2, &backend, &mut cache).unwrap();
     let new_val = mgr.decrement_refcount(0, &backend, &mut cache).unwrap();
@@ -335,7 +377,10 @@ fn decrement_from_one_returns_zero() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     mgr.set_refcount(0, 1, &backend, &mut cache).unwrap();
     let new_val = mgr.decrement_refcount(0, &backend, &mut cache).unwrap();
@@ -348,7 +393,10 @@ fn increment_at_max_returns_overflow_error() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // 16-bit refcount max = 65535
     mgr.set_refcount(0, 65535, &backend, &mut cache).unwrap();
@@ -365,7 +413,10 @@ fn increment_then_decrement_round_trip() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     mgr.increment_refcount(0, &backend, &mut cache).unwrap();
     mgr.increment_refcount(0, &backend, &mut cache).unwrap();
@@ -380,7 +431,10 @@ fn increment_persists_to_backend() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     mgr.increment_refcount(0, &backend, &mut cache).unwrap();
 
@@ -426,7 +480,10 @@ fn scanning_reuses_freed_cluster() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Allocate a cluster, then free it
     let c1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
@@ -443,7 +500,10 @@ fn scanning_falls_back_to_append() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Mark all clusters in the existing range as used so the scanner
     // finds nothing free and falls back to append.
@@ -464,7 +524,10 @@ fn scanning_hint_moves_cursor_back() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Set several clusters as used
     mgr.set_refcount(0, 1, &backend, &mut cache).unwrap();
@@ -496,7 +559,10 @@ fn append_mode_ignores_free_clusters() {
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr =
         RefcountManager::load_with_mode(&backend, &header, AllocationMode::Append).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Allocate, free, then allocate again
     let c1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
@@ -517,7 +583,10 @@ fn decrement_to_zero_hints_scanner() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Set cluster 1 refcount to 2, advance scan cursor past it
     let offset = CLUSTER_SIZE as u64;
@@ -544,7 +613,10 @@ fn scanning_after_multiple_frees() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Allocate 3 clusters
     let c1 = mgr.allocate_cluster(&backend, &mut cache).unwrap();
@@ -579,7 +651,10 @@ fn allocate_contiguous_returns_sequential() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     let initial_end = mgr.state().next_cluster_offset;
     let first = mgr
@@ -608,7 +683,10 @@ fn allocate_contiguous_skips_free_gaps() {
     let header = make_header(1);
     let backend = make_backend(1, &[(0, block_offset)]);
     let mut mgr = RefcountManager::load(&backend, &header).unwrap();
-    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut cache = MetadataCache::new(CacheConfig {
+        mode: CacheMode::WriteThrough,
+        ..CacheConfig::default()
+    });
 
     // Allocate a cluster, then free it to create a gap
     let gap = mgr.allocate_cluster(&backend, &mut cache).unwrap();

@@ -693,20 +693,68 @@ impl Qcow2Image {
         Ok(())
     }
 
-    /// Flush all pending writes and clear the DIRTY flag.
+    /// Flush all dirty cached metadata to disk and clear the DIRTY flag.
     ///
-    /// Since we use write-through, this only needs to flush the backend
-    /// and clear the dirty bit in the header.
+    /// In WriteBack mode, flushes refcount blocks first (crash consistency:
+    /// leaked space is recoverable, dangling L2 refs are not), then L2 tables,
+    /// then issues an fsync, and finally clears the DIRTY header bit.
     pub fn flush(&mut self) -> Result<()> {
         if !self.writable {
             return Err(Error::ReadOnly);
         }
+
+        self.flush_dirty_metadata()?;
 
         self.backend.flush()?;
 
         if self.dirty {
             self.clear_dirty()?;
         }
+
+        Ok(())
+    }
+
+    /// Write all dirty refcount blocks and L2 tables from cache to disk.
+    fn flush_dirty_metadata(&mut self) -> Result<()> {
+        let cluster_size = self.header.cluster_size() as usize;
+        let backend = &*self.backend;
+
+        // 0. Write any dirty entries evicted by LRU pressure but not yet persisted
+        {
+            let pending_l2 = self.cache.take_pending_l2_evictions();
+            for (offset, table) in &pending_l2 {
+                let mut buf = vec![0u8; cluster_size];
+                table.write_to(&mut buf)?;
+                backend.write_all_at(&buf, *offset)?;
+            }
+            let pending_rc = self.cache.take_pending_refcount_evictions();
+            for (offset, block) in &pending_rc {
+                let mut buf = vec![0u8; cluster_size];
+                block.write_to(&mut buf)?;
+                backend.write_all_at(&buf, *offset)?;
+            }
+        }
+
+        // 1. Refcount blocks first (crash consistency)
+        self.cache
+            .flush_refcount_blocks(
+                &mut |offset: u64, block: &crate::format::refcount::RefcountBlock| -> Result<()> {
+                    let mut buf = vec![0u8; cluster_size];
+                    block.write_to(&mut buf)?;
+                    backend.write_all_at(&buf, offset)?;
+                    Ok(())
+                },
+            )?;
+
+        // 2. L2 tables
+        self.cache.flush_l2_tables(
+            &mut |offset: u64, table: &crate::format::l2::L2Table| -> Result<()> {
+                let mut buf = vec![0u8; cluster_size];
+                table.write_to(&mut buf)?;
+                backend.write_all_at(&buf, offset)?;
+                Ok(())
+            },
+        )?;
 
         Ok(())
     }
@@ -883,8 +931,12 @@ impl Qcow2Image {
     /// This walks all L1/L2 tables (active **and** snapshots) to build an
     /// expected reference count map, then compares with stored refcounts.
     pub fn check_integrity(
-        &self,
+        &mut self,
     ) -> Result<crate::engine::integrity::IntegrityReport> {
+        // Flush dirty metadata so the check sees current on-disk state
+        if self.writable {
+            self.flush_dirty_metadata()?;
+        }
         crate::engine::integrity::check_integrity(
             self.backend.as_ref(),
             &self.header,
@@ -899,6 +951,8 @@ impl Qcow2Image {
         &mut self,
         mode: Option<crate::engine::integrity::RepairMode>,
     ) -> Result<crate::engine::integrity::IntegrityReport> {
+        // Flush dirty metadata so the check sees current on-disk state
+        self.flush_dirty_metadata()?;
         let report = crate::engine::integrity::check_integrity(
             self.backend.as_ref(),
             &self.header,
@@ -959,6 +1013,17 @@ impl Qcow2Image {
         match BitmapDirectoryEntry::read_directory(&buf, ext.nb_bitmaps) {
             Ok(entries) => entries.iter().any(|e| e.is_auto()),
             Err(_) => false,
+        }
+    }
+}
+
+impl Drop for Qcow2Image {
+    fn drop(&mut self) {
+        if self.writable {
+            // Best-effort flush of dirty metadata on drop.
+            // Errors are silently ignored since Drop cannot return errors.
+            let _ = self.flush_dirty_metadata();
+            let _ = self.backend.flush();
         }
     }
 }
