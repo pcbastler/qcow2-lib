@@ -187,6 +187,9 @@ impl RefcountManager {
     }
 
     /// Get the refcount for a cluster at the given host offset.
+    ///
+    /// Reads a single value from the refcount block without cloning the
+    /// full block. The block is loaded into the cache on first access.
     pub fn get_refcount(
         &self,
         cluster_offset: u64,
@@ -204,7 +207,14 @@ impl RefcountManager {
             None => return Ok(0),
         };
 
-        let block = self.load_refcount_block(block_offset, backend, cache)?;
+        // Try cache first (no clone)
+        if let Some(block) = cache.get_refcount_block(block_offset) {
+            return Ok(block.get(block_index)?);
+        }
+
+        // Cache miss: load into cache, then read from cache reference
+        self.load_refcount_block_into_cache(block_offset, backend, cache)?;
+        let block = cache.get_refcount_block(block_offset).expect("just inserted");
         Ok(block.get(block_index)?)
     }
 
@@ -351,7 +361,11 @@ impl RefcountManager {
         (table_index, block_index)
     }
 
-    /// Load a refcount block from disk or cache.
+    /// Load a refcount block from disk or cache (returns a clone).
+    ///
+    /// Prefer [`get_refcount`] for reading single values (no clone needed).
+    /// This method is used by [`set_refcount_internal`] in WriteThrough mode
+    /// where the block must be mutated and re-written.
     fn load_refcount_block(
         &self,
         offset: ClusterOffset,
@@ -362,13 +376,23 @@ impl RefcountManager {
             return Ok(block.clone());
         }
 
+        self.load_refcount_block_into_cache(offset, backend, cache)?;
+        Ok(cache.get_refcount_block(offset).expect("just inserted").clone())
+    }
+
+    /// Load a refcount block from disk and insert into the cache.
+    fn load_refcount_block_into_cache(
+        &self,
+        offset: ClusterOffset,
+        backend: &dyn IoBackend,
+        cache: &mut MetadataCache,
+    ) -> Result<()> {
         let cluster_size = 1usize << self.state.cluster_bits;
         let mut buf = vec![0u8; cluster_size];
         backend.read_exact_at(&mut buf, offset.0)?;
         let block = RefcountBlock::read_from(&buf, self.state.refcount_order)?;
-
-        cache.insert_refcount_block(offset, block.clone(), false);
-        Ok(block)
+        cache.insert_refcount_block(offset, block, false);
+        Ok(())
     }
 
     /// Write a refcount block back to disk and evict from cache.
@@ -479,10 +503,6 @@ impl RefcountManager {
         let block_offset = self.state.next_cluster_offset;
         self.state.next_cluster_offset += cluster_size;
 
-        // Write a zeroed block to disk
-        let zeroed_block = vec![0u8; cluster_size as usize];
-        backend.write_all_at(&zeroed_block, block_offset)?;
-
         // Update the refcount table entry in memory
         self.state.refcount_table[table_index] =
             RefcountTableEntry::with_block_offset(ClusterOffset(block_offset));
@@ -497,28 +517,29 @@ impl RefcountManager {
         )?;
         backend.write_all_at(&entry_buf, entry_disk_offset)?;
 
-        // Now set refcount=1 for the block itself (it's a used cluster)
-        // This block covers itself — find its index and set it
+        // Create the block in memory with its own refcount set to 1
+        let mut block = RefcountBlock::new_empty(
+            cluster_size as usize,
+            self.state.refcount_order,
+        );
         let (self_table_index, self_block_index) =
             self.cluster_to_refcount_index(block_offset);
         if self_table_index == table_index {
-            // The new block covers itself — set its own refcount
-            let mut block = RefcountBlock::new_empty(
-                cluster_size as usize,
-                self.state.refcount_order,
-            );
             block.set(self_block_index, 1)?;
-            if cache.is_write_back() {
-                cache.insert_refcount_block(ClusterOffset(block_offset), block, true);
-                self.flush_pending_refcount_evictions(backend, cache)?;
-            } else {
-                self.write_refcount_block(
-                    ClusterOffset(block_offset),
-                    &block,
-                    backend,
-                    cache,
-                )?;
-            }
+        }
+
+        if cache.is_write_back() {
+            // WriteBack: insert dirty into cache, skip disk write of zeroed block
+            cache.insert_refcount_block(ClusterOffset(block_offset), block, true);
+            self.flush_pending_refcount_evictions(backend, cache)?;
+        } else {
+            // WriteThrough: write to disk immediately
+            self.write_refcount_block(
+                ClusterOffset(block_offset),
+                &block,
+                backend,
+                cache,
+            )?;
         }
 
         Ok(())
