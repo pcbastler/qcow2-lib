@@ -8,7 +8,7 @@ use byteorder::{BigEndian, ByteOrder};
 use crate::engine::cache::{CacheConfig, MetadataCache};
 use crate::engine::cluster_mapping::ClusterMapper;
 use crate::engine::read_mode::ReadMode;
-use crate::engine::refcount_manager::RefcountManager;
+use crate::engine::refcount_manager::{AllocationMode, RefcountManager};
 use crate::error::{external_data_error, Error, FormatError, Result};
 use crate::format::feature_flags::{AutoclearFeatures, IncompatibleFeatures};
 use crate::format::header::Header;
@@ -277,7 +277,11 @@ impl Qcow2Image {
         let l1_table = L1Table::new_empty(l1_entries);
         let file_size = backend.file_size()?;
         let mapper = ClusterMapper::new(l1_table, ClusterGeometry { cluster_bits, extended_l2 }, file_size);
-        let refcount_manager = RefcountManager::load(backend.as_ref(), &header)?;
+        // Fresh images have no free clusters, so append mode avoids
+        // unnecessary refcount-block scanning during allocation.
+        let refcount_manager = RefcountManager::load_with_mode(
+            backend.as_ref(), &header, AllocationMode::Append,
+        )?;
 
         Ok(Self {
             header,
@@ -430,7 +434,9 @@ impl Qcow2Image {
         let l1_table = L1Table::new_empty(l1_entries);
         let file_size = backend.file_size()?;
         let mapper = ClusterMapper::new(l1_table, ClusterGeometry { cluster_bits, extended_l2: false }, file_size);
-        let refcount_manager = RefcountManager::load(backend.as_ref(), &header)?;
+        let refcount_manager = RefcountManager::load_with_mode(
+            backend.as_ref(), &header, AllocationMode::Append,
+        )?;
 
         // Open the backing image for read-through
         let backing_img = Qcow2Image::open(backing_path)?;
