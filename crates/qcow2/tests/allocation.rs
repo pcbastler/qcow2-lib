@@ -92,7 +92,7 @@ fn snapshot_delete_reuses_clusters() {
 
     // Integrity check
     {
-        let img = Qcow2Image::open_rw(&path).unwrap();
+        let mut img = Qcow2Image::open_rw(&path).unwrap();
         let report = img.check_integrity().unwrap();
         assert!(
             report.leaks.is_empty() && report.mismatches.is_empty(),

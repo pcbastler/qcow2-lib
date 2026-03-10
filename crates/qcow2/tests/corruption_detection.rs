@@ -37,7 +37,7 @@ fn create_test_image(dir: &tempfile::TempDir, name: &str) -> Qcow2Image {
 #[test]
 fn empty_image_passes_integrity() {
     let dir = tempfile::tempdir().unwrap();
-    let image = create_test_image(&dir, "empty.qcow2");
+    let mut image = create_test_image(&dir, "empty.qcow2");
     let report = image.check_integrity().unwrap();
     assert!(report.is_clean(), "empty image should be clean: {report:?}");
 }
@@ -127,7 +127,7 @@ fn detect_refcount_too_low() {
         }
     }
 
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let report = image.check_integrity().unwrap();
     assert!(
         !report.is_clean(),
@@ -178,7 +178,7 @@ fn detect_leaked_clusters() {
         backend.write_all_at(&[0u8; 8], l2_offset).unwrap();
     }
 
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let report = image.check_integrity().unwrap();
     assert!(
         !report.is_clean(),
@@ -229,7 +229,7 @@ fn repair_leaked_clusters() {
     }
 
     // Verify corruption detected
-    let image = Qcow2Image::open_rw(&path).unwrap();
+    let mut image = Qcow2Image::open_rw(&path).unwrap();
     let report = image.check_integrity().unwrap();
     assert!(!report.is_clean());
     drop(image);
@@ -398,7 +398,7 @@ fn integrity_report_counts_cluster_types() {
 #[test]
 fn total_errors_reflects_mismatches_and_leaks() {
     let dir = tempfile::tempdir().unwrap();
-    let image = create_test_image(&dir, "clean.qcow2");
+    let mut image = create_test_image(&dir, "clean.qcow2");
     let report = image.check_integrity().unwrap();
     assert_eq!(report.total_errors(), 0);
     assert!(report.mismatches.is_empty());
@@ -447,7 +447,7 @@ fn corrupted_l1_entry_detected() {
     let result = Qcow2Image::open(&path);
     match result {
         Err(_) => {} // Rejection on open is fine
-        Ok(image) => {
+        Ok(mut image) => {
             // If it opens, integrity check should either error or find issues
             match image.check_integrity() {
                 Err(_) => {} // Error during check is fine for corrupted L1
@@ -509,7 +509,7 @@ fn detect_double_referenced_cluster() {
         backend.write_all_at(&l2_entry_0.to_be_bytes(), l2_offset + 8).unwrap();
     }
 
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let report = image.check_integrity().unwrap();
     assert!(
         !report.is_clean(),

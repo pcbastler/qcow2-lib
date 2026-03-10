@@ -25,7 +25,7 @@ use byteorder::{BigEndian, ByteOrder};
 
 use crate::engine::backing::{self as backing_mod, BackingChain};
 use crate::engine::bitmap_manager::BitmapManager;
-use crate::engine::cache::{CacheConfig, CacheStats, MetadataCache};
+use crate::engine::cache::{CacheConfig, CacheMode, CacheStats, MetadataCache};
 use crate::engine::cluster_mapping::ClusterMapper;
 use crate::engine::compression;
 use crate::engine::hash_manager::{self, HashManager};
@@ -478,6 +478,28 @@ impl Qcow2Image {
         self.cache.stats()
     }
 
+    /// Current cache write mode.
+    pub fn cache_mode(&self) -> CacheMode {
+        self.cache.mode()
+    }
+
+    /// Set the cache write mode.
+    ///
+    /// When switching from WriteBack to WriteThrough, all dirty entries are
+    /// flushed to disk first. Switching from WriteThrough to WriteBack is
+    /// always safe (no flush needed).
+    pub fn set_cache_mode(&mut self, mode: CacheMode) -> Result<()> {
+        if self.cache.mode() == mode {
+            return Ok(());
+        }
+        // Flush dirty entries before switching to WriteThrough
+        if mode == CacheMode::WriteThrough {
+            self.flush_dirty_metadata()?;
+        }
+        self.cache.set_mode(mode);
+        Ok(())
+    }
+
     /// Access the underlying I/O backend.
     ///
     /// Useful for CLI tools that need to read raw metadata directly.
@@ -693,20 +715,68 @@ impl Qcow2Image {
         Ok(())
     }
 
-    /// Flush all pending writes and clear the DIRTY flag.
+    /// Flush all dirty cached metadata to disk and clear the DIRTY flag.
     ///
-    /// Since we use write-through, this only needs to flush the backend
-    /// and clear the dirty bit in the header.
+    /// In WriteBack mode, flushes refcount blocks first (crash consistency:
+    /// leaked space is recoverable, dangling L2 refs are not), then L2 tables,
+    /// then issues an fsync, and finally clears the DIRTY header bit.
     pub fn flush(&mut self) -> Result<()> {
         if !self.writable {
             return Err(Error::ReadOnly);
         }
+
+        self.flush_dirty_metadata()?;
 
         self.backend.flush()?;
 
         if self.dirty {
             self.clear_dirty()?;
         }
+
+        Ok(())
+    }
+
+    /// Write all dirty refcount blocks and L2 tables from cache to disk.
+    fn flush_dirty_metadata(&mut self) -> Result<()> {
+        let cluster_size = self.header.cluster_size() as usize;
+        let backend = &*self.backend;
+
+        // 0. Write any dirty entries evicted by LRU pressure but not yet persisted
+        {
+            let pending_l2 = self.cache.take_pending_l2_evictions();
+            for (offset, table) in &pending_l2 {
+                let mut buf = vec![0u8; cluster_size];
+                table.write_to(&mut buf)?;
+                backend.write_all_at(&buf, *offset)?;
+            }
+            let pending_rc = self.cache.take_pending_refcount_evictions();
+            for (offset, block) in &pending_rc {
+                let mut buf = vec![0u8; cluster_size];
+                block.write_to(&mut buf)?;
+                backend.write_all_at(&buf, *offset)?;
+            }
+        }
+
+        // 1. Refcount blocks first (crash consistency)
+        self.cache
+            .flush_refcount_blocks(
+                &mut |offset: u64, block: &crate::format::refcount::RefcountBlock| -> Result<()> {
+                    let mut buf = vec![0u8; cluster_size];
+                    block.write_to(&mut buf)?;
+                    backend.write_all_at(&buf, offset)?;
+                    Ok(())
+                },
+            )?;
+
+        // 2. L2 tables
+        self.cache.flush_l2_tables(
+            &mut |offset: u64, table: &crate::format::l2::L2Table| -> Result<()> {
+                let mut buf = vec![0u8; cluster_size];
+                table.write_to(&mut buf)?;
+                backend.write_all_at(&buf, offset)?;
+                Ok(())
+            },
+        )?;
 
         Ok(())
     }
@@ -883,8 +953,12 @@ impl Qcow2Image {
     /// This walks all L1/L2 tables (active **and** snapshots) to build an
     /// expected reference count map, then compares with stored refcounts.
     pub fn check_integrity(
-        &self,
+        &mut self,
     ) -> Result<crate::engine::integrity::IntegrityReport> {
+        // Flush dirty metadata so the check sees current on-disk state
+        if self.writable {
+            self.flush_dirty_metadata()?;
+        }
         crate::engine::integrity::check_integrity(
             self.backend.as_ref(),
             &self.header,
@@ -899,6 +973,8 @@ impl Qcow2Image {
         &mut self,
         mode: Option<crate::engine::integrity::RepairMode>,
     ) -> Result<crate::engine::integrity::IntegrityReport> {
+        // Flush dirty metadata so the check sees current on-disk state
+        self.flush_dirty_metadata()?;
         let report = crate::engine::integrity::check_integrity(
             self.backend.as_ref(),
             &self.header,
@@ -959,6 +1035,17 @@ impl Qcow2Image {
         match BitmapDirectoryEntry::read_directory(&buf, ext.nb_bitmaps) {
             Ok(entries) => entries.iter().any(|e| e.is_auto()),
             Err(_) => false,
+        }
+    }
+}
+
+impl Drop for Qcow2Image {
+    fn drop(&mut self) {
+        if self.writable {
+            // Best-effort flush of dirty metadata on drop.
+            // Errors are silently ignored since Drop cannot return errors.
+            let _ = self.flush_dirty_metadata();
+            let _ = self.backend.flush();
         }
     }
 }
@@ -1459,5 +1546,44 @@ mod tests {
 
         image.flush().unwrap();
         assert!(!image.is_dirty());
+    }
+
+    #[test]
+    fn default_cache_mode_is_writeback() {
+        let backend = build_writable_test_image();
+        let image = Qcow2Image::from_backend_rw(Box::new(backend)).unwrap();
+        assert_eq!(image.cache_mode(), CacheMode::WriteBack);
+    }
+
+    #[test]
+    fn set_cache_mode_writethrough() {
+        let backend = build_writable_test_image();
+        let mut image = Qcow2Image::from_backend_rw(Box::new(backend)).unwrap();
+
+        image.write_at(&[0xAA; 64], 0).unwrap();
+        // Switch to WriteThrough — should flush dirty entries
+        image.set_cache_mode(CacheMode::WriteThrough).unwrap();
+        assert_eq!(image.cache_mode(), CacheMode::WriteThrough);
+
+        // Data should still be readable
+        let mut buf = vec![0u8; 64];
+        image.read_at(&mut buf, 0).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAA));
+    }
+
+    #[test]
+    fn writeback_cache_improves_hit_rate() {
+        let backend = build_writable_test_image();
+        let mut image = Qcow2Image::from_backend_rw(Box::new(backend)).unwrap();
+        assert_eq!(image.cache_mode(), CacheMode::WriteBack);
+
+        // Multiple writes to the same cluster should hit the cached L2 table
+        for i in 0..10u8 {
+            image.write_at(&[i; 64], i as u64 * 64).unwrap();
+        }
+
+        let stats = image.cache_stats();
+        assert!(stats.l2_hits >= 9, "expected >= 9 L2 hits, got {}", stats.l2_hits);
+        assert_eq!(stats.l2_misses, 1, "expected 1 L2 miss (first load)");
     }
 }

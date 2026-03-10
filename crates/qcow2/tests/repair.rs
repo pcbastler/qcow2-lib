@@ -94,7 +94,7 @@ fn check_agrees_with_qemu_on_clean_image() {
 
     assert_qemu_check(&path);
 
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let report = image.check_integrity().unwrap();
     assert!(
         report.is_clean(),
@@ -118,7 +118,7 @@ fn repair_corrupt_refcounts_passes_qemu_check() {
 
     // Corrupt: set data cluster's refcount to 5 (should be 1)
     // Find a data cluster — cluster 0 is header, so data is further out
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let report = image.check_integrity().unwrap();
     drop(image);
 
@@ -127,7 +127,7 @@ fn repair_corrupt_refcounts_passes_qemu_check() {
     corrupt_refcount(&path, data_cluster, 5);
 
     // Library should detect the mismatch
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let pre_report = image.check_integrity().unwrap();
     drop(image);
     assert!(
@@ -224,7 +224,7 @@ fn repair_fixes_leaked_cluster() {
     );
 
     // Find the last used cluster + 1 to create a fake leaked cluster
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let report = image.check_integrity().unwrap();
     let max_cluster = *report.reference_map.keys().max().unwrap();
     drop(image);
@@ -234,7 +234,7 @@ fn repair_fixes_leaked_cluster() {
     corrupt_refcount(&path, leaked_cluster, 1);
 
     // Check detects the leak
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let report = image.check_integrity().unwrap();
     drop(image);
     assert!(!report.leaks.is_empty(), "should detect the leaked cluster");
@@ -247,7 +247,7 @@ fn repair_fixes_leaked_cluster() {
     assert_qemu_check(&path);
 
     // Verify clean after repair
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let report = image.check_integrity().unwrap();
     assert!(report.is_clean(), "should be clean after repair");
 }
@@ -412,7 +412,7 @@ fn repair_is_idempotent() {
     );
 
     // Corrupt and repair
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let report = image.check_integrity().unwrap();
     let data_cluster = *report.reference_map.keys().max().unwrap();
     drop(image);
@@ -454,7 +454,7 @@ fn write_corrupt_repair_read_roundtrip() {
     corrupt_refcount(&path, 0, 2);
 
     // Library should detect the mismatch
-    let image = Qcow2Image::open(&path).unwrap();
+    let mut image = Qcow2Image::open(&path).unwrap();
     let report = image.check_integrity().unwrap();
     drop(image);
     assert!(!report.is_clean(), "corrupted image should fail check");

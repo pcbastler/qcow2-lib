@@ -166,7 +166,7 @@ impl ClusterMapper {
         let table = L2Table::read_from(&buf, self.geometry)?;
 
         // Insert into cache
-        cache.insert_l2_table(offset, table.clone());
+        cache.insert_l2_table(offset, table.clone(), false);
         Ok(table)
     }
 

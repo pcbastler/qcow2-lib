@@ -1,7 +1,9 @@
 //! QCOW2 write engine: translates guest writes into host cluster operations.
 //!
-//! Handles cluster allocation, L1/L2 table updates, and write-through
-//! metadata persistence. Supports writing to unallocated, zero, and
+//! Handles cluster allocation, L1/L2 table updates, and metadata
+//! persistence. In **WriteBack** mode, L2 modifications stay in the cache
+//! and are flushed lazily; in **WriteThrough** mode, every L2 update is
+//! written to disk immediately. Supports writing to unallocated, zero, and
 //! standard (copied) clusters. Compressed clusters are decompressed
 //! before applying the write.
 
@@ -144,9 +146,8 @@ impl<'a> Qcow2Writer<'a> {
         // Step 1: Ensure L2 table exists
         let l2_offset = self.ensure_l2_table(l1_index)?;
 
-        // Step 2: Load L2 table
-        let l2_table = self.load_l2_table(l2_offset)?;
-        let l2_entry = l2_table.get(l2_index)?;
+        // Step 2: Read L2 entry (no full table clone needed)
+        let l2_entry = self.read_l2_entry(l2_offset, l2_index)?;
 
         // Step 3: Dispatch on L2 entry type
         let guest_cluster_offset = guest_offset - intra.0 as u64;
@@ -212,9 +213,8 @@ impl<'a> Qcow2Writer<'a> {
         let zeroed = vec![0u8; cluster_size];
         self.backend.write_all_at(&zeroed, new_l2_offset.0)?;
 
-        // Update the file size in the mapper
-        let file_size = self.backend.file_size()?;
-        self.mapper.set_file_size(file_size);
+        // Update the file size in the mapper (from refcount manager's tracked offset)
+        self.mapper.set_file_size(self.refcount_manager.state().next_cluster_offset);
 
         // Update L1 entry (with COPIED flag since refcount is 1)
         let new_l1_entry = L1Entry::with_l2_offset(new_l2_offset, true);
@@ -237,6 +237,16 @@ impl<'a> Qcow2Writer<'a> {
     ) -> Result<ClusterOffset> {
         let cluster_size = 1usize << self.cluster_bits;
 
+        // Flush dirty L2 to disk before COW reads from disk, otherwise
+        // dirty modifications would be lost (the disk read would see stale data).
+        self.cache.flush_single_l2(old_offset, |offset, table| {
+            let mut buf = vec![0u8; cluster_size];
+            // flush_single_l2 only calls us if dirty, ignore write errors
+            // (they'll surface on the next explicit write).
+            let _ = table.write_to(&mut buf);
+            let _ = self.backend.write_all_at(&buf, offset);
+        });
+
         // Read existing L2 table
         let mut l2_data = vec![0u8; cluster_size];
         self.backend.read_exact_at(&mut l2_data, old_offset.0)?;
@@ -246,8 +256,7 @@ impl<'a> Qcow2Writer<'a> {
             self.backend,
             self.cache,
         )?;
-        let file_size = self.backend.file_size()?;
-        self.mapper.set_file_size(file_size);
+        self.mapper.set_file_size(self.refcount_manager.state().next_cluster_offset);
 
         // Write L2 table to new cluster
         self.backend.write_all_at(&l2_data, new_offset.0)?;
@@ -292,8 +301,7 @@ impl<'a> Qcow2Writer<'a> {
                 self.backend,
                 self.cache,
             )?;
-            let file_size = self.backend.file_size()?;
-            self.mapper.set_file_size(file_size);
+            self.mapper.set_file_size(self.refcount_manager.state().next_cluster_offset);
             off
         };
 
@@ -531,8 +539,7 @@ impl<'a> Qcow2Writer<'a> {
                 let off = self.refcount_manager.allocate_cluster(
                     self.backend, self.cache,
                 )?;
-                let file_size = self.backend.file_size()?;
-                self.mapper.set_file_size(file_size);
+                self.mapper.set_file_size(self.refcount_manager.state().next_cluster_offset);
                 off
             };
 
@@ -566,8 +573,7 @@ impl<'a> Qcow2Writer<'a> {
             let off = self.refcount_manager.allocate_cluster(
                 self.backend, self.cache,
             )?;
-            let file_size = self.backend.file_size()?;
-            self.mapper.set_file_size(file_size);
+            self.mapper.set_file_size(self.refcount_manager.state().next_cluster_offset);
             off
         };
 
@@ -672,8 +678,7 @@ impl<'a> Qcow2Writer<'a> {
         let new_offset = self.refcount_manager.allocate_cluster(
             self.backend, self.cache,
         )?;
-        let file_size = self.backend.file_size()?;
-        self.mapper.set_file_size(file_size);
+        self.mapper.set_file_size(self.refcount_manager.state().next_cluster_offset);
 
         self.backend.write_all_at(&decompressed, new_offset.0)?;
 
@@ -693,13 +698,25 @@ impl<'a> Qcow2Writer<'a> {
         Ok(())
     }
 
-    /// Write a single L2 entry to disk and evict the L2 table from cache.
+    /// Update a single L2 entry.
+    ///
+    /// In **WriteBack** mode: modifies the entry in the cache and marks it dirty.
+    /// In **WriteThrough** mode: writes to disk and evicts the cache entry (legacy).
     fn write_l2_entry(
         &mut self,
         l2_table_offset: ClusterOffset,
         index: L2Index,
         entry: L2Entry,
     ) -> Result<()> {
+        // WriteBack path: modify in-place in cache
+        if let Some(cache_entry) = self.cache.get_l2_entry_mut(l2_table_offset) {
+            cache_entry.value.set(index, entry)?;
+            cache_entry.dirty = true;
+            return Ok(());
+        }
+
+        // WriteThrough path (or WriteBack cache miss — shouldn't happen after load_l2_table):
+        // write entry bytes to disk
         let geo = self.mapper.geometry();
         let entry_size = geo.l2_entry_size() as u64;
         let offset = l2_table_offset.0 + (index.0 as u64 * entry_size);
@@ -720,19 +737,48 @@ impl<'a> Qcow2Writer<'a> {
         Ok(())
     }
 
-    /// Load an L2 table from cache or disk.
+    /// Read a single L2 entry from cache or disk (no L2Table clone).
+    fn read_l2_entry(&mut self, l2_offset: ClusterOffset, index: L2Index) -> Result<L2Entry> {
+        if let Some(table) = self.cache.get_l2_table(l2_offset) {
+            return table.get(index).map_err(Into::into);
+        }
+        self.load_l2_table_into_cache(l2_offset)?;
+        let table = self.cache.get_l2_table(l2_offset).expect("just inserted");
+        table.get(index).map_err(Into::into)
+    }
+
+    /// Load an L2 table from disk into the cache. Returns a clone for callers
+    /// that need the full table (COW, compressed cluster handling).
     fn load_l2_table(&mut self, offset: ClusterOffset) -> Result<L2Table> {
         if let Some(table) = self.cache.get_l2_table(offset) {
             return Ok(table.clone());
         }
+        self.load_l2_table_into_cache(offset)?;
+        Ok(self.cache.get_l2_table(offset).expect("just inserted").clone())
+    }
 
+    /// Load an L2 table from disk and insert it into the cache.
+    fn load_l2_table_into_cache(&mut self, offset: ClusterOffset) -> Result<()> {
         let cluster_size = 1usize << self.cluster_bits;
         let mut buf = vec![0u8; cluster_size];
         self.backend.read_exact_at(&mut buf, offset.0)?;
         let table = L2Table::read_from(&buf, self.mapper.geometry())?;
 
-        self.cache.insert_l2_table(offset, table.clone());
-        Ok(table)
+        self.cache.insert_l2_table(offset, table, false);
+        self.flush_pending_l2_evictions()?;
+        Ok(())
+    }
+
+    /// Write any dirty L2 tables that were evicted from the cache by LRU pressure.
+    fn flush_pending_l2_evictions(&mut self) -> Result<()> {
+        let pending = self.cache.take_pending_l2_evictions();
+        let cluster_size = 1usize << self.cluster_bits;
+        for (offset, table) in &pending {
+            let mut buf = vec![0u8; cluster_size];
+            table.write_to(&mut buf)?;
+            self.backend.write_all_at(&buf, *offset)?;
+        }
+        Ok(())
     }
 
     /// Write a pre-compressed cluster to the image.
@@ -764,8 +810,7 @@ impl<'a> Qcow2Writer<'a> {
             let host_cluster =
                 self.refcount_manager
                     .allocate_cluster(self.backend, self.cache)?;
-            let file_size = self.backend.file_size()?;
-            self.mapper.set_file_size(file_size);
+            self.mapper.set_file_size(self.refcount_manager.state().next_cluster_offset);
             host_cluster.0
         } else {
             // Check if the data fits in the remainder of the current host cluster.
@@ -775,8 +820,7 @@ impl<'a> Qcow2Writer<'a> {
                 let host_cluster =
                     self.refcount_manager
                         .allocate_cluster(self.backend, self.cache)?;
-                let file_size = self.backend.file_size()?;
-                self.mapper.set_file_size(file_size);
+                self.mapper.set_file_size(self.refcount_manager.state().next_cluster_offset);
                 host_cluster.0
             } else {
                 // Packing into existing host cluster — increment its refcount

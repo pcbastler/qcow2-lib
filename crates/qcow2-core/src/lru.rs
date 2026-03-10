@@ -41,6 +41,14 @@ impl<K: PartialEq, V> LruCache<K, V> {
         self.entries.last().map(|(_, v)| v)
     }
 
+    /// Look up a value by key mutably, marking it as most recently used.
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let idx = self.entries.iter().position(|(k, _)| k == key)?;
+        let entry = self.entries.remove(idx);
+        self.entries.push(entry);
+        self.entries.last_mut().map(|(_, v)| v)
+    }
+
     /// Insert a key-value pair, evicting the least recently used entry if full.
     ///
     /// If the key already exists, its value is updated and it becomes the
@@ -56,15 +64,54 @@ impl<K: PartialEq, V> LruCache<K, V> {
         self.entries.push((key, value));
     }
 
+    /// Insert a key-value pair, returning the evicted entry if one was displaced.
+    ///
+    /// Returns `Some((key, value))` of the evicted LRU entry when the cache is
+    /// full, or the old value when replacing an existing key.
+    pub fn put_with_evict(&mut self, key: K, value: V) -> Option<(K, V)> {
+        if let Some(idx) = self.entries.iter().position(|(k, _)| *k == key) {
+            let old = self.entries.remove(idx);
+            self.entries.push((key, value));
+            return Some(old);
+        }
+        let evicted = if self.entries.len() >= self.capacity {
+            Some(self.entries.remove(0))
+        } else {
+            None
+        };
+        self.entries.push((key, value));
+        evicted
+    }
+
     /// Remove and return the value for a key, if present.
     pub fn pop(&mut self, key: &K) -> Option<V> {
         let idx = self.entries.iter().position(|(k, _)| k == key)?;
         Some(self.entries.remove(idx).1)
     }
 
+    /// Remove all entries, returning them as a vector.
+    pub fn drain(&mut self) -> Vec<(K, V)> {
+        core::mem::take(&mut self.entries)
+    }
+
     /// Remove all entries.
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Number of entries currently in the cache.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Iterate over all entries (no LRU reordering).
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.entries.iter().map(|(k, v)| (k, v))
+    }
+
+    /// Iterate mutably over all entries (no LRU reordering).
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.entries.iter_mut().map(|(k, v)| (&*k, v))
     }
 }
 
@@ -153,5 +200,84 @@ mod tests {
         let mut cache = LruCache::new(0);
         cache.put(1, "one");
         assert_eq!(cache.get(&1), Some(&"one"));
+    }
+
+    #[test]
+    fn get_mut_modifies_in_place() {
+        let mut cache = LruCache::new(4);
+        cache.put(1, 10);
+        if let Some(v) = cache.get_mut(&1) {
+            *v += 5;
+        }
+        assert_eq!(cache.get(&1), Some(&15));
+    }
+
+    #[test]
+    fn get_mut_promotes_to_mru() {
+        let mut cache = LruCache::new(2);
+        cache.put(1, "one");
+        cache.put(2, "two");
+        cache.get_mut(&1); // refresh 1, now 2 is LRU
+        cache.put(3, "three"); // evicts 2
+        assert_eq!(cache.get(&1), Some(&"one"));
+        assert_eq!(cache.get(&2), None);
+    }
+
+    #[test]
+    fn put_with_evict_returns_evicted() {
+        let mut cache = LruCache::new(2);
+        assert_eq!(cache.put_with_evict(1, "one"), None);
+        assert_eq!(cache.put_with_evict(2, "two"), None);
+        // Cache full, evicts key 1
+        let evicted = cache.put_with_evict(3, "three");
+        assert_eq!(evicted, Some((1, "one")));
+    }
+
+    #[test]
+    fn put_with_evict_returns_old_on_replace() {
+        let mut cache = LruCache::new(2);
+        cache.put_with_evict(1, "one");
+        cache.put_with_evict(2, "two");
+        let old = cache.put_with_evict(1, "ONE");
+        assert_eq!(old, Some((1, "one")));
+        // No eviction, just replacement — cache still has 2 entries
+        assert_eq!(cache.get(&1), Some(&"ONE"));
+        assert_eq!(cache.get(&2), Some(&"two"));
+    }
+
+    #[test]
+    fn iter_mut_modifies_all() {
+        let mut cache = LruCache::new(4);
+        cache.put(1, 10);
+        cache.put(2, 20);
+        for (_, v) in cache.iter_mut() {
+            *v += 1;
+        }
+        assert_eq!(cache.get(&1), Some(&11));
+        assert_eq!(cache.get(&2), Some(&21));
+    }
+
+    #[test]
+    fn len_tracks_entries() {
+        let mut cache = LruCache::new(2);
+        assert_eq!(cache.len(), 0);
+        cache.put(1, "one");
+        assert_eq!(cache.len(), 1);
+        cache.put(2, "two");
+        assert_eq!(cache.len(), 2);
+        cache.put(3, "three"); // evicts, still 2
+        assert_eq!(cache.len(), 2);
+        cache.pop(&2);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn drain_returns_all_and_empties() {
+        let mut cache = LruCache::new(4);
+        cache.put(1, "one");
+        cache.put(2, "two");
+        let entries = cache.drain();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(cache.len(), 0);
     }
 }

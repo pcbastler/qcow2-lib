@@ -41,7 +41,7 @@ pub fn run(path: &Path, repair: bool) -> Result<()> {
 
         report
     } else {
-        let image = Qcow2Image::open(path)?;
+        let mut image = Qcow2Image::open(path)?;
         image.check_integrity()?
     };
 

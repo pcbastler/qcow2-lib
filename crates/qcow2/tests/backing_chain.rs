@@ -930,7 +930,7 @@ fn integrity_clean_after_commit() {
     }
 
     // Library integrity check on backing
-    let image = Qcow2Image::open(&base).unwrap();
+    let mut image = Qcow2Image::open(&base).unwrap();
     let report = image.check_integrity().unwrap();
     assert!(
         report.is_clean(),
@@ -1360,7 +1360,7 @@ fn stress_overlay_write_commit_verify_loop() {
         assert_qemu_check(&base);
     }
 
-    let image = Qcow2Image::open(&base).unwrap();
+    let mut image = Qcow2Image::open(&base).unwrap();
     let report = image.check_integrity().unwrap();
     assert!(
         report.is_clean(),
@@ -1630,7 +1630,7 @@ fn diamond_commit_two_overlays_into_same_backing() {
         assert!(buf.iter().all(|&b| b == 0xBB));
     }
 
-    let image = Qcow2Image::open(&base).unwrap();
+    let mut image = Qcow2Image::open(&base).unwrap();
     let report = image.check_integrity().unwrap();
     assert!(report.is_clean());
     assert_qemu_check(&base);

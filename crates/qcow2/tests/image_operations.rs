@@ -146,7 +146,7 @@ fn from_backend_reads_qemu_image() {
 
 #[test]
 fn integrity_check_fresh_image() {
-    let image = create_mem(1 << 20);
+    let mut image = create_mem(1 << 20);
     let report = image.check_integrity().unwrap();
     assert!(report.is_clean());
     assert_eq!(report.total_errors(), 0);
