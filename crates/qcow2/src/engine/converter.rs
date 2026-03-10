@@ -39,11 +39,15 @@ pub fn convert_to_raw(
     })?;
 
     let backend = SyncFileBackend::from_file(output);
-    let mut buf = vec![0u8; cluster_size];
+
+    // Read in large batches to reduce syscall overhead
+    let batch_clusters = 64; // 4MB at 64KB clusters
+    let batch_size = batch_clusters * cluster_size;
+    let mut buf = vec![0u8; batch_size];
 
     let mut offset = 0u64;
     while offset < virtual_size {
-        let read_size = cluster_size.min((virtual_size - offset) as usize);
+        let read_size = batch_size.min((virtual_size - offset) as usize);
         buf[..read_size].fill(0);
         source.read_at(&mut buf[..read_size], offset)?;
         backend.write_all_at(&buf[..read_size], offset)?;
@@ -89,23 +93,59 @@ pub fn convert_from_raw(
     )?;
 
     let cluster_size = dest.cluster_size() as usize;
-    let mut buf = vec![0u8; cluster_size];
 
-    let mut offset = 0u64;
-    while offset < input_size {
-        let read_size = cluster_size.min((input_size - offset) as usize);
-        buf[..read_size].fill(0);
-        input_backend.read_exact_at(&mut buf[..read_size], offset)?;
-
-        // Skip all-zero clusters
-        if !is_all_zeros(&buf[..read_size]) {
-            if compress {
+    if compress {
+        // Compressed path: must write one cluster at a time
+        let mut buf = vec![0u8; cluster_size];
+        let mut offset = 0u64;
+        while offset < input_size {
+            let read_size = cluster_size.min((input_size - offset) as usize);
+            buf[..read_size].fill(0);
+            input_backend.read_exact_at(&mut buf[..read_size], offset)?;
+            if !is_all_zeros(&buf[..read_size]) {
                 dest.write_cluster_maybe_compressed(&buf[..read_size], offset)?;
-            } else {
-                dest.write_at(&buf[..read_size], offset)?;
             }
+            offset += read_size as u64;
         }
-        offset += read_size as u64;
+    } else {
+        // Uncompressed path: read large batches, write contiguous non-zero runs
+        let batch_clusters = 64; // 64 clusters = 4MB at 64KB cluster size
+        let batch_size = batch_clusters * cluster_size;
+        let mut buf = vec![0u8; batch_size];
+
+        let mut offset = 0u64;
+        while offset < input_size {
+            let read_size = batch_size.min((input_size - offset) as usize);
+            buf[..read_size].fill(0);
+            input_backend.read_exact_at(&mut buf[..read_size], offset)?;
+
+            // Find contiguous runs of non-zero clusters and write them as one call
+            let mut pos = 0usize;
+            while pos < read_size {
+                let chunk = cluster_size.min(read_size - pos);
+
+                if is_all_zeros(&buf[pos..pos + chunk]) {
+                    pos += chunk;
+                    continue;
+                }
+
+                // Found a non-zero cluster — extend run as far as possible
+                let run_start = pos;
+                pos += chunk;
+                while pos < read_size {
+                    let next_chunk = cluster_size.min(read_size - pos);
+                    if is_all_zeros(&buf[pos..pos + next_chunk]) {
+                        break;
+                    }
+                    pos += next_chunk;
+                }
+
+                // Write the entire non-zero run in one call
+                let run_offset = offset + run_start as u64;
+                dest.write_at(&buf[run_start..pos], run_offset)?;
+            }
+            offset += read_size as u64;
+        }
     }
 
     dest.flush()?;
@@ -147,31 +187,66 @@ pub fn convert_qcow2_to_qcow2(
     )?;
 
     let cluster_size = source.cluster_size() as usize;
-    let mut buf = vec![0u8; cluster_size];
 
-    let mut offset = 0u64;
-    while offset < virtual_size {
-        let read_size = cluster_size.min((virtual_size - offset) as usize);
-        buf[..read_size].fill(0);
-        source.read_at(&mut buf[..read_size], offset)?;
-
-        if !is_all_zeros(&buf[..read_size]) {
-            if compress {
+    if compress {
+        // Compressed path: must write one cluster at a time
+        let mut buf = vec![0u8; cluster_size];
+        let mut offset = 0u64;
+        while offset < virtual_size {
+            let read_size = cluster_size.min((virtual_size - offset) as usize);
+            buf[..read_size].fill(0);
+            source.read_at(&mut buf[..read_size], offset)?;
+            if !is_all_zeros(&buf[..read_size]) {
                 dest.write_cluster_maybe_compressed(&buf[..read_size], offset)?;
-            } else {
-                dest.write_at(&buf[..read_size], offset)?;
             }
+            offset += read_size as u64;
         }
-        offset += read_size as u64;
+    } else {
+        // Uncompressed path: large batches with run coalescing
+        let batch_clusters = 64;
+        let batch_size = batch_clusters * cluster_size;
+        let mut buf = vec![0u8; batch_size];
+
+        let mut offset = 0u64;
+        while offset < virtual_size {
+            let read_size = batch_size.min((virtual_size - offset) as usize);
+            buf[..read_size].fill(0);
+            source.read_at(&mut buf[..read_size], offset)?;
+
+            let mut pos = 0usize;
+            while pos < read_size {
+                let chunk = cluster_size.min(read_size - pos);
+                if is_all_zeros(&buf[pos..pos + chunk]) {
+                    pos += chunk;
+                    continue;
+                }
+                let run_start = pos;
+                pos += chunk;
+                while pos < read_size {
+                    let next_chunk = cluster_size.min(read_size - pos);
+                    if is_all_zeros(&buf[pos..pos + next_chunk]) {
+                        break;
+                    }
+                    pos += next_chunk;
+                }
+                let run_offset = offset + run_start as u64;
+                dest.write_at(&buf[run_start..pos], run_offset)?;
+            }
+            offset += read_size as u64;
+        }
     }
 
     dest.flush()?;
     Ok(())
 }
 
-/// Check if a byte slice is entirely zeros.
+/// Check if a byte slice is entirely zeros (word-at-a-time for speed).
 fn is_all_zeros(buf: &[u8]) -> bool {
-    buf.iter().all(|&b| b == 0)
+    // Check 8 bytes at a time using u64
+    let (prefix, chunks, suffix) = unsafe { buf.align_to::<u64>() };
+    prefix.iter().all(|&b| b == 0)
+        && chunks.iter().all(|&w| w == 0)
+        && suffix.iter().all(|&b| b == 0)
 }
 
 #[cfg(test)]
