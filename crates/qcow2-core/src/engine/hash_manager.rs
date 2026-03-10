@@ -10,12 +10,9 @@
 
 extern crate alloc;
 
-use alloc::format;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
-
-use byteorder::{BigEndian, ByteOrder};
 
 use crate::engine::cache::MetadataCache;
 use crate::engine::cluster_mapping::{ClusterMapper, ClusterResolution};
@@ -28,9 +25,6 @@ use crate::format::header::Header;
 use crate::format::header_extension::HeaderExtension;
 use crate::format::types::*;
 use crate::io::{Compressor, IoBackend};
-
-/// Offset of the autoclear_features field in the QCOW2 header.
-const OFF_AUTOCLEAR_FEATURES: u64 = 88;
 
 /// Information about a hash mismatch found during verification.
 #[derive(Debug, Clone)]
@@ -625,30 +619,19 @@ impl<'a> HashManager<'a> {
     }
 
     fn write_extensions_to_disk(&self) -> Result<()> {
-        let ext_data = HeaderExtension::write_all(self.extensions);
-        let ext_start = self.header.header_length as u64;
-        let cluster_size = self.cluster_size();
-
-        if ext_start + ext_data.len() as u64 > cluster_size {
-            return Err(FormatError::InvalidHashExtension {
-                message: format!(
-                    "header extensions ({} bytes) exceed cluster 0 ({} bytes)",
-                    ext_start as usize + ext_data.len(),
-                    cluster_size
-                ),
-            }
-            .into());
-        }
-
-        self.backend.write_all_at(&ext_data, ext_start)?;
-        Ok(())
+        super::metadata_io::write_header_extensions(
+            self.backend,
+            self.header,
+            self.extensions,
+            self.cluster_size(),
+        )
     }
 
     fn write_autoclear_features(&self) -> Result<()> {
-        let mut buf = [0u8; 8];
-        BigEndian::write_u64(&mut buf, self.header.autoclear_features.bits());
-        self.backend.write_all_at(&buf, OFF_AUTOCLEAR_FEATURES)?;
-        Ok(())
+        super::metadata_io::write_autoclear_features(
+            self.backend,
+            self.header.autoclear_features,
+        )
     }
 
     /// Store a hash for a given hash chunk, handling COW on hash data clusters.

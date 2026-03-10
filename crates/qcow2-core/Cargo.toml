@@ -19,3 +19,6 @@ pbkdf2 = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 sha1 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
+
+[lints]
+workspace = true

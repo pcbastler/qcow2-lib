@@ -47,6 +47,13 @@ pub struct SnapshotInfo {
     pub l1_table_entries: u32,
 }
 
+/// Whether to increment or decrement refcounts.
+#[derive(Clone, Copy)]
+enum RefcountAdjust {
+    Increment,
+    Decrement,
+}
+
 /// Transient helper for snapshot operations.
 ///
 /// Borrows the mutable state needed from `Qcow2Image` for the duration
@@ -220,13 +227,14 @@ impl<'a> SnapshotManager<'a> {
         let l1_byte_size = l1_entry_count as usize * l1_entry_size;
 
         // Phase A: Clear COPIED flags on active L1/L2 entries.
-        self.clear_copied_flags_on_active(cluster_size)?;
+        self.set_copied_flags_on_active(false, cluster_size)?;
 
         // Phase B: Copy the active L1 table to a new cluster.
         let snapshot_l1_offset = self.copy_active_l1_table(l1_byte_size, cluster_size)?;
 
         // Phase C: Increment refcounts for all referenced clusters.
-        self.increment_refcounts_for_l1(cluster_size)?;
+        let active_l1 = self.mapper.l1_table().clone();
+        self.adjust_refcounts_for_l1(&active_l1, cluster_size, RefcountAdjust::Increment)?;
 
         // Phase D: Write snapshot table.
         let old_table_offset = if self.header.snapshot_count > 0 {
@@ -289,7 +297,7 @@ impl<'a> SnapshotManager<'a> {
             target.l1_table_offset,
             target.l1_table_entries,
         )?;
-        self.decrement_refcounts_for_l1(&snap_l1, cluster_size)?;
+        self.adjust_refcounts_for_l1(&snap_l1, cluster_size, RefcountAdjust::Decrement)?;
 
         // Phase A2: Free hash clusters from the snapshot.
         self.free_snapshot_hash_clusters(&target, cluster_size)?;
@@ -304,7 +312,7 @@ impl<'a> SnapshotManager<'a> {
         }
 
         // Phase C: Restore COPIED flags on active L1/L2 entries where refcount is now 1.
-        self.restore_copied_flags_on_active(cluster_size)?;
+        self.set_copied_flags_on_active(true, cluster_size)?;
 
         // Phase D: Write new snapshot table.
         let old_table_offset = self.header.snapshots_offset;
@@ -350,7 +358,8 @@ impl<'a> SnapshotManager<'a> {
         }
 
         // Phase A: Decrement refcounts for the current active state.
-        self.decrement_refcounts_for_active(cluster_size)?;
+        let active_l1 = self.mapper.l1_table().clone();
+        self.adjust_refcounts_for_l1(&active_l1, cluster_size, RefcountAdjust::Decrement)?;
 
         // Phase B: Load snapshot's L1 table and write it to the active L1 location.
         let snap_l1 = self.read_l1_table(
@@ -387,7 +396,8 @@ impl<'a> SnapshotManager<'a> {
 
         // Phase D: Increment refcounts for the snapshot's clusters.
         // The active table now shares them with the snapshot.
-        self.increment_refcounts_for_l1(cluster_size)?;
+        let active_l1 = self.mapper.l1_table().clone();
+        self.adjust_refcounts_for_l1(&active_l1, cluster_size, RefcountAdjust::Increment)?;
 
         // Phase D2: Restore hash table from snapshot.
         self.apply_snapshot_hash_table(target, cluster_size)?;
@@ -405,40 +415,11 @@ impl<'a> SnapshotManager<'a> {
 
     /// Flush all dirty L2 tables and refcount blocks from cache to disk.
     fn flush_dirty_cache(&mut self) -> Result<()> {
-        let cluster_size = 1usize << self.cluster_bits;
-
-        // Pending evictions first
-        let pending_rc = self.cache.take_pending_refcount_evictions();
-        for (offset, block) in &pending_rc {
-            let mut buf = vec![0u8; cluster_size];
-            block.write_to(&mut buf)?;
-            self.backend.write_all_at(&buf, *offset)?;
-        }
-        let pending_l2 = self.cache.take_pending_l2_evictions();
-        for (offset, table) in &pending_l2 {
-            let mut buf = vec![0u8; cluster_size];
-            table.write_to(&mut buf)?;
-            self.backend.write_all_at(&buf, *offset)?;
-        }
-
-        // In-cache dirty entries
-        let backend = self.backend;
-        self.cache
-            .flush_refcount_blocks(&mut |offset: u64, block: &crate::format::refcount::RefcountBlock| -> Result<()> {
-                let mut buf = vec![0u8; cluster_size];
-                block.write_to(&mut buf)?;
-                backend.write_all_at(&buf, offset)?;
-                Ok(())
-            })?;
-        self.cache
-            .flush_l2_tables(&mut |offset: u64, table: &crate::format::l2::L2Table| -> Result<()> {
-                let mut buf = vec![0u8; cluster_size];
-                table.write_to(&mut buf)?;
-                backend.write_all_at(&buf, offset)?;
-                Ok(())
-            })?;
-
-        Ok(())
+        super::metadata_io::flush_dirty_metadata(
+            self.backend,
+            self.cache,
+            self.cluster_bits,
+        )
     }
 
     /// Generate the next snapshot ID (max existing + 1).
@@ -451,71 +432,12 @@ impl<'a> SnapshotManager<'a> {
             .unwrap_or(1)
     }
 
-    /// Clear COPIED flags on all active L1 and L2 entries (in-place on disk).
-    fn clear_copied_flags_on_active(&mut self, cluster_size: usize) -> Result<()> {
-        let l1_count = self.mapper.l1_table().entry_count();
-
-        for i in 0..l1_count {
-            let l1_idx = crate::format::types::L1Index(i as u32);
-            let l1_entry = self.mapper.l1_entry(l1_idx)?;
-
-            if let Some(l2_offset) = l1_entry.l2_table_offset() {
-                // Load L2 table and clear COPIED flags on its entries
-                let mut l2_buf = vec![0u8; cluster_size];
-                self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.header.geometry())?;
-
-                let mut modified = false;
-                for j in 0..l2_table.len() {
-                    let l2_entry = l2_table.get(crate::format::types::L2Index(j))?;
-                    if let L2Entry::Standard {
-                        host_offset,
-                        copied: true,
-                        subclusters,
-                    } = l2_entry
-                    {
-                        let cleared = L2Entry::Standard {
-                            host_offset,
-                            copied: false,
-                            subclusters,
-                        };
-                        let l2_entry_size = self.header.l2_entry_size();
-                        let entry_offset = l2_offset.0 + (j as u64 * l2_entry_size as u64);
-                        let mut entry_buf = [0u8; 8];
-                        BigEndian::write_u64(
-                            &mut entry_buf,
-                            cleared.encode(self.header.geometry()),
-                        );
-                        self.backend.write_all_at(&entry_buf, entry_offset)?;
-                        modified = true;
-                    }
-                }
-
-                if modified {
-                    self.cache.evict_l2_table(l2_offset);
-                }
-
-                // Clear COPIED on the L1 entry itself
-                if l1_entry.is_copied() {
-                    let cleared = L1Entry::with_l2_offset(l2_offset, false);
-                    self.mapper.set_l1_entry(l1_idx, cleared)?;
-                    let l1_disk_offset =
-                        self.header.l1_table_offset.0 + (i as u64 * 8);
-                    let mut entry_buf = [0u8; 8];
-                    BigEndian::write_u64(&mut entry_buf, cleared.raw());
-                    self.backend.write_all_at(&entry_buf, l1_disk_offset)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Restore COPIED flags on active L1/L2 entries where the refcount is 1.
+    /// Set or clear COPIED flags on all active L1 and L2 entries (in-place on disk).
     ///
-    /// Called after deleting a snapshot to fix up entries whose refcounts
-    /// dropped from >1 to exactly 1.
-    fn restore_copied_flags_on_active(&mut self, cluster_size: usize) -> Result<()> {
+    /// When `set_to` is false (clearing), all entries with `copied: true` are
+    /// unconditionally cleared. When `set_to` is true (restoring), only entries
+    /// whose refcount is exactly 1 get the COPIED flag set.
+    fn set_copied_flags_on_active(&mut self, set_to: bool, cluster_size: usize) -> Result<()> {
         let l1_count = self.mapper.l1_table().entry_count();
 
         for i in 0..l1_count {
@@ -523,14 +445,18 @@ impl<'a> SnapshotManager<'a> {
             let l1_entry = self.mapper.l1_entry(l1_idx)?;
 
             if let Some(l2_offset) = l1_entry.l2_table_offset() {
-                // Check L2 table refcount
-                let l2_rc = self.refcount_manager.get_refcount(
-                    l2_offset.0,
-                    self.backend,
-                    self.cache,
-                )?;
+                // When restoring, check L2 table refcount
+                let l2_rc = if set_to {
+                    self.refcount_manager.get_refcount(
+                        l2_offset.0,
+                        self.backend,
+                        self.cache,
+                    )?
+                } else {
+                    0 // unused when clearing
+                };
 
-                // Load L2 table and restore COPIED flags on data entries
+                // Load L2 table and adjust COPIED flags on data entries
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
                 let l2_table = L2Table::read_from(&l2_buf, self.header.geometry())?;
@@ -540,31 +466,40 @@ impl<'a> SnapshotManager<'a> {
                     let l2_entry = l2_table.get(crate::format::types::L2Index(j))?;
                     if let L2Entry::Standard {
                         host_offset,
-                        copied: false,
+                        copied,
                         subclusters,
                     } = l2_entry
                     {
-                        let rc = self.refcount_manager.get_refcount(
-                            host_offset.0,
-                            self.backend,
-                            self.cache,
-                        )?;
-                        if rc == 1 {
-                            let restored = L2Entry::Standard {
-                                host_offset,
-                                copied: true,
-                                subclusters,
-                            };
-                            let l2_entry_size = self.header.l2_entry_size();
-                            let entry_offset = l2_offset.0 + (j as u64 * l2_entry_size as u64);
-                            let mut entry_buf = [0u8; 8];
-                            BigEndian::write_u64(
-                                &mut entry_buf,
-                                restored.encode(self.header.geometry()),
-                            );
-                            self.backend.write_all_at(&entry_buf, entry_offset)?;
-                            l2_modified = true;
+                        if copied == set_to {
+                            continue; // already in desired state
                         }
+
+                        // When restoring, only set COPIED if refcount is 1
+                        if set_to {
+                            let rc = self.refcount_manager.get_refcount(
+                                host_offset.0,
+                                self.backend,
+                                self.cache,
+                            )?;
+                            if rc != 1 {
+                                continue;
+                            }
+                        }
+
+                        let adjusted = L2Entry::Standard {
+                            host_offset,
+                            copied: set_to,
+                            subclusters,
+                        };
+                        let l2_entry_size = self.header.l2_entry_size();
+                        let entry_offset = l2_offset.0 + (j as u64 * l2_entry_size as u64);
+                        let mut entry_buf = [0u8; 8];
+                        BigEndian::write_u64(
+                            &mut entry_buf,
+                            adjusted.encode(self.header.geometry()),
+                        );
+                        self.backend.write_all_at(&entry_buf, entry_offset)?;
+                        l2_modified = true;
                     }
                 }
 
@@ -572,14 +507,20 @@ impl<'a> SnapshotManager<'a> {
                     self.cache.evict_l2_table(l2_offset);
                 }
 
-                // Restore COPIED on L1 entry if L2 table refcount is 1
-                if l2_rc == 1 && !l1_entry.is_copied() {
-                    let restored = L1Entry::with_l2_offset(l2_offset, true);
-                    self.mapper.set_l1_entry(l1_idx, restored)?;
+                // Adjust COPIED on the L1 entry itself
+                let should_update_l1 = if set_to {
+                    l2_rc == 1 && !l1_entry.is_copied()
+                } else {
+                    l1_entry.is_copied()
+                };
+
+                if should_update_l1 {
+                    let adjusted = L1Entry::with_l2_offset(l2_offset, set_to);
+                    self.mapper.set_l1_entry(l1_idx, adjusted)?;
                     let l1_disk_offset =
                         self.header.l1_table_offset.0 + (i as u64 * 8);
                     let mut entry_buf = [0u8; 8];
-                    BigEndian::write_u64(&mut entry_buf, restored.raw());
+                    BigEndian::write_u64(&mut entry_buf, adjusted.raw());
                     self.backend.write_all_at(&entry_buf, l1_disk_offset)?;
                 }
             }
@@ -619,156 +560,75 @@ impl<'a> SnapshotManager<'a> {
         Ok(first_offset)
     }
 
-    /// Increment refcounts for all clusters referenced by the active L1 table.
-    fn increment_refcounts_for_l1(&mut self, cluster_size: usize) -> Result<()> {
-        let l1_count = self.mapper.l1_table().entry_count();
-
-        for i in 0..l1_count {
-            let l1_idx = crate::format::types::L1Index(i as u32);
-            let l1_entry = self.mapper.l1_entry(l1_idx)?;
-
-            if let Some(l2_offset) = l1_entry.l2_table_offset() {
-                // Increment refcount for the L2 table itself
-                self.refcount_manager.increment_refcount(
-                    l2_offset.0,
-                    self.backend,
-                    self.cache,
-                )?;
-
-                // Load L2 table and increment refcounts for data clusters
-                let mut l2_buf = vec![0u8; cluster_size];
-                self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.header.geometry())?;
-
-                for entry in l2_table.iter() {
-                    self.increment_refcount_for_l2_entry(entry)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Increment the refcount for the cluster(s) referenced by an L2 entry.
-    fn increment_refcount_for_l2_entry(&mut self, entry: L2Entry) -> Result<()> {
-        match entry {
-            L2Entry::Standard { host_offset, .. } => {
-                self.refcount_manager.increment_refcount(
-                    host_offset.0,
-                    self.backend,
-                    self.cache,
-                )?;
-            }
-            L2Entry::Zero {
-                preallocated_offset: Some(offset), ..
-            } => {
-                self.refcount_manager.increment_refcount(
-                    offset.0,
-                    self.backend,
-                    self.cache,
-                )?;
-            }
-            L2Entry::Compressed(descriptor) => {
-                for cluster_offset in clusters_for_compressed(&descriptor, self.cluster_bits) {
-                    self.refcount_manager.increment_refcount(
-                        cluster_offset,
-                        self.backend,
-                        self.cache,
-                    )?;
-                }
-            }
-            L2Entry::Unallocated | L2Entry::Zero { preallocated_offset: None, .. } => {}
-        }
-        Ok(())
-    }
-
-    /// Decrement refcounts for all clusters referenced by the current active L1.
-    fn decrement_refcounts_for_active(&mut self, cluster_size: usize) -> Result<()> {
-        let l1_count = self.mapper.l1_table().entry_count();
-
-        for i in 0..l1_count {
-            let l1_idx = crate::format::types::L1Index(i as u32);
-            let l1_entry = self.mapper.l1_entry(l1_idx)?;
-
-            if let Some(l2_offset) = l1_entry.l2_table_offset() {
-                // Load L2 and decrement data cluster refcounts
-                let mut l2_buf = vec![0u8; cluster_size];
-                self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
-                let l2_table = L2Table::read_from(&l2_buf, self.header.geometry())?;
-
-                for entry in l2_table.iter() {
-                    self.decrement_refcount_for_l2_entry(entry)?;
-                }
-
-                // Decrement refcount for the L2 table itself
-                self.refcount_manager.decrement_refcount(
-                    l2_offset.0,
-                    self.backend,
-                    self.cache,
-                )?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Decrement refcounts for all clusters referenced by a given L1 table.
-    fn decrement_refcounts_for_l1(
+    /// Adjust refcounts for all clusters referenced by a given L1 table.
+    ///
+    /// When incrementing, L2 table refcount is bumped first (protects against
+    /// premature free). When decrementing, data clusters are freed first,
+    /// then the L2 table.
+    fn adjust_refcounts_for_l1(
         &mut self,
         l1_table: &L1Table,
         cluster_size: usize,
+        adjust: RefcountAdjust,
     ) -> Result<()> {
         for entry in l1_table.iter() {
             if let Some(l2_offset) = entry.l2_table_offset() {
-                // Load L2 and decrement data cluster refcounts
+                // Increment L2 refcount first, decrement last
+                if matches!(adjust, RefcountAdjust::Increment) {
+                    self.adjust_refcount(l2_offset.0, adjust)?;
+                }
+
+                // Load L2 and adjust data cluster refcounts
                 let mut l2_buf = vec![0u8; cluster_size];
                 self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
                 let l2_table = L2Table::read_from(&l2_buf, self.header.geometry())?;
 
                 for l2_entry in l2_table.iter() {
-                    self.decrement_refcount_for_l2_entry(l2_entry)?;
+                    self.adjust_refcount_for_l2_entry(l2_entry, adjust)?;
                 }
 
-                // Decrement refcount for the L2 table
-                self.refcount_manager.decrement_refcount(
-                    l2_offset.0,
-                    self.backend,
-                    self.cache,
-                )?;
+                if matches!(adjust, RefcountAdjust::Decrement) {
+                    self.adjust_refcount(l2_offset.0, adjust)?;
+                }
             }
         }
         Ok(())
     }
 
-    /// Decrement the refcount for the cluster(s) referenced by an L2 entry.
-    fn decrement_refcount_for_l2_entry(&mut self, entry: L2Entry) -> Result<()> {
+    /// Adjust the refcount for the cluster(s) referenced by an L2 entry.
+    fn adjust_refcount_for_l2_entry(
+        &mut self,
+        entry: L2Entry,
+        adjust: RefcountAdjust,
+    ) -> Result<()> {
         match entry {
             L2Entry::Standard { host_offset, .. } => {
-                self.refcount_manager.decrement_refcount(
-                    host_offset.0,
-                    self.backend,
-                    self.cache,
-                )?;
+                self.adjust_refcount(host_offset.0, adjust)?;
             }
             L2Entry::Zero {
                 preallocated_offset: Some(offset), ..
             } => {
-                self.refcount_manager.decrement_refcount(
-                    offset.0,
-                    self.backend,
-                    self.cache,
-                )?;
+                self.adjust_refcount(offset.0, adjust)?;
             }
             L2Entry::Compressed(descriptor) => {
                 for cluster_offset in clusters_for_compressed(&descriptor, self.cluster_bits) {
-                    self.refcount_manager.decrement_refcount(
-                        cluster_offset,
-                        self.backend,
-                        self.cache,
-                    )?;
+                    self.adjust_refcount(cluster_offset, adjust)?;
                 }
             }
             L2Entry::Unallocated | L2Entry::Zero { preallocated_offset: None, .. } => {}
+        }
+        Ok(())
+    }
+
+    /// Increment or decrement a single cluster's refcount.
+    fn adjust_refcount(&mut self, offset: u64, adjust: RefcountAdjust) -> Result<()> {
+        match adjust {
+            RefcountAdjust::Increment => {
+                self.refcount_manager.increment_refcount(offset, self.backend, self.cache)?;
+            }
+            RefcountAdjust::Decrement => {
+                self.refcount_manager.decrement_refcount(offset, self.backend, self.cache)?;
+            }
         }
         Ok(())
     }

@@ -13,6 +13,7 @@ pub mod cache;
 pub mod cluster_mapping;
 pub mod encryption;
 pub mod hash_manager;
+pub mod metadata_io;
 pub mod read_mode;
 pub mod reader;
 pub mod refcount_manager;

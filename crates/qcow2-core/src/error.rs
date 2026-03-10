@@ -351,6 +351,14 @@ pub enum Error {
         offset: u64,
     },
 
+    /// Header extensions exceed the available space in cluster 0.
+    HeaderExtensionOverflow {
+        /// Total bytes needed (header length + serialized extensions).
+        needed: usize,
+        /// Cluster size (maximum available space).
+        cluster_size: u64,
+    },
+
     /// Hash operations require an initialized hash extension.
     HashNotInitialized,
 
@@ -466,6 +474,8 @@ impl fmt::Display for Error {
                 write!(f, "all LUKS key slots are full"),
             Self::HashTableMisaligned { offset } =>
                 write!(f, "hash table at offset 0x{offset:x} is not cluster-aligned"),
+            Self::HeaderExtensionOverflow { needed, cluster_size } =>
+                write!(f, "header extensions ({needed} bytes) exceed cluster 0 ({cluster_size} bytes)"),
             Self::HashNotInitialized =>
                 write!(f, "hash extension not initialized"),
             Self::HashVerifyFailed { hash_chunk_index, guest_offset, expected, actual } =>

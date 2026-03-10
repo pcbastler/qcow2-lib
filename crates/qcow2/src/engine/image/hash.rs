@@ -222,6 +222,39 @@ impl Qcow2Image {
         mgr.export_hashes(range)
     }
 
+    /// Update hashes for a written range.
+    ///
+    /// Called internally by `write_at()` when hashes are active.
+    pub(super) fn update_hashes_for_write(&mut self, guest_offset: u64, len: u64) -> Result<()> {
+        let cluster_bits = self.header.cluster_bits;
+        let virtual_size = self.header.virtual_size;
+        let compression_type = self.header.compression_type;
+        let data_be: &dyn crate::io::IoBackend = match &self.data_backend {
+            Some(db) => db.as_ref(),
+            None => self.backend.as_ref(),
+        };
+        let refcount_manager = self
+            .refcount_manager
+            .as_mut()
+            .expect("writable image must have refcount_manager");
+
+        let mut mgr = HashManager::new(
+            self.backend.as_ref(),
+            data_be,
+            &mut self.cache,
+            refcount_manager,
+            &mut self.header,
+            &mut self.extensions,
+            &self.mapper,
+            cluster_bits,
+            virtual_size,
+            compression_type,
+            self.crypt_context.as_ref(),
+            &self.compressor,
+        );
+        mgr.update_hashes_for_range(guest_offset, len)
+    }
+
     /// Get summary info about the hash extension.
     pub fn hash_info(&self) -> Option<HashInfo> {
         hash_manager::detect_hashes(&self.extensions).then(|| {

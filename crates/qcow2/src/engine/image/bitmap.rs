@@ -217,6 +217,29 @@ impl Qcow2Image {
         Ok(())
     }
 
+    /// Track a write in all auto-tracking bitmaps.
+    ///
+    /// Called internally by `write_at()` when auto-bitmaps are active.
+    pub(super) fn track_bitmap_write(&mut self, guest_offset: u64, len: u64) -> Result<()> {
+        let cluster_bits = self.header.cluster_bits;
+        let virtual_size = self.header.virtual_size;
+        let refcount_manager = self
+            .refcount_manager
+            .as_mut()
+            .expect("writable image must have refcount_manager");
+
+        let mut mgr = BitmapManager::new(
+            self.backend.as_ref(),
+            &mut self.cache,
+            refcount_manager,
+            &mut self.header,
+            &mut self.extensions,
+            cluster_bits,
+            virtual_size,
+        );
+        mgr.track_write(guest_offset, len)
+    }
+
     /// Disable auto-tracking (clear the AUTO flag) on a bitmap.
     pub fn bitmap_disable_tracking(&mut self, name: &str) -> Result<()> {
         if !self.writable {

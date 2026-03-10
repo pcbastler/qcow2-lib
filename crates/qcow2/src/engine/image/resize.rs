@@ -324,7 +324,7 @@ impl Qcow2Image {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::*;
+    use super::super::tests::test_helpers::*;
     use super::*;
     use crate::format::constants::*;
 

@@ -26,3 +26,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "qcow2-rescue"
 path = "src/main.rs"
+
+[lints]
+workspace = true

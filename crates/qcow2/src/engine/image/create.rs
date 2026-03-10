@@ -5,7 +5,6 @@ use std::path::Path;
 
 use byteorder::{BigEndian, ByteOrder};
 
-use crate::engine::cache::{CacheConfig, MetadataCache};
 use crate::engine::cluster_mapping::ClusterMapper;
 use crate::engine::read_mode::ReadMode;
 use crate::engine::refcount_manager::{AllocationMode, RefcountManager};
@@ -18,8 +17,45 @@ use crate::format::types::{ClusterGeometry, ClusterOffset};
 use crate::io::sync_backend::SyncFileBackend;
 use crate::io::IoBackend;
 
-use crate::engine::compression;
 use super::{CreateOptions, Qcow2Image};
+
+/// Calculate the number of L1 table entries needed for a given virtual size.
+fn calculate_l1_entries(virtual_size: u64, cluster_size: u64, l2_entry_size: u64) -> u32 {
+    let l2_entries = cluster_size / l2_entry_size;
+    let bytes_per_l1_entry = l2_entries * cluster_size;
+    ((virtual_size + bytes_per_l1_entry - 1) / bytes_per_l1_entry) as u32
+}
+
+/// Write the initial on-disk layout: zeroed clusters, refcount table, and refcount block.
+///
+/// This is shared between `create_on_backend` and `create_overlay_on_backend`.
+fn write_initial_layout(
+    backend: &dyn IoBackend,
+    cluster_size: u64,
+    initial_clusters: u64,
+    rt_offset: u64,
+    rb_offset: u64,
+) -> Result<()> {
+    // Write zeroed clusters
+    let zeroed_cluster = vec![0u8; cluster_size as usize];
+    for i in 0..initial_clusters {
+        backend.write_all_at(&zeroed_cluster, i * cluster_size)?;
+    }
+
+    // Write refcount table: entry 0 → refcount block
+    let mut rt_buf = [0u8; 8];
+    BigEndian::write_u64(&mut rt_buf, rb_offset);
+    backend.write_all_at(&rt_buf, rt_offset)?;
+
+    // Write refcount block: initial clusters have refcount 1
+    let mut rb_buf = vec![0u8; cluster_size as usize];
+    for i in 0..initial_clusters as usize {
+        BigEndian::write_u16(&mut rb_buf[i * 2..], 1);
+    }
+    backend.write_all_at(&rb_buf, rb_offset)?;
+
+    Ok(())
+}
 
 impl Qcow2Image {
     /// Create a new QCOW2 v3 image at the given path.
@@ -134,10 +170,7 @@ impl Qcow2Image {
 
         // Calculate L1 table size
         let l2_entry_size = if extended_l2 { 16u64 } else { 8u64 };
-        let l2_entries = cluster_size / l2_entry_size;
-        let bytes_per_l1_entry = l2_entries * cluster_size;
-        let l1_entries =
-            ((options.virtual_size + bytes_per_l1_entry - 1) / bytes_per_l1_entry) as u32;
+        let l1_entries = calculate_l1_entries(options.virtual_size, cluster_size, l2_entry_size);
 
         // Generate LUKS header if encryption is requested
         let (luks_header_data, crypt_context) = if let Some(ref enc) = encryption {
@@ -230,13 +263,10 @@ impl Qcow2Image {
             extensions.push(HeaderExtension::ExternalDataFile(name.clone()));
         }
 
-        // Write zeroed image (initial_clusters * cluster_size bytes)
-        let zeroed_cluster = vec![0u8; cluster_size as usize];
-        for i in 0..initial_clusters {
-            backend.write_all_at(&zeroed_cluster, i * cluster_size)?;
-        }
+        // Write initial layout: zeroed clusters + refcount table/block
+        write_initial_layout(backend.as_ref(), cluster_size, initial_clusters, rt_offset, rb_offset)?;
 
-        // Write header
+        // Write header (over the zeroed cluster 0)
         let mut header_buf = vec![0u8; cluster_size as usize];
         header.write_to(&mut header_buf)?;
 
@@ -248,20 +278,6 @@ impl Qcow2Image {
         }
 
         backend.write_all_at(&header_buf, 0)?;
-
-        // Write L1 table (all zeros = unallocated, already written)
-
-        // Write refcount table: entry 0 → refcount block at cluster 3
-        let mut rt_buf = [0u8; 8];
-        BigEndian::write_u64(&mut rt_buf, rb_offset);
-        backend.write_all_at(&rt_buf, rt_offset)?;
-
-        // Write refcount block: clusters 0..initial_clusters have refcount 1
-        let mut rb_buf = vec![0u8; cluster_size as usize];
-        for i in 0..initial_clusters as usize {
-            BigEndian::write_u16(&mut rb_buf[i * 2..], 1);
-        }
-        backend.write_all_at(&rb_buf, rb_offset)?;
 
         // Write LUKS header if encrypted
         if let Some(ref luks_data) = luks_header_data {
@@ -283,26 +299,22 @@ impl Qcow2Image {
             backend.as_ref(), &header, AllocationMode::Append,
         )?;
 
-        Ok(Self {
+        Ok(Self::new_inner(
             header,
             extensions,
             backend,
-            data_backend: None,
+            None,  // data_backend
             mapper,
-            cache: MetadataCache::new(CacheConfig::default()),
-            backing_chain: None,
-            backing_image: None,
-            read_mode: ReadMode::Strict,
-            warnings: Vec::new(),
-            refcount_manager: Some(refcount_manager),
-            writable: true,
-            dirty: false,
-            compressed_cursor: 0,
-            has_auto_bitmaps: false,
-            has_hashes: false,
+            None,  // backing_chain
+            None,  // backing_image
+            ReadMode::Strict,
+            Vec::new(),
+            Some(refcount_manager),
+            true,  // writable
+            false, // has_auto_bitmaps
+            false, // has_hashes
             crypt_context,
-            compressor: compression::StdCompressor,
-        })
+        ))
     }
 
     /// Create a new QCOW2 v3 overlay image at the given path.
@@ -349,10 +361,7 @@ impl Qcow2Image {
         let refcount_order = 4u32;
 
         // Calculate L1 table size
-        let l2_entries = cluster_size / 8;
-        let bytes_per_l1_entry = l2_entries * cluster_size;
-        let l1_entries =
-            ((virtual_size + bytes_per_l1_entry - 1) / bytes_per_l1_entry) as u32;
+        let l1_entries = calculate_l1_entries(virtual_size, cluster_size, 8);
 
         // Layout: header(0), L1(1), reftable(2), refblock(3)
         let l1_offset = cluster_size;
@@ -401,13 +410,10 @@ impl Qcow2Image {
             compression_type: 0,
         };
 
-        // Write zeroed image
-        let zeroed_cluster = vec![0u8; cluster_size as usize];
-        for i in 0..initial_clusters {
-            backend.write_all_at(&zeroed_cluster, i * cluster_size)?;
-        }
+        // Write initial layout: zeroed clusters + refcount table/block
+        write_initial_layout(backend.as_ref(), cluster_size, initial_clusters, rt_offset, rb_offset)?;
 
-        // Write header
+        // Write header (over the zeroed cluster 0)
         let mut header_buf = vec![0u8; cluster_size as usize];
         header.write_to(&mut header_buf)?;
         // Write backing file name into the header cluster
@@ -415,18 +421,6 @@ impl Qcow2Image {
         header_buf[bf_start..bf_start + backing_name_bytes.len()]
             .copy_from_slice(backing_name_bytes);
         backend.write_all_at(&header_buf, 0)?;
-
-        // Write refcount table: entry 0 → refcount block at cluster 3
-        let mut rt_buf = [0u8; 8];
-        BigEndian::write_u64(&mut rt_buf, rb_offset);
-        backend.write_all_at(&rt_buf, rt_offset)?;
-
-        // Write refcount block: clusters 0-3 have refcount 1
-        let mut rb_buf = vec![0u8; cluster_size as usize];
-        for i in 0..initial_clusters as usize {
-            BigEndian::write_u16(&mut rb_buf[i * 2..], 1);
-        }
-        backend.write_all_at(&rb_buf, rb_offset)?;
 
         backend.flush()?;
 
@@ -441,32 +435,28 @@ impl Qcow2Image {
         // Open the backing image for read-through
         let backing_img = Qcow2Image::open(backing_path)?;
 
-        Ok(Self {
+        Ok(Self::new_inner(
             header,
-            extensions: Vec::new(),
+            Vec::new(),
             backend,
-            data_backend: None,
+            None,  // data_backend
             mapper,
-            cache: MetadataCache::new(CacheConfig::default()),
-            backing_chain: None,
-            backing_image: Some(Box::new(backing_img)),
-            read_mode: ReadMode::Strict,
-            warnings: Vec::new(),
-            refcount_manager: Some(refcount_manager),
-            writable: true,
-            dirty: false,
-            compressed_cursor: 0,
-            has_auto_bitmaps: false,
-            has_hashes: false,
-            crypt_context: None,
-            compressor: compression::StdCompressor,
-        })
+            None,  // backing_chain
+            Some(Box::new(backing_img)),
+            ReadMode::Strict,
+            Vec::new(),
+            Some(refcount_manager),
+            true,  // writable
+            false, // has_auto_bitmaps
+            false, // has_hashes
+            None,  // crypt_context
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::*;
+    use super::super::tests::test_helpers::*;
     use super::*;
     use crate::engine::cache::{CacheConfig, MetadataCache};
     use crate::io::MemoryBackend;

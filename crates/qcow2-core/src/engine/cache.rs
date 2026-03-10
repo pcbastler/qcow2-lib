@@ -70,26 +70,120 @@ impl Default for CacheConfig {
     }
 }
 
-/// LRU cache for frequently accessed QCOW2 metadata.
+// ---- Generic dirty LRU cache ----
+
+/// LRU cache with dirty tracking and pending eviction buffer.
 ///
-/// Maintains separate caches for L2 tables and refcount blocks because
-/// their access patterns and sizes may differ. Keyed by [`ClusterOffset`]
-/// (the host file offset where the metadata was read from).
-///
-/// In [`CacheMode::WriteBack`], dirty entries evicted by LRU pressure
-/// are placed into pending eviction buffers. The caller must drain them
-/// via [`take_pending_l2_evictions`] / [`take_pending_refcount_evictions`]
-/// and write them to disk.
-pub struct MetadataCache {
-    mode: CacheMode,
-    l2_tables: LruCache<u64, CacheEntry<L2Table>>,
-    refcount_blocks: LruCache<u64, CacheEntry<RefcountBlock>>,
-    pending_l2_evictions: Vec<(u64, L2Table)>,
-    pending_refcount_evictions: Vec<(u64, RefcountBlock)>,
-    bitmap_data: LruCache<u64, Vec<u8>>,
-    hash_data: LruCache<u64, Vec<u8>>,
-    stats: CacheStats,
+/// When a dirty entry is evicted by LRU pressure, it is placed into
+/// a pending eviction buffer. The caller must drain it via
+/// [`take_pending_evictions`] and write the entries to disk.
+struct DirtyLruCache<T> {
+    entries: LruCache<u64, CacheEntry<T>>,
+    pending_evictions: Vec<(u64, T)>,
 }
+
+impl<T> DirtyLruCache<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: LruCache::new(capacity),
+            pending_evictions: Vec::new(),
+        }
+    }
+
+    /// Look up a cached entry by key (read-only reference to the value).
+    fn get(&mut self, key: u64) -> Option<&T> {
+        self.entries.get(&key).map(|entry| &entry.value)
+    }
+
+    /// Look up a cached entry mutably for in-place modification.
+    fn get_entry_mut(&mut self, key: u64) -> Option<&mut CacheEntry<T>> {
+        self.entries.get_mut(&key)
+    }
+
+    /// Insert an entry into the cache.
+    ///
+    /// If `dirty` is true, the entry is marked dirty. If a dirty entry
+    /// is evicted by LRU pressure, it is placed into the pending buffer.
+    fn insert(&mut self, key: u64, value: T, dirty: bool) {
+        let entry = CacheEntry { value, dirty };
+        if let Some((evicted_key, evicted_entry)) = self.entries.put_with_evict(key, entry) {
+            if evicted_entry.dirty {
+                self.pending_evictions.push((evicted_key, evicted_entry.value));
+            }
+        }
+    }
+
+    /// Take all dirty entries that were evicted by LRU pressure.
+    fn take_pending_evictions(&mut self) -> Vec<(u64, T)> {
+        core::mem::take(&mut self.pending_evictions)
+    }
+
+    /// Evict a specific entry from the cache.
+    ///
+    /// Returns the value if the evicted entry was dirty; `None` otherwise.
+    fn evict(&mut self, key: u64) -> Option<T> {
+        if let Some(entry) = self.entries.pop(&key) {
+            if entry.dirty {
+                return Some(entry.value);
+            }
+        }
+        None
+    }
+
+    /// Flush a single dirty entry at `key` via the callback.
+    ///
+    /// The entry remains in cache but is marked clean. Returns the number
+    /// of writebacks performed (0 or 1).
+    fn flush_single<F>(&mut self, key: u64, mut writer: F) -> u64
+    where
+        F: FnMut(u64, &T),
+    {
+        if let Some(entry) = self.entries.get_mut(&key) {
+            if entry.dirty {
+                writer(key, &entry.value);
+                entry.dirty = false;
+                return 1;
+            }
+        }
+        0
+    }
+
+    /// Flush all dirty entries via the callback. Entries remain cached but clean.
+    /// Returns the number of writebacks performed.
+    fn flush_all<F, E>(&mut self, mut writer: F) -> Result<u64, E>
+    where
+        F: FnMut(u64, &T) -> Result<(), E>,
+    {
+        let mut writebacks = 0u64;
+        for (key, entry) in self.entries.iter_mut() {
+            if entry.dirty {
+                writer(*key, &entry.value)?;
+                entry.dirty = false;
+                writebacks += 1;
+            }
+        }
+        Ok(writebacks)
+    }
+
+    /// Drain all entries. Returns dirty ones (pending + in-cache).
+    fn drain_dirty(&mut self) -> Vec<(u64, T)> {
+        let mut dirty = core::mem::take(&mut self.pending_evictions);
+        for (key, entry) in self.entries.drain() {
+            if entry.dirty {
+                dirty.push((key, entry.value));
+            }
+        }
+        dirty
+    }
+
+    /// Clear all cached entries. Dirty entries are silently dropped.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.pending_evictions.clear();
+    }
+}
+
+// ---- MetadataCache: typed facade with stats and cache mode ----
 
 /// Cache hit/miss statistics for diagnostics and tuning.
 #[derive(Debug, Default, Clone)]
@@ -116,15 +210,32 @@ pub struct CacheStats {
     pub refcount_writebacks: u64,
 }
 
+/// LRU cache for frequently accessed QCOW2 metadata.
+///
+/// Maintains separate caches for L2 tables and refcount blocks because
+/// their access patterns and sizes may differ. Keyed by [`ClusterOffset`]
+/// (the host file offset where the metadata was read from).
+///
+/// In [`CacheMode::WriteBack`], dirty entries evicted by LRU pressure
+/// are placed into pending eviction buffers. The caller must drain them
+/// via [`take_pending_l2_evictions`] / [`take_pending_refcount_evictions`]
+/// and write them to disk.
+pub struct MetadataCache {
+    mode: CacheMode,
+    l2_tables: DirtyLruCache<L2Table>,
+    refcount_blocks: DirtyLruCache<RefcountBlock>,
+    bitmap_data: LruCache<u64, Vec<u8>>,
+    hash_data: LruCache<u64, Vec<u8>>,
+    stats: CacheStats,
+}
+
 impl MetadataCache {
     /// Create a new metadata cache with the given configuration.
     pub fn new(config: CacheConfig) -> Self {
         Self {
             mode: config.mode,
-            l2_tables: LruCache::new(config.l2_table_capacity),
-            refcount_blocks: LruCache::new(config.refcount_block_capacity),
-            pending_l2_evictions: Vec::new(),
-            pending_refcount_evictions: Vec::new(),
+            l2_tables: DirtyLruCache::new(config.l2_table_capacity),
+            refcount_blocks: DirtyLruCache::new(config.refcount_block_capacity),
             bitmap_data: LruCache::new(config.bitmap_data_capacity),
             hash_data: LruCache::new(config.hash_data_capacity),
             stats: CacheStats::default(),
@@ -151,14 +262,13 @@ impl MetadataCache {
 
     /// Look up a cached L2 table by host offset (read-only).
     pub fn get_l2_table(&mut self, offset: ClusterOffset) -> Option<&L2Table> {
-        let result = self.l2_tables.get(&offset.0);
-        if let Some(entry) = result {
+        let result = self.l2_tables.get(offset.0);
+        if result.is_some() {
             self.stats.l2_hits += 1;
-            Some(&entry.value)
         } else {
             self.stats.l2_misses += 1;
-            None
         }
+        result
     }
 
     /// Look up a cached L2 table mutably for in-place modification.
@@ -170,7 +280,7 @@ impl MetadataCache {
         if self.mode == CacheMode::WriteThrough {
             return None;
         }
-        self.l2_tables.get_mut(&offset.0)
+        self.l2_tables.get_entry_mut(offset.0)
     }
 
     /// Insert an L2 table into the cache.
@@ -181,20 +291,15 @@ impl MetadataCache {
     /// If a dirty entry is evicted by LRU pressure, it is placed into
     /// the pending eviction buffer.
     pub fn insert_l2_table(&mut self, offset: ClusterOffset, table: L2Table, dirty: bool) {
-        let dirty = dirty && self.mode == CacheMode::WriteBack;
-        let entry = CacheEntry { value: table, dirty };
-        if let Some((evicted_key, evicted_entry)) = self.l2_tables.put_with_evict(offset.0, entry) {
-            if evicted_entry.dirty {
-                self.pending_l2_evictions.push((evicted_key, evicted_entry.value));
-            }
-        }
+        let effective_dirty = dirty && self.mode == CacheMode::WriteBack;
+        self.l2_tables.insert(offset.0, table, effective_dirty);
     }
 
     /// Take all dirty L2 tables that were evicted by LRU pressure.
     ///
     /// The caller must write these to disk before they are lost.
     pub fn take_pending_l2_evictions(&mut self) -> Vec<(u64, L2Table)> {
-        core::mem::take(&mut self.pending_l2_evictions)
+        self.l2_tables.take_pending_evictions()
     }
 
     /// Evict a specific L2 table from the cache.
@@ -202,45 +307,29 @@ impl MetadataCache {
     /// If the evicted entry is dirty, it is returned so the caller can
     /// write it to disk. Returns `None` if not present or clean.
     pub fn evict_l2_table(&mut self, offset: ClusterOffset) -> Option<L2Table> {
-        if let Some(entry) = self.l2_tables.pop(&offset.0) {
-            if entry.dirty {
-                return Some(entry.value);
-            }
-        }
-        None
+        self.l2_tables.evict(offset.0)
     }
 
     /// Flush a single dirty L2 table at `offset` to disk via the callback.
     ///
     /// The entry remains in cache but is marked clean. No-op if the entry
     /// is not present or not dirty.
-    pub fn flush_single_l2<F>(&mut self, offset: ClusterOffset, mut writer: F) -> bool
+    pub fn flush_single_l2<F>(&mut self, offset: ClusterOffset, writer: F) -> bool
     where
         F: FnMut(u64, &L2Table),
     {
-        if let Some(entry) = self.l2_tables.get_mut(&offset.0) {
-            if entry.dirty {
-                writer(offset.0, &entry.value);
-                entry.dirty = false;
-                self.stats.l2_writebacks += 1;
-                return true;
-            }
-        }
-        false
+        let writebacks = self.l2_tables.flush_single(offset.0, writer);
+        self.stats.l2_writebacks += writebacks;
+        writebacks > 0
     }
 
     /// Flush all dirty L2 tables via the callback. Entries remain cached but clean.
-    pub fn flush_l2_tables<F, E>(&mut self, mut writer: F) -> Result<(), E>
+    pub fn flush_l2_tables<F, E>(&mut self, writer: F) -> Result<(), E>
     where
         F: FnMut(u64, &L2Table) -> Result<(), E>,
     {
-        for (key, entry) in self.l2_tables.iter_mut() {
-            if entry.dirty {
-                writer(*key, &entry.value)?;
-                entry.dirty = false;
-                self.stats.l2_writebacks += 1;
-            }
-        }
+        let writebacks = self.l2_tables.flush_all(writer)?;
+        self.stats.l2_writebacks += writebacks;
         Ok(())
     }
 
@@ -248,14 +337,13 @@ impl MetadataCache {
 
     /// Look up a cached refcount block by host offset (read-only).
     pub fn get_refcount_block(&mut self, offset: ClusterOffset) -> Option<&RefcountBlock> {
-        let result = self.refcount_blocks.get(&offset.0);
-        if let Some(entry) = result {
+        let result = self.refcount_blocks.get(offset.0);
+        if result.is_some() {
             self.stats.refcount_hits += 1;
-            Some(&entry.value)
         } else {
             self.stats.refcount_misses += 1;
-            None
         }
+        result
     }
 
     /// Look up a cached refcount block mutably for in-place modification.
@@ -268,7 +356,7 @@ impl MetadataCache {
         if self.mode == CacheMode::WriteThrough {
             return None;
         }
-        self.refcount_blocks.get_mut(&offset.0)
+        self.refcount_blocks.get_entry_mut(offset.0)
     }
 
     /// Insert a refcount block into the cache.
@@ -278,73 +366,44 @@ impl MetadataCache {
         block: RefcountBlock,
         dirty: bool,
     ) {
-        let dirty = dirty && self.mode == CacheMode::WriteBack;
-        let entry = CacheEntry { value: block, dirty };
-        if let Some((evicted_key, evicted_entry)) =
-            self.refcount_blocks.put_with_evict(offset.0, entry)
-        {
-            if evicted_entry.dirty {
-                self.pending_refcount_evictions
-                    .push((evicted_key, evicted_entry.value));
-            }
-        }
+        let effective_dirty = dirty && self.mode == CacheMode::WriteBack;
+        self.refcount_blocks.insert(offset.0, block, effective_dirty);
     }
 
     /// Take all dirty refcount blocks that were evicted by LRU pressure.
     pub fn take_pending_refcount_evictions(&mut self) -> Vec<(u64, RefcountBlock)> {
-        core::mem::take(&mut self.pending_refcount_evictions)
+        self.refcount_blocks.take_pending_evictions()
     }
 
     /// Evict a specific refcount block from the cache.
     ///
     /// Returns the block if it was dirty.
     pub fn evict_refcount_block(&mut self, offset: ClusterOffset) -> Option<RefcountBlock> {
-        if let Some(entry) = self.refcount_blocks.pop(&offset.0) {
-            if entry.dirty {
-                return Some(entry.value);
-            }
-        }
-        None
+        self.refcount_blocks.evict(offset.0)
     }
 
     /// Flush all dirty refcount blocks via the callback.
-    pub fn flush_refcount_blocks<F, E>(&mut self, mut writer: F) -> Result<(), E>
+    pub fn flush_refcount_blocks<F, E>(&mut self, writer: F) -> Result<(), E>
     where
         F: FnMut(u64, &RefcountBlock) -> Result<(), E>,
     {
-        for (key, entry) in self.refcount_blocks.iter_mut() {
-            if entry.dirty {
-                writer(*key, &entry.value)?;
-                entry.dirty = false;
-                self.stats.refcount_writebacks += 1;
-            }
-        }
+        let writebacks = self.refcount_blocks.flush_all(writer)?;
+        self.stats.refcount_writebacks += writebacks;
         Ok(())
     }
 
     /// Whether there are any pending dirty evictions that need writing.
     pub fn has_pending_evictions(&self) -> bool {
-        !self.pending_l2_evictions.is_empty() || !self.pending_refcount_evictions.is_empty()
+        !self.l2_tables.pending_evictions.is_empty()
+            || !self.refcount_blocks.pending_evictions.is_empty()
     }
 
     /// Drain all entries (for close/drop). Returns dirty L2 and refcount entries.
     pub fn drain_dirty(&mut self) -> (Vec<(u64, L2Table)>, Vec<(u64, RefcountBlock)>) {
-        let mut dirty_l2 = core::mem::take(&mut self.pending_l2_evictions);
-        for (key, entry) in self.l2_tables.drain() {
-            if entry.dirty {
-                dirty_l2.push((key, entry.value));
-            }
-        }
-        let mut dirty_rc = core::mem::take(&mut self.pending_refcount_evictions);
-        for (key, entry) in self.refcount_blocks.drain() {
-            if entry.dirty {
-                dirty_rc.push((key, entry.value));
-            }
-        }
-        (dirty_l2, dirty_rc)
+        (self.l2_tables.drain_dirty(), self.refcount_blocks.drain_dirty())
     }
 
-    // ---- Bitmap data (unchanged, no dirty tracking) ----
+    // ---- Bitmap data (simple, no dirty tracking) ----
 
     /// Look up a cached bitmap data cluster by host offset.
     pub fn get_bitmap_data(&mut self, offset: ClusterOffset) -> Option<&Vec<u8>> {
@@ -367,7 +426,7 @@ impl MetadataCache {
         self.bitmap_data.pop(&offset.0);
     }
 
-    // ---- Hash data (unchanged, no dirty tracking) ----
+    // ---- Hash data (simple, no dirty tracking) ----
 
     /// Look up a cached hash data cluster by host offset.
     pub fn get_hash_data(&mut self, offset: ClusterOffset) -> Option<&Vec<u8>> {
@@ -398,8 +457,6 @@ impl MetadataCache {
     pub fn clear(&mut self) {
         self.l2_tables.clear();
         self.refcount_blocks.clear();
-        self.pending_l2_evictions.clear();
-        self.pending_refcount_evictions.clear();
         self.bitmap_data.clear();
         self.hash_data.clear();
     }

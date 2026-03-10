@@ -12,8 +12,6 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use byteorder::{BigEndian, ByteOrder};
-
 use crate::engine::cache::MetadataCache;
 use crate::engine::refcount_manager::RefcountManager;
 use crate::error::{Error, FormatError, Result};
@@ -26,9 +24,6 @@ use crate::format::header::Header;
 use crate::format::header_extension::HeaderExtension;
 use crate::format::types::{BitmapIndex, ClusterOffset};
 use crate::io::IoBackend;
-
-/// Byte offset of autoclear_features in the QCOW2 v3 header.
-const OFF_AUTOCLEAR_FEATURES: u64 = 88;
 
 /// Information about a bitmap, suitable for display.
 #[derive(Debug, Clone)]
@@ -146,13 +141,11 @@ impl<'a> BitmapManager<'a> {
             .refcount_manager
             .allocate_contiguous_clusters(clusters_needed, self.backend, self.cache)?;
 
-        // Zero-fill the allocated space first
+        // Write table into a zero-padded buffer (single I/O)
         let alloc_size = clusters_needed as usize * self.cluster_size() as usize;
-        let zeros = vec![0u8; alloc_size];
-        self.backend.write_all_at(&zeros, first_offset.0)?;
-
-        // Write the actual table data
-        self.write_bitmap_table_at(table, first_offset)?;
+        let mut buf = vec![0u8; alloc_size];
+        table.write_to(&mut buf[..byte_count])?;
+        self.backend.write_all_at(&buf, first_offset.0)?;
 
         Ok(first_offset)
     }
@@ -167,11 +160,11 @@ impl<'a> BitmapManager<'a> {
             .refcount_manager
             .allocate_contiguous_clusters(clusters_needed, self.backend, self.cache)?;
 
-        // Zero-fill then write
+        // Write directory data into a zero-padded buffer (single I/O)
         let alloc_size = clusters_needed as usize * self.cluster_size() as usize;
-        let zeros = vec![0u8; alloc_size];
-        self.backend.write_all_at(&zeros, first_offset.0)?;
-        self.backend.write_all_at(&dir_data, first_offset.0)?;
+        let mut buf = vec![0u8; alloc_size];
+        buf[..dir_data.len()].copy_from_slice(&dir_data);
+        self.backend.write_all_at(&buf, first_offset.0)?;
 
         Ok((first_offset, dir_size))
     }
@@ -228,31 +221,20 @@ impl<'a> BitmapManager<'a> {
 
     /// Rewrite all header extensions to cluster 0.
     fn write_extensions_to_disk(&self) -> Result<()> {
-        let ext_data = HeaderExtension::write_all(self.extensions);
-        let ext_start = self.header.header_length as u64;
-        let cluster_size = self.cluster_size();
-
-        if ext_start + ext_data.len() as u64 > cluster_size {
-            return Err(FormatError::InvalidBitmapExtension {
-                message: format!(
-                    "header extensions ({} bytes) exceed cluster 0 ({} bytes)",
-                    ext_start as usize + ext_data.len(),
-                    cluster_size
-                ),
-            }
-            .into());
-        }
-
-        self.backend.write_all_at(&ext_data, ext_start)?;
-        Ok(())
+        super::metadata_io::write_header_extensions(
+            self.backend,
+            self.header,
+            self.extensions,
+            self.cluster_size(),
+        )
     }
 
     /// Write autoclear features to the on-disk header.
     fn write_autoclear_features(&self) -> Result<()> {
-        let mut buf = [0u8; 8];
-        BigEndian::write_u64(&mut buf, self.header.autoclear_features.bits());
-        self.backend.write_all_at(&buf, OFF_AUTOCLEAR_FEATURES)?;
-        Ok(())
+        super::metadata_io::write_autoclear_features(
+            self.backend,
+            self.header.autoclear_features,
+        )
     }
 
     /// Find a bitmap directory entry by name.
@@ -353,9 +335,9 @@ impl<'a> BitmapManager<'a> {
             }
             .into());
         }
-        if granularity_bits < BITMAP_MIN_GRANULARITY_BITS
-            || granularity_bits > BITMAP_MAX_GRANULARITY_BITS
-        {
+
+        let valid_range = BITMAP_MIN_GRANULARITY_BITS..=BITMAP_MAX_GRANULARITY_BITS;
+        if !valid_range.contains(&granularity_bits) {
             return Err(FormatError::InvalidBitmapExtension {
                 message: format!(
                     "granularity_bits {} out of range [{}, {}]",
@@ -504,92 +486,49 @@ impl<'a> BitmapManager<'a> {
         let mut table = self.load_bitmap_table(&entry)?;
         let mut table_dirty = false;
 
-        // Iterate over each granularity-aligned block in the range
         let first_bit = guest_offset / granularity;
         let last_bit = (guest_offset + len - 1) / granularity;
-
         let bits_per_cluster = self.cluster_size() * 8;
 
         let mut bit = first_bit;
         while bit <= last_bit {
-            let table_idx = (bit / bits_per_cluster) as u32;
-            let te = table.get(BitmapIndex(table_idx))?;
+            let table_idx = BitmapIndex((bit / bits_per_cluster) as u32);
+            let entry_first_bit = table_idx.0 as u64 * bits_per_cluster;
+            let entry_last_bit = entry_first_bit + bits_per_cluster - 1;
+            let covers_all = first_bit <= entry_first_bit && last_bit >= entry_last_bit;
+            let te = table.get(table_idx)?;
 
             match te.state() {
-                BitmapTableEntryState::AllOnes => {
-                    // Already all dirty, skip to next table entry
-                    bit = (table_idx as u64 + 1) * bits_per_cluster;
-                    continue;
+                BitmapTableEntryState::AllOnes => {}
+                _ if covers_all => {
+                    // Range covers entire entry — promote to AllOnes, free data if any.
+                    if let BitmapTableEntryState::Data(offset) = te.state() {
+                        self.free_clusters(offset, self.cluster_size())?;
+                    }
+                    table.set(table_idx, BitmapTableEntry::all_ones())?;
+                    table_dirty = true;
                 }
                 BitmapTableEntryState::AllZeros => {
-                    // Check if we cover the entire entry
-                    let entry_first_bit = table_idx as u64 * bits_per_cluster;
-                    let entry_last_bit = entry_first_bit + bits_per_cluster - 1;
-                    if first_bit <= entry_first_bit && last_bit >= entry_last_bit {
-                        // Promote to AllOnes
-                        table.set(BitmapIndex(table_idx), BitmapTableEntry::all_ones())?;
-                        table_dirty = true;
-                        bit = entry_last_bit + 1;
-                        continue;
-                    }
-
-                    // Allocate a new data cluster (all zeros)
                     let data_offset = self
                         .refcount_manager
                         .allocate_cluster(self.backend, self.cache)?;
-                    let zeros = vec![0u8; self.cluster_size() as usize];
-                    self.backend.write_all_at(&zeros, data_offset.0)?;
-
-                    // Set bits in the newly allocated cluster
-                    let mut data = zeros;
-                    let end_bit = last_bit.min(entry_last_bit);
-                    for b in bit..=end_bit {
-                        let bit_in_cluster = b % bits_per_cluster;
-                        let byte_idx = (bit_in_cluster / 8) as usize;
-                        let bit_idx = 7 - (bit_in_cluster % 8) as u8;
-                        data[byte_idx] |= 1 << bit_idx;
-                    }
+                    let mut data = vec![0u8; self.cluster_size() as usize];
+                    Self::set_bits_msb(&mut data, bit - entry_first_bit, last_bit.min(entry_last_bit) - entry_first_bit);
                     self.write_data_cluster(data_offset, &data)?;
-
-                    table.set(
-                        BitmapIndex(table_idx),
-                        BitmapTableEntry::with_data_offset(data_offset),
-                    )?;
+                    table.set(table_idx, BitmapTableEntry::with_data_offset(data_offset))?;
                     table_dirty = true;
-                    bit = end_bit + 1;
                 }
                 BitmapTableEntryState::Data(data_offset) => {
                     let mut data = self.load_data_cluster(data_offset)?;
-                    let entry_first_bit = table_idx as u64 * bits_per_cluster;
-                    let entry_last_bit = entry_first_bit + bits_per_cluster - 1;
-
-                    // Check if we can promote to AllOnes
-                    if first_bit <= entry_first_bit && last_bit >= entry_last_bit {
-                        // Free the data cluster and promote
-                        self.free_clusters(data_offset, self.cluster_size())?;
-                        table.set(BitmapIndex(table_idx), BitmapTableEntry::all_ones())?;
-                        table_dirty = true;
-                        bit = entry_last_bit + 1;
-                        continue;
-                    }
-
-                    let end_bit = last_bit.min(entry_last_bit);
-                    let mut cluster_dirty = false;
-                    for b in bit..=end_bit {
-                        let bit_in_cluster = b % bits_per_cluster;
-                        let byte_idx = (bit_in_cluster / 8) as usize;
-                        let bit_idx = 7 - (bit_in_cluster % 8) as u8;
-                        if data[byte_idx] & (1 << bit_idx) == 0 {
-                            data[byte_idx] |= 1 << bit_idx;
-                            cluster_dirty = true;
-                        }
-                    }
-                    if cluster_dirty {
+                    let before = data.clone();
+                    Self::set_bits_msb(&mut data, bit - entry_first_bit, last_bit.min(entry_last_bit) - entry_first_bit);
+                    if data != before {
                         self.write_data_cluster(data_offset, &data)?;
                     }
-                    bit = end_bit + 1;
                 }
             }
+
+            bit = entry_last_bit + 1;
         }
 
         if table_dirty {
@@ -597,6 +536,15 @@ impl<'a> BitmapManager<'a> {
         }
 
         Ok(())
+    }
+
+    /// Set bits [start..=end] in `data` using MSB-first bit ordering.
+    fn set_bits_msb(data: &mut [u8], start: u64, end: u64) {
+        for b in start..=end {
+            let byte_idx = (b / 8) as usize;
+            let bit_idx = 7 - (b % 8) as u8;
+            data[byte_idx] |= 1 << bit_idx;
+        }
     }
 
     /// Clear all bits in a bitmap (reset to all-clean).
@@ -662,26 +610,18 @@ impl<'a> BitmapManager<'a> {
             let dst_te = dst_table.get(idx)?;
 
             match (src_te.state(), dst_te.state()) {
-                (BitmapTableEntryState::AllZeros, _) => {
-                    // Source is all clean, nothing to merge
-                }
-                (BitmapTableEntryState::AllOnes, BitmapTableEntryState::AllOnes) => {
-                    // Already all dirty
-                }
+                // Nothing to merge: source is clean, or destination is already all dirty.
+                (BitmapTableEntryState::AllZeros, _) | (_, BitmapTableEntryState::AllOnes) => {}
                 (BitmapTableEntryState::AllOnes, _) => {
-                    // Free any existing dst data cluster
+                    // Promote destination to AllOnes, free any data cluster.
                     if let Some(offset) = dst_te.data_cluster_offset() {
                         self.free_clusters(offset, self.cluster_size())?;
                     }
                     dst_table.set(idx, BitmapTableEntry::all_ones())?;
                     dst_table_dirty = true;
                 }
-                (BitmapTableEntryState::Data(src_offset), BitmapTableEntryState::AllOnes) => {
-                    // Destination is already all dirty
-                    let _ = src_offset;
-                }
                 (BitmapTableEntryState::Data(src_offset), BitmapTableEntryState::AllZeros) => {
-                    // Copy source data cluster to new destination cluster
+                    // Copy source data cluster to a new destination cluster.
                     let src_data = self.load_data_cluster(src_offset)?;
                     let new_offset = self
                         .refcount_manager
@@ -690,11 +630,8 @@ impl<'a> BitmapManager<'a> {
                     dst_table.set(idx, BitmapTableEntry::with_data_offset(new_offset))?;
                     dst_table_dirty = true;
                 }
-                (
-                    BitmapTableEntryState::Data(src_offset),
-                    BitmapTableEntryState::Data(dst_offset),
-                ) => {
-                    // OR source into destination
+                (BitmapTableEntryState::Data(src_offset), BitmapTableEntryState::Data(dst_offset)) => {
+                    // OR source bits into destination.
                     let src_data = self.load_data_cluster(src_offset)?;
                     let mut dst_data = self.load_data_cluster(dst_offset)?;
                     for (d, s) in dst_data.iter_mut().zip(src_data.iter()) {

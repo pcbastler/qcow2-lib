@@ -17,3 +17,6 @@ tempfile = "3"
 [[bin]]
 name = "qcow2-tool"
 path = "src/cli/main.rs"
+
+[lints]
+workspace = true

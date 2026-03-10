@@ -9,3 +9,6 @@ rust-version = "1.70"
 [dependencies]
 byteorder = { version = "1", default-features = false }
 bitflags = { version = "2", default-features = false }
+
+[lints]
+workspace = true
