@@ -37,7 +37,9 @@ impl Default for CacheMode {
 
 /// A cached metadata entry with dirty tracking.
 pub struct CacheEntry<T> {
+    /// The cached value (L2Table or RefcountBlock).
     pub value: T,
+    /// Whether this entry has been modified since last flush.
     pub dirty: bool,
 }
 
