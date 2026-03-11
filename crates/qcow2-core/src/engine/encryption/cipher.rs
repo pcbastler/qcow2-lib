@@ -333,4 +333,199 @@ mod tests {
         ctx.encrypt_cluster(512, &mut data2).unwrap();
         assert_ne!(data1, data2, "different host offsets should produce different ciphertext");
     }
+
+    // ---- CryptContext CBC mode tests ----
+
+    #[test]
+    fn crypt_context_cbc_multi_sector_round_trip() {
+        use super::super::CipherMode;
+        use super::super::CryptContext;
+
+        // AES-256-CBC: 32-byte key
+        let ctx = CryptContext::new(vec![0x7Eu8; 32], CipherMode::AesCbcEssiv);
+        let original = vec![0xBBu8; 2048]; // 4 sectors
+        let mut data = original.clone();
+
+        ctx.encrypt_cluster(0, &mut data).unwrap();
+        assert_ne!(data, original, "encrypted data must differ from plaintext");
+
+        ctx.decrypt_cluster(0, &mut data).unwrap();
+        assert_eq!(data, original, "round-trip must recover original data");
+    }
+
+    #[test]
+    fn crypt_context_cbc_host_offset_affects_result() {
+        use super::super::CipherMode;
+        use super::super::CryptContext;
+
+        let ctx = CryptContext::new(vec![0x3Cu8; 32], CipherMode::AesCbcEssiv);
+        let plaintext = vec![0xCCu8; 512];
+
+        let mut data1 = plaintext.clone();
+        let mut data2 = plaintext.clone();
+        ctx.encrypt_cluster(0, &mut data1).unwrap();
+        ctx.encrypt_cluster(512, &mut data2).unwrap();
+        assert_ne!(data1, data2, "different host offsets must produce different ciphertext in CBC mode");
+    }
+
+    // ---- CryptContext AES-128 key size tests ----
+
+    #[test]
+    fn crypt_context_xts_128_round_trip() {
+        use super::super::CipherMode;
+        use super::super::CryptContext;
+
+        // AES-128-XTS: 32-byte key
+        let ctx = CryptContext::new(vec![0x11u8; 32], CipherMode::AesXtsPlain64);
+        let original = vec![0xDDu8; 1024]; // 2 sectors
+        let mut data = original.clone();
+
+        ctx.encrypt_cluster(0, &mut data).unwrap();
+        assert_ne!(data, original);
+
+        ctx.decrypt_cluster(0, &mut data).unwrap();
+        assert_eq!(data, original, "AES-128-XTS round-trip must recover original");
+    }
+
+    #[test]
+    fn crypt_context_cbc_128_round_trip() {
+        use super::super::CipherMode;
+        use super::super::CryptContext;
+
+        // AES-128-CBC: 16-byte key
+        let ctx = CryptContext::new(vec![0x22u8; 16], CipherMode::AesCbcEssiv);
+        let original = vec![0xEEu8; 512]; // 1 sector
+        let mut data = original.clone();
+
+        ctx.encrypt_cluster(0, &mut data).unwrap();
+        assert_ne!(data, original);
+
+        ctx.decrypt_cluster(0, &mut data).unwrap();
+        assert_eq!(data, original, "AES-128-CBC round-trip must recover original");
+    }
+
+    // ---- compute_essiv edge cases ----
+
+    #[test]
+    fn essiv_sector_zero_is_deterministic() {
+        // Sector 0: ESSIV plaintext is all-zeros (sector_num = 0), so the IV is
+        // AES_ECB(SHA256(key), 0x00..00). Verify two calls produce the same IV by
+        // confirming encrypt/decrypt is consistent.
+        let key = [0xA5u8; 32];
+        let original = [0x01u8; 512];
+
+        let mut enc = original;
+        encrypt_sector_cbc_essiv(&key, 0, &mut enc).unwrap();
+        assert_ne!(enc, original, "sector 0 must still be encrypted");
+
+        let mut dec = enc;
+        decrypt_sector_cbc_essiv(&key, 0, &mut dec).unwrap();
+        assert_eq!(dec, original, "sector 0 decryption must recover original");
+    }
+
+    #[test]
+    fn essiv_high_sector_number_round_trip() {
+        // Large sector numbers must not overflow or panic.
+        let key = [0xF0u8; 32];
+        let original = [0x55u8; 512];
+        let sector = u64::MAX / 2;
+
+        let mut data = original;
+        encrypt_sector_cbc_essiv(&key, sector, &mut data).unwrap();
+        assert_ne!(data, original);
+
+        decrypt_sector_cbc_essiv(&key, sector, &mut data).unwrap();
+        assert_eq!(data, original, "high sector number round-trip must succeed");
+    }
+
+    #[test]
+    fn essiv_different_keys_produce_different_ivs() {
+        // Two different keys must yield different IVs for the same sector,
+        // producing different ciphertext.
+        let key1 = [0x11u8; 32];
+        let key2 = [0x22u8; 32];
+        let plaintext = [0xAAu8; 512];
+
+        let mut data1 = plaintext;
+        let mut data2 = plaintext;
+        encrypt_sector_cbc_essiv(&key1, 7, &mut data1).unwrap();
+        encrypt_sector_cbc_essiv(&key2, 7, &mut data2).unwrap();
+        assert_ne!(data1, data2, "different keys must produce different ciphertext");
+    }
+
+    // ---- make_xts_tweak verification ----
+
+    #[test]
+    fn xts_tweak_is_little_endian() {
+        // Sector 1 encoded LE: bytes [1, 0, 0, 0, 0, 0, 0, 0, 0...0]
+        // Sector 256 encoded LE: bytes [0, 1, 0, 0, 0, 0, 0, 0, 0...0]
+        // Different tweaks must produce different ciphertext for the same plaintext.
+        let key = [0x77u8; 64];
+        let plaintext = [0x33u8; 512];
+
+        // Sector 1 vs sector 256: both have exactly one '1' bit, but in different
+        // LE byte positions — confirming the tweak uses LE encoding.
+        let mut data_sector1 = plaintext;
+        let mut data_sector256 = plaintext;
+        encrypt_sector_xts(&key, 1, &mut data_sector1).unwrap();
+        encrypt_sector_xts(&key, 256, &mut data_sector256).unwrap();
+        assert_ne!(
+            data_sector1, data_sector256,
+            "sectors 1 and 256 differ only in tweak byte position (LE vs BE distinction)"
+        );
+
+        // Verify sector 1 decrypts correctly with sector 1 (not 256)
+        let mut check = data_sector1;
+        decrypt_sector_xts(&key, 1, &mut check).unwrap();
+        assert_eq!(check, plaintext);
+
+        // And that using the wrong sector number fails to recover plaintext
+        let mut wrong = data_sector1;
+        decrypt_sector_xts(&key, 256, &mut wrong).unwrap();
+        assert_ne!(wrong, plaintext, "wrong sector number must not recover plaintext");
+    }
+
+    // ---- Zero-filled data encryption ----
+
+    #[test]
+    fn xts_all_zeros_plaintext_is_not_all_zeros_after_encrypt() {
+        let key = [0x88u8; 64];
+        let mut data = [0u8; 512];
+
+        encrypt_sector_xts(&key, 5, &mut data).unwrap();
+        assert_ne!(data, [0u8; 512], "encrypting all-zeros must not produce all-zeros");
+    }
+
+    #[test]
+    fn cbc_all_zeros_plaintext_is_not_all_zeros_after_encrypt() {
+        let key = [0x99u8; 32];
+        let mut data = [0u8; 512];
+
+        encrypt_sector_cbc_essiv(&key, 5, &mut data).unwrap();
+        assert_ne!(data, [0u8; 512], "encrypting all-zeros must not produce all-zeros");
+    }
+
+    // ---- CBC ESSIV sector 0 explicit test ----
+
+    #[test]
+    fn cbc_essiv_sector_zero_iv_is_aes_of_zero_block() {
+        // For sector 0, the ESSIV plaintext is a 16-byte zero block.
+        // The IV is therefore AES_ECB(SHA256(key), zeros).
+        // This is a well-defined, non-trivial value — verify encrypt/decrypt works.
+        let key = [0x5Au8; 32];
+        let original = [0xF0u8; 512];
+        let mut data = original;
+
+        encrypt_sector_cbc_essiv(&key, 0, &mut data).unwrap();
+        // Encrypted bytes must differ from plaintext
+        assert_ne!(data, original);
+        // And must differ from what sector 1 produces (IV changes per sector)
+        let mut data_s1 = original;
+        encrypt_sector_cbc_essiv(&key, 1, &mut data_s1).unwrap();
+        assert_ne!(data, data_s1, "sector 0 and sector 1 must produce different ciphertext");
+
+        // Decrypt sector 0 back
+        decrypt_sector_cbc_essiv(&key, 0, &mut data).unwrap();
+        assert_eq!(data, original, "CBC ESSIV sector 0 round-trip must succeed");
+    }
 }

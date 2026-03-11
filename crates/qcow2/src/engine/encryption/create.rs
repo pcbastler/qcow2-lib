@@ -131,7 +131,7 @@ pub fn create_luks1_header(
 /// QEMU uses the same cipher mode for key material encryption as for data.
 /// For XTS: AES-XTS with full key and sector-number tweak.
 /// For CBC: AES-CBC with sector-number plain IV.
-fn encrypt_key_material(key: &[u8], cipher_mode: CipherMode, material: &mut [u8]) -> Result<()> {
+pub fn encrypt_key_material(key: &[u8], cipher_mode: CipherMode, material: &mut [u8]) -> Result<()> {
     for (i, sector) in material.chunks_mut(512).enumerate() {
         if sector.len() < 512 {
             break;
