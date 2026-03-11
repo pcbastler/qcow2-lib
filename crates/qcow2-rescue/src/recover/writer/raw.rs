@@ -15,6 +15,7 @@ use super::super::progress::RecoveryProgress;
 use super::super::RecoverOptions;
 
 /// Write a flat raw output image from merged mappings.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn write_raw(
     output: &Path,
     layers: &[(PathBuf, ReconstructedTablesReport)],

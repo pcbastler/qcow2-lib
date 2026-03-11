@@ -1260,7 +1260,7 @@ fn delete_all_bitmaps_removes_extension() {
     mgr.delete_bitmap("b").unwrap();
 
     assert!(mgr.list_bitmaps().unwrap().is_empty());
-    drop(mgr);
+    let _ = mgr;
 
     // No bitmap extension should remain
     assert!(!extensions.iter().any(|e| matches!(e, HeaderExtension::Bitmaps(_))));

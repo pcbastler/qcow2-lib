@@ -236,7 +236,7 @@ fn repair_leaked_clusters() {
 
     // Repair
     let mut image = Qcow2Image::open_rw(&path).unwrap();
-    let report = image.check_and_repair(Some(RepairMode::Full)).unwrap();
+    let _report = image.check_and_repair(Some(RepairMode::Full)).unwrap();
 
     // After repair, check again
     let report2 = image.check_integrity().unwrap();

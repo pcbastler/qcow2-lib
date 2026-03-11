@@ -280,45 +280,7 @@ impl<'a> Qcow2Writer<'a> {
         old_bitmap: SubclusterBitmap,
     ) -> Result<L2Entry> {
         if old_bitmap.is_all_allocated() {
-            // Fast path: bulk copy entire cluster
-            let mut cluster_data = vec![0u8; cluster_size as usize];
-            self.data_backend.read_exact_at(&mut cluster_data, old_host_offset.0)?;
-
-            // Decrypt with old host offset, modify, encrypt with new host offset
-            if let Some(crypt) = self.crypt_context {
-                crypt.decrypt_cluster(old_host_offset.0, &mut cluster_data)?;
-            }
-
-            let start = intra.0 as usize;
-            cluster_data[start..start + buf.len()].copy_from_slice(buf);
-
-            let new_offset = if self.raw_external {
-                // Identity mapping — COW doesn't apply for raw external
-                old_host_offset
-            } else {
-                let off = self.refcount_manager.allocate_cluster(
-                    self.backend, self.cache,
-                )?;
-                self.mapper.set_file_size(self.refcount_manager.state().next_cluster_offset);
-                off
-            };
-
-            if let Some(crypt) = self.crypt_context {
-                crypt.encrypt_cluster(new_offset.0, &mut cluster_data)?;
-            }
-            self.data_backend.write_all_at(&cluster_data, new_offset.0)?;
-
-            if !self.raw_external {
-                self.refcount_manager.decrement_refcount(
-                    old_host_offset.0, self.backend, self.cache,
-                )?;
-            }
-
-            return Ok(L2Entry::Standard {
-                host_offset: new_offset,
-                copied: true,
-                subclusters: SubclusterBitmap::all_allocated(),
-            });
+            return self.cow_full_cluster(buf, old_host_offset, intra, cluster_size);
         }
 
         let sc_size = cluster_size / SUBCLUSTERS_PER_CLUSTER as u64;
@@ -327,48 +289,136 @@ impl<'a> Qcow2Writer<'a> {
         let first_sc = (start / sc_size) as u32;
         let last_sc = ((end - 1) / sc_size) as u32;
 
-        let new_offset = if self.raw_external {
-            old_host_offset
+        let new_offset = self.cow_allocate_new(old_host_offset)?;
+
+        if self.crypt_context.is_some() {
+            return self.cow_encrypted_subclusters(
+                buf, old_host_offset, new_offset, cluster_size,
+                start, end, first_sc, last_sc, old_bitmap,
+            );
+        }
+
+        // Unencrypted: copy per-subcluster, preserving state
+        let new_bitmap = self.cow_copy_subclusters(
+            buf, old_host_offset, new_offset, sc_size, start,
+            first_sc, last_sc, old_bitmap,
+        )?;
+
+        self.refcount_manager.decrement_refcount(
+            old_host_offset.0, self.backend, self.cache,
+        )?;
+
+        Ok(L2Entry::Standard {
+            host_offset: new_offset,
+            copied: true,
+            subclusters: new_bitmap,
+        })
+    }
+
+    /// COW fast path: bulk-copy the entire cluster.
+    fn cow_full_cluster(
+        &mut self,
+        buf: &[u8],
+        old_host_offset: ClusterOffset,
+        intra: IntraClusterOffset,
+        cluster_size: u64,
+    ) -> Result<L2Entry> {
+        let mut cluster_data = vec![0u8; cluster_size as usize];
+        self.data_backend.read_exact_at(&mut cluster_data, old_host_offset.0)?;
+
+        if let Some(crypt) = self.crypt_context {
+            crypt.decrypt_cluster(old_host_offset.0, &mut cluster_data)?;
+        }
+
+        let start = intra.0 as usize;
+        cluster_data[start..start + buf.len()].copy_from_slice(buf);
+
+        let new_offset = self.cow_allocate_new(old_host_offset)?;
+
+        if let Some(crypt) = self.crypt_context {
+            crypt.encrypt_cluster(new_offset.0, &mut cluster_data)?;
+        }
+        self.data_backend.write_all_at(&cluster_data, new_offset.0)?;
+
+        if !self.raw_external {
+            self.refcount_manager.decrement_refcount(
+                old_host_offset.0, self.backend, self.cache,
+            )?;
+        }
+
+        Ok(L2Entry::Standard {
+            host_offset: new_offset,
+            copied: true,
+            subclusters: SubclusterBitmap::all_allocated(),
+        })
+    }
+
+    /// Allocate a new cluster for COW (or reuse offset for raw external).
+    fn cow_allocate_new(&mut self, old_host_offset: ClusterOffset) -> Result<ClusterOffset> {
+        if self.raw_external {
+            Ok(old_host_offset)
         } else {
             let off = self.refcount_manager.allocate_cluster(
                 self.backend, self.cache,
             )?;
             self.mapper.set_file_size(self.refcount_manager.state().next_cluster_offset);
-            off
-        };
+            Ok(off)
+        }
+    }
 
-        if self.crypt_context.is_some() {
-            // Encrypted subcluster COW: read full cluster, decrypt, modify, encrypt, write full
-            let crypt = self.crypt_context.unwrap();
-            let mut cluster_data = vec![0u8; cluster_size as usize];
-            self.data_backend.read_exact_at(&mut cluster_data, old_host_offset.0)?;
-            crypt.decrypt_cluster(old_host_offset.0, &mut cluster_data)?;
+    /// Encrypted subcluster COW: read full, decrypt, modify, encrypt, write full.
+    #[allow(clippy::too_many_arguments)]
+    fn cow_encrypted_subclusters(
+        &mut self,
+        buf: &[u8],
+        old_host_offset: ClusterOffset,
+        new_offset: ClusterOffset,
+        cluster_size: u64,
+        start: u64,
+        end: u64,
+        first_sc: u32,
+        last_sc: u32,
+        old_bitmap: SubclusterBitmap,
+    ) -> Result<L2Entry> {
+        let crypt = self.crypt_context.unwrap();
+        let mut cluster_data = vec![0u8; cluster_size as usize];
+        self.data_backend.read_exact_at(&mut cluster_data, old_host_offset.0)?;
+        crypt.decrypt_cluster(old_host_offset.0, &mut cluster_data)?;
 
-            // Overlay the user data
-            cluster_data[start as usize..end as usize].copy_from_slice(buf);
+        cluster_data[start as usize..end as usize].copy_from_slice(buf);
 
-            // Encrypt with new host offset and write full cluster
-            crypt.encrypt_cluster(new_offset.0, &mut cluster_data)?;
-            self.data_backend.write_all_at(&cluster_data, new_offset.0)?;
+        crypt.encrypt_cluster(new_offset.0, &mut cluster_data)?;
+        self.data_backend.write_all_at(&cluster_data, new_offset.0)?;
 
-            // Preserve subcluster bitmap, marking written ones as allocated
-            let mut new_bitmap = old_bitmap;
-            for sc in first_sc..=last_sc {
-                new_bitmap.set(sc, SubclusterState::Allocated);
-            }
-
-            self.refcount_manager.decrement_refcount(
-                old_host_offset.0, self.backend, self.cache,
-            )?;
-
-            return Ok(L2Entry::Standard {
-                host_offset: new_offset,
-                copied: true,
-                subclusters: new_bitmap,
-            });
+        let mut new_bitmap = old_bitmap;
+        for sc in first_sc..=last_sc {
+            new_bitmap.set(sc, SubclusterState::Allocated);
         }
 
-        // Unencrypted: copy per-subcluster, preserving state
+        self.refcount_manager.decrement_refcount(
+            old_host_offset.0, self.backend, self.cache,
+        )?;
+
+        Ok(L2Entry::Standard {
+            host_offset: new_offset,
+            copied: true,
+            subclusters: new_bitmap,
+        })
+    }
+
+    /// Unencrypted subcluster COW: copy per-subcluster preserving state.
+    #[allow(clippy::too_many_arguments)]
+    fn cow_copy_subclusters(
+        &mut self,
+        buf: &[u8],
+        old_host_offset: ClusterOffset,
+        new_offset: ClusterOffset,
+        sc_size: u64,
+        start: u64,
+        first_sc: u32,
+        last_sc: u32,
+        old_bitmap: SubclusterBitmap,
+    ) -> Result<SubclusterBitmap> {
         let mut new_bitmap = SubclusterBitmap::all_unallocated();
         for sc in 0..SUBCLUSTERS_PER_CLUSTER {
             match old_bitmap.get(sc) {
@@ -382,28 +432,17 @@ impl<'a> Qcow2Writer<'a> {
                 SubclusterState::Zero => {
                     new_bitmap.set(sc, SubclusterState::Zero);
                 }
-                _ => {} // Unallocated/Invalid: stays unallocated
+                _ => {}
             }
         }
 
-        // Write the user data
         self.data_backend.write_all_at(buf, new_offset.0 + start)?;
 
-        // Mark written subclusters as Allocated
         for sc in first_sc..=last_sc {
             new_bitmap.set(sc, SubclusterState::Allocated);
         }
 
-        // Decrement refcount of old cluster
-        self.refcount_manager.decrement_refcount(
-            old_host_offset.0, self.backend, self.cache,
-        )?;
-
-        Ok(L2Entry::Standard {
-            host_offset: new_offset,
-            copied: true,
-            subclusters: new_bitmap,
-        })
+        Ok(new_bitmap)
     }
 
     /// Handle writing to a compressed cluster: decompress, apply write, re-allocate.

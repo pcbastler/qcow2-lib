@@ -123,8 +123,6 @@ pub fn build_reference_map(
     let mut refs: HashMap<u64, u64> = HashMap::new();
     let mut stats = ClusterStats::default();
 
-    // With RAW_EXTERNAL, data clusters live in the external file and are
-    // not refcounted in the main image.
     let raw_external = header
         .incompatible_features
         .contains(IncompatibleFeatures::EXTERNAL_DATA_FILE)
@@ -135,108 +133,123 @@ pub fn build_reference_map(
     // 1. Header cluster
     add_ref(&mut refs, 0, cluster_size);
 
-    // 2. Active L1 table clusters
-    let l1_byte_size = header.l1_table_entries as u64 * L1_ENTRY_SIZE as u64;
-    let l1_cluster_count = (l1_byte_size + cluster_size - 1) / cluster_size;
-    for c in 0..l1_cluster_count {
-        add_ref(&mut refs, header.l1_table_offset.0 + c * cluster_size, cluster_size);
-    }
-
-    // 3. Refcount table clusters
-    for c in 0..header.refcount_table_clusters as u64 {
-        add_ref(&mut refs, header.refcount_table_offset.0 + c * cluster_size, cluster_size);
-    }
+    // 2-3. Active L1 + refcount table clusters
+    add_l1_refs(&mut refs, header, cluster_size);
+    add_refcount_table_refs(&mut refs, header, cluster_size);
 
     // 4. Walk active L1/L2
     walk_l1_l2(
-        backend,
-        header.l1_table_offset.0,
-        header.l1_table_entries,
-        header.geometry(),
-        raw_external,
-        &mut refs,
-        &mut stats,
+        backend, header.l1_table_offset.0, header.l1_table_entries,
+        header.geometry(), raw_external, &mut refs, &mut stats,
     )?;
 
     // 5+6. Snapshot table + snapshot L1/L2s
-    if header.snapshot_count > 0 {
-        let snap_table_buf = read_snapshot_table_raw(backend, header, cluster_size)?;
-        let snapshots = SnapshotHeader::read_table(
-            &snap_table_buf,
-            header.snapshot_count,
-            header.snapshots_offset.0,
-        )?;
-
-        // Count snapshot table clusters (compute actual serialized size, not
-        // the over-read buffer size from read_snapshot_table_raw)
-        let mut snap_table_size = 0u64;
-        for snap in &snapshots {
-            let mut tmp = Vec::new();
-            snap.write_to(&mut tmp);
-            snap_table_size += tmp.len() as u64;
-        }
-        let snap_cluster_count = (snap_table_size + cluster_size - 1) / cluster_size;
-        for c in 0..snap_cluster_count {
-            add_ref(&mut refs, header.snapshots_offset.0 + c * cluster_size, cluster_size);
-        }
-
-        // Walk each snapshot's L1/L2
-        for snap in &snapshots {
-            // Count snapshot L1 table clusters
-            let snap_l1_bytes = snap.l1_table_entries as u64 * L1_ENTRY_SIZE as u64;
-            let snap_l1_clusters = (snap_l1_bytes + cluster_size - 1) / cluster_size;
-            for c in 0..snap_l1_clusters {
-                add_ref(&mut refs, snap.l1_table_offset.0 + c * cluster_size, cluster_size);
-            }
-
-            walk_l1_l2(
-                backend,
-                snap.l1_table_offset.0,
-                snap.l1_table_entries,
-                header.geometry(),
-                raw_external,
-                &mut refs,
-                &mut stats,
-            )?;
-        }
-    }
+    walk_snapshots(backend, header, cluster_size, raw_external, &mut refs, &mut stats)?;
 
     // 7. Refcount block clusters
-    let rt_byte_size = header.refcount_table_clusters as u64 * cluster_size;
-    if rt_byte_size > 0 {
-        let mut rt_buf = vec![0u8; rt_byte_size as usize];
-        backend.read_exact_at(&mut rt_buf, header.refcount_table_offset.0)?;
+    walk_refcount_blocks(backend, header, cluster_size, &mut refs)?;
 
-        let entry_count = rt_byte_size as usize / REFCOUNT_TABLE_ENTRY_SIZE;
-        for i in 0..entry_count {
-            let raw = BigEndian::read_u64(&rt_buf[i * REFCOUNT_TABLE_ENTRY_SIZE..]);
-            let entry = RefcountTableEntry::from_raw(raw);
-            if let Some(block_offset) = entry.block_offset() {
-                add_ref(&mut refs, block_offset.0, cluster_size);
-            }
-        }
-    }
-
-    // 8. Bitmap clusters (directory, tables, data)
+    // 8-10. Bitmaps, BLAKE3 hashes, LUKS header
     walk_bitmaps(backend, header, cluster_size, &mut refs)?;
-
-    // 9. BLAKE3 hash clusters (hash table + hash data clusters)
-    let snap_hashes = if header.snapshot_count > 0 {
-        let snap_table_buf = read_snapshot_table_raw(backend, header, cluster_size)?;
-        SnapshotHeader::read_table(
-            &snap_table_buf,
-            header.snapshot_count,
-            header.snapshots_offset.0,
-        )?
-    } else {
-        Vec::new()
-    };
+    let snap_hashes = read_snapshots_if_any(backend, header, cluster_size)?;
     walk_blake3_hashes(backend, header, cluster_size, &snap_hashes, &mut refs)?;
-
-    // 10. LUKS header clusters (FullDiskEncryption extension)
     walk_luks_header(backend, header, cluster_size, &mut refs)?;
 
     Ok((refs, stats))
+}
+
+fn add_l1_refs(refs: &mut HashMap<u64, u64>, header: &Header, cluster_size: u64) {
+    let l1_byte_size = header.l1_table_entries as u64 * L1_ENTRY_SIZE as u64;
+    let l1_cluster_count = (l1_byte_size + cluster_size - 1) / cluster_size;
+    for c in 0..l1_cluster_count {
+        add_ref(refs, header.l1_table_offset.0 + c * cluster_size, cluster_size);
+    }
+}
+
+fn add_refcount_table_refs(refs: &mut HashMap<u64, u64>, header: &Header, cluster_size: u64) {
+    for c in 0..header.refcount_table_clusters as u64 {
+        add_ref(refs, header.refcount_table_offset.0 + c * cluster_size, cluster_size);
+    }
+}
+
+fn walk_snapshots(
+    backend: &dyn IoBackend,
+    header: &Header,
+    cluster_size: u64,
+    raw_external: bool,
+    refs: &mut HashMap<u64, u64>,
+    stats: &mut ClusterStats,
+) -> Result<()> {
+    if header.snapshot_count == 0 {
+        return Ok(());
+    }
+    let snap_table_buf = read_snapshot_table_raw(backend, header, cluster_size)?;
+    let snapshots = SnapshotHeader::read_table(
+        &snap_table_buf, header.snapshot_count, header.snapshots_offset.0,
+    )?;
+
+    let mut snap_table_size = 0u64;
+    for snap in &snapshots {
+        let mut tmp = Vec::new();
+        snap.write_to(&mut tmp);
+        snap_table_size += tmp.len() as u64;
+    }
+    let snap_cluster_count = (snap_table_size + cluster_size - 1) / cluster_size;
+    for c in 0..snap_cluster_count {
+        add_ref(refs, header.snapshots_offset.0 + c * cluster_size, cluster_size);
+    }
+
+    for snap in &snapshots {
+        let snap_l1_bytes = snap.l1_table_entries as u64 * L1_ENTRY_SIZE as u64;
+        let snap_l1_clusters = (snap_l1_bytes + cluster_size - 1) / cluster_size;
+        for c in 0..snap_l1_clusters {
+            add_ref(refs, snap.l1_table_offset.0 + c * cluster_size, cluster_size);
+        }
+        walk_l1_l2(
+            backend, snap.l1_table_offset.0, snap.l1_table_entries,
+            header.geometry(), raw_external, refs, stats,
+        )?;
+    }
+    Ok(())
+}
+
+fn walk_refcount_blocks(
+    backend: &dyn IoBackend,
+    header: &Header,
+    cluster_size: u64,
+    refs: &mut HashMap<u64, u64>,
+) -> Result<()> {
+    let rt_byte_size = header.refcount_table_clusters as u64 * cluster_size;
+    if rt_byte_size == 0 {
+        return Ok(());
+    }
+    let mut rt_buf = vec![0u8; rt_byte_size as usize];
+    backend.read_exact_at(&mut rt_buf, header.refcount_table_offset.0)?;
+
+    let entry_count = rt_byte_size as usize / REFCOUNT_TABLE_ENTRY_SIZE;
+    for i in 0..entry_count {
+        let raw = BigEndian::read_u64(&rt_buf[i * REFCOUNT_TABLE_ENTRY_SIZE..]);
+        let entry = RefcountTableEntry::from_raw(raw);
+        if let Some(block_offset) = entry.block_offset() {
+            add_ref(refs, block_offset.0, cluster_size);
+        }
+    }
+    Ok(())
+}
+
+fn read_snapshots_if_any(
+    backend: &dyn IoBackend,
+    header: &Header,
+    cluster_size: u64,
+) -> Result<Vec<SnapshotHeader>> {
+    if header.snapshot_count > 0 {
+        let snap_table_buf = read_snapshot_table_raw(backend, header, cluster_size)?;
+        Ok(SnapshotHeader::read_table(
+            &snap_table_buf, header.snapshot_count, header.snapshots_offset.0,
+        )?)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 /// Check integrity: build reference map and compare with stored refcounts.
@@ -607,7 +620,7 @@ fn walk_bitmaps(
 
         for i in 0..table.len() {
             let te = table
-                .get(crate::format::types::BitmapIndex(i as u32))
+                .get(crate::format::types::BitmapIndex(i))
                 .unwrap();
             if let BitmapTableEntryState::Data(data_offset) = te.state() {
                 add_ref(refs, data_offset.0, cluster_size);
@@ -683,7 +696,7 @@ fn walk_luks_header(
         HeaderExtension::FullDiskEncryption { offset, length } => Some((*offset, *length)),
         _ => None,
     }) {
-        let luks_clusters = (length as u64 + cluster_size - 1) / cluster_size;
+        let luks_clusters = (length + cluster_size - 1) / cluster_size;
         for c in 0..luks_clusters {
             add_ref(refs, offset + c * cluster_size, cluster_size);
         }

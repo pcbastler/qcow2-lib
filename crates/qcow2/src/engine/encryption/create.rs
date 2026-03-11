@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn create_luks1_header_cbc() {
-        let (header_bytes, master_key) = create_luks1_header(
+        let (header_bytes, _master_key) = create_luks1_header(
             b"password",
             CipherMode::AesCbcEssiv,
             32, // AES-256-CBC
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn create_then_recover_master_key_xts() {
         let password = b"test-password-123";
-        let (header_bytes, original_master_key) = create_luks1_header(
+        let (header_bytes, _original_master_key) = create_luks1_header(
             password,
             CipherMode::AesXtsPlain64,
             64,         // AES-256-XTS

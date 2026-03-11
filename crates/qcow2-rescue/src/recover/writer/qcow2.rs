@@ -14,6 +14,7 @@ use super::super::progress::RecoveryProgress;
 use super::super::RecoverOptions;
 
 /// Write a QCOW2 output image from merged mappings.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn write_qcow2(
     output: &Path,
     layers: &[(PathBuf, ReconstructedTablesReport)],
@@ -40,7 +41,7 @@ pub(crate) fn write_qcow2(
     // Create or open existing QCOW2 image
     let mut image = if options.resume && output.exists() {
         qcow2::Qcow2Image::open(output)
-            .map_err(|e| RescueError::Qcow2(e))?
+            .map_err(RescueError::Qcow2)?
     } else {
         let create_options = qcow2::engine::image::CreateOptions {
             virtual_size,
@@ -51,7 +52,7 @@ pub(crate) fn write_qcow2(
             encryption: None,
         };
         qcow2::Qcow2Image::create(output, create_options)
-            .map_err(|e| RescueError::Qcow2(e))?
+            .map_err(RescueError::Qcow2)?
     };
 
     let mut clusters_written = already_done.len() as u64;
@@ -89,7 +90,7 @@ pub(crate) fn write_qcow2(
                     clusters_zeroed += 1;
                 } else {
                     image.write_at(&data, guest_offset)
-                        .map_err(|e| RescueError::Qcow2(e))?;
+                        .map_err(RescueError::Qcow2)?;
                     clusters_written += 1;
                     bytes_written += data.len() as u64;
                 }
@@ -117,7 +118,7 @@ pub(crate) fn write_qcow2(
         }
     }
 
-    image.flush().map_err(|e| RescueError::Qcow2(e))?;
+    image.flush().map_err(RescueError::Qcow2)?;
 
     // Success — remove progress file
     RecoveryProgress::remove(output);

@@ -21,6 +21,7 @@ use report::TreeNode;
 /// Run the analyze pipeline: scan, reconstruct, validate, tree detection.
 ///
 /// Writes JSON reports to the output directory.
+#[allow(clippy::too_many_lines)]
 pub fn run_analyze(path: PathBuf, output: PathBuf, cluster_size: Option<u64>) -> Result<()> {
     if !path.exists() {
         return Err(RescueError::InputNotFound { path });

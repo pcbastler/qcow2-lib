@@ -23,12 +23,14 @@ pub(crate) struct EncryptionSetup {
     /// Offset where the LUKS header was found.
     pub(crate) luks_offset: Option<u64>,
     /// Size of the LUKS header data.
+    #[allow(dead_code)]
     pub(crate) luks_size: Option<u64>,
     /// Whether the password probe succeeded.
     pub(crate) probe_ok: Option<bool>,
 }
 
 /// Set up encryption for recovery: find LUKS header, try password, probe.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn setup_encryption(
     path: &Path,
     cluster_size: u64,
@@ -141,6 +143,7 @@ pub(crate) fn setup_encryption(
 /// Strategy:
 /// 1. Parse QCOW2 header extensions → look for FullDiskEncryption pointing to LUKS data
 /// 2. If that fails, scan for LUKS magic bytes at cluster-aligned offsets
+#[allow(clippy::cognitive_complexity)]
 pub(super) fn find_luks_header(path: &Path, cluster_size: u64) -> Option<(u64, Vec<u8>)> {
     let mut file = std::fs::File::open(path).ok()?;
     let file_size = file.seek(SeekFrom::End(0)).ok()?;

@@ -30,7 +30,7 @@ fn create_ext_l2(vs: u64) -> Qcow2Image {
 
 fn create_ext_l2_file(dir: &tempfile::TempDir, name: &str, vs: u64) -> Qcow2Image {
     Qcow2Image::create(
-        &dir.path().join(name),
+        dir.path().join(name),
         CreateOptions {
             virtual_size: vs,
             cluster_bits: None,

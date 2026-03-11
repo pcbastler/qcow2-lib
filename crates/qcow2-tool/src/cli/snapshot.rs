@@ -15,7 +15,7 @@ pub fn run_list(path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<6} {:<24} {:>14}  {}", "ID", "Name", "Virtual Size", "L1 Entries");
+    println!("{:<6} {:<24} {:>14}  L1 Entries", "ID", "Name", "Virtual Size");
     println!("{}", "-".repeat(60));
     for s in &snaps {
         let vsize = match s.virtual_size {

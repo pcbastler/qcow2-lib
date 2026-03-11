@@ -288,9 +288,7 @@ fn write_image_files(dir: &Path, pass: u32) -> Result<(), String> {
                 data.push(r);
             }
             let padding = row_size - width * 3;
-            for _ in 0..padding {
-                data.push(0);
-            }
+            data.resize(data.len() + padding as usize, 0);
         }
 
         std::fs::write(&path, &data)

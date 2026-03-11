@@ -64,7 +64,7 @@ fn multiple_compressed_clusters() {
     let mut image = create_image(&dir, "multi.qcow2", None);
 
     for i in 0u64..4 {
-        let data = vec![(0x10 + i as u8); CLUSTER_SIZE];
+        let data = vec![0x10 + i as u8; CLUSTER_SIZE];
         image.write_cluster_maybe_compressed(&data, i * CS).unwrap();
     }
     image.flush().unwrap();
@@ -185,7 +185,7 @@ fn cow_partial_write_into_compressed() {
     let mut image = create_image(&dir, "cow.qcow2", None);
 
     image.write_cluster_maybe_compressed(&vec![0xAA; CLUSTER_SIZE], 0).unwrap();
-    image.write_at(&vec![0xFF; 128], 256).unwrap();
+    image.write_at(&[0xFF; 128], 256).unwrap();
     image.flush().unwrap();
 
     let mut buf = vec![0u8; CLUSTER_SIZE];

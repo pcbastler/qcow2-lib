@@ -80,6 +80,7 @@ impl CompareResult {
         (self.matching_sectors as f64 / self.compared_sectors as f64) * 100.0
     }
 
+    #[allow(dead_code)]
     pub fn is_perfect(&self) -> bool {
         self.matching_sectors == self.compared_sectors && self.reference_size == self.recovered_size
     }

@@ -1,7 +1,7 @@
 //! Tests for reader (originally in engine/reader.rs)
 
 use crate::engine::cache::{CacheConfig, MetadataCache};
-use crate::engine::cluster_mapping::{ClusterMapper, ClusterResolution};
+use crate::engine::cluster_mapping::ClusterMapper;
 use crate::engine::read_mode::{ReadMode, ReadWarning};
 use crate::engine::reader::Qcow2Reader;
 use crate::format::compressed::CompressedClusterDescriptor;

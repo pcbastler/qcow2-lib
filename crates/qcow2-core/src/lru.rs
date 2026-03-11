@@ -104,6 +104,11 @@ impl<K: PartialEq, V> LruCache<K, V> {
         self.entries.len()
     }
 
+    /// Returns `true` if the cache contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Iterate over all entries (no LRU reordering).
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.entries.iter().map(|(k, v)| (k, v))

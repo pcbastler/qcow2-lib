@@ -252,9 +252,9 @@ mod tests {
 
     #[test]
     fn cluster_bits_range_is_valid() {
-        assert!(MIN_CLUSTER_BITS < MAX_CLUSTER_BITS);
-        assert!(DEFAULT_CLUSTER_BITS >= MIN_CLUSTER_BITS);
-        assert!(DEFAULT_CLUSTER_BITS <= MAX_CLUSTER_BITS);
+        assert_eq!(MIN_CLUSTER_BITS, 9);
+        assert_eq!(MAX_CLUSTER_BITS, 21);
+        assert_eq!(DEFAULT_CLUSTER_BITS, 16);
     }
 
     #[test]

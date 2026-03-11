@@ -414,6 +414,7 @@ fn t12_body(cs: u64, cb: u32) {
         let recovered = read_recovered_raw(&out_path);
 
         assert!(report.clusters_written > 0, "[cs={cs}]");
+        #[allow(clippy::needless_range_loop)]
         for i in 2..NUM_DATA_CLUSTERS as usize {
             let start = i * cs as usize;
             let end = start + cs as usize;
@@ -473,6 +474,7 @@ fn t15_body(cs: u64, cb: u32) {
             let recovered = read_recovered_raw(&out_path);
 
             let mut correct = 0;
+            #[allow(clippy::needless_range_loop)]
             for i in 0..NUM_DATA_CLUSTERS as usize {
                 if i == 3 { continue; }
                 let start = i * cs as usize;
@@ -535,6 +537,7 @@ fn t17_body(cs: u64, cb: u32) {
             let recovered = read_recovered_raw(&out_path);
 
             let mut correct = 0;
+            #[allow(clippy::needless_range_loop)]
             for i in 1..NUM_DATA_CLUSTERS as usize {
                 let start = i * cs as usize;
                 let end = start + cs as usize;

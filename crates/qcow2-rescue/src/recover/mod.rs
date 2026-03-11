@@ -472,7 +472,7 @@ mod tests {
         // Corrupt the data cluster (cluster 5)
         {
             let data_offset = 5 * cluster_size;
-            let mut f = std::fs::OpenOptions::new()
+            let f = std::fs::OpenOptions::new()
                 .write(true)
                 .open(src.path())
                 .unwrap();

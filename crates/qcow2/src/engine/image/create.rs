@@ -22,6 +22,7 @@ use super::{CreateOptions, EncryptionOptions, Qcow2Image};
 /// Validate create options and return resolved values.
 ///
 /// Returns (cluster_bits, cluster_size, extended_l2, compression_type, data_file, encryption).
+#[allow(clippy::type_complexity)]
 fn validate_create_options(
     options: &CreateOptions,
 ) -> Result<(u32, u64, bool, u8, Option<String>, Option<EncryptionOptions>)> {
@@ -29,9 +30,7 @@ fn validate_create_options(
         return Err(Error::InvalidVirtualSize { size: 0 });
     }
     if let Some(bits) = options.cluster_bits {
-        if bits < crate::format::constants::MIN_CLUSTER_BITS
-            || bits > crate::format::constants::MAX_CLUSTER_BITS
-        {
+        if !(crate::format::constants::MIN_CLUSTER_BITS..=crate::format::constants::MAX_CLUSTER_BITS).contains(&bits) {
             return Err(FormatError::InvalidClusterBits {
                 cluster_bits: bits,
                 min: crate::format::constants::MIN_CLUSTER_BITS,
@@ -176,6 +175,92 @@ fn build_feature_flags(
     (incompat, autoclear, header_length)
 }
 
+/// Build the Header struct for a new image.
+#[allow(clippy::too_many_arguments)]
+fn build_create_header(
+    cluster_bits: u32, virtual_size: u64, encrypted: bool,
+    l1_entries: u32, l1_offset: u64, rt_offset: u64,
+    incompat: IncompatibleFeatures, autoclear: AutoclearFeatures,
+    refcount_order: u32, header_length: u32, compression_type: u8,
+) -> Header {
+    Header {
+        version: 3,
+        backing_file_offset: 0,
+        backing_file_size: 0,
+        cluster_bits,
+        virtual_size,
+        crypt_method: if encrypted { crate::format::constants::CRYPT_LUKS } else { 0 },
+        l1_table_entries: l1_entries,
+        l1_table_offset: ClusterOffset(l1_offset),
+        refcount_table_offset: ClusterOffset(rt_offset),
+        refcount_table_clusters: 1,
+        snapshot_count: 0,
+        snapshots_offset: ClusterOffset(0),
+        incompatible_features: incompat,
+        compatible_features: crate::format::feature_flags::CompatibleFeatures::empty(),
+        autoclear_features: autoclear,
+        refcount_order,
+        header_length,
+        compression_type,
+    }
+}
+
+/// Build header extensions for a newly created image.
+fn build_create_extensions(
+    luks_header_data: &Option<Vec<u8>>,
+    luks_offset: u64,
+    data_file: &Option<String>,
+) -> Vec<HeaderExtension> {
+    let mut extensions = Vec::new();
+    if let Some(ref data) = luks_header_data {
+        extensions.push(HeaderExtension::FullDiskEncryption {
+            offset: luks_offset,
+            length: data.len() as u64,
+        });
+    }
+    if let Some(ref name) = data_file {
+        extensions.push(HeaderExtension::ExternalDataFile(name.clone()));
+    }
+    extensions
+}
+
+/// Write header, extensions, and LUKS data to the backend.
+#[allow(clippy::too_many_arguments)]
+fn write_image_to_backend(
+    backend: &dyn IoBackend,
+    header: &Header,
+    extensions: &[HeaderExtension],
+    header_length: u32,
+    cluster_size: u64,
+    initial_clusters: u64,
+    rt_offset: u64,
+    rb_offset: u64,
+    luks_offset: u64,
+    luks_clusters: u64,
+    luks_header_data: &Option<Vec<u8>>,
+) -> Result<()> {
+    write_initial_layout(backend, cluster_size, initial_clusters, rt_offset, rb_offset)?;
+
+    let mut header_buf = vec![0u8; cluster_size as usize];
+    header.write_to(&mut header_buf)?;
+
+    if !extensions.is_empty() {
+        let ext_data = HeaderExtension::write_all(extensions);
+        let ext_offset = header_length as usize;
+        header_buf[ext_offset..ext_offset + ext_data.len()].copy_from_slice(&ext_data);
+    }
+    backend.write_all_at(&header_buf, 0)?;
+
+    if let Some(ref luks_data) = luks_header_data {
+        let padded_len = (luks_clusters as usize) * (cluster_size as usize);
+        let mut padded = vec![0u8; padded_len];
+        padded[..luks_data.len()].copy_from_slice(luks_data);
+        backend.write_all_at(&padded, luks_offset)?;
+    }
+
+    backend.flush()
+}
+
 impl Qcow2Image {
     /// Create a new QCOW2 v3 image at the given path.
     ///
@@ -233,19 +318,15 @@ impl Qcow2Image {
             validate_create_options(&options)?;
 
         let refcount_order = 4u32; // 16-bit refcounts
-
-        // Calculate L1 table size
         let l2_entry_size = if extended_l2 { 16u64 } else { 8u64 };
         let l1_entries = calculate_l1_entries(options.virtual_size, cluster_size, l2_entry_size);
 
-        // Generate LUKS header if encryption is requested
         let (luks_header_data, crypt_context) = generate_luks_header(&encryption)?;
         let luks_clusters = luks_header_data
             .as_ref()
             .map(|d| (d.len() as u64 + cluster_size - 1) / cluster_size)
             .unwrap_or(0);
 
-        // Layout: header(0), L1(1), reftable(2), refblock(3), [luks(4..)]
         let l1_offset = cluster_size;
         let rt_offset = 2 * cluster_size;
         let rb_offset = 3 * cluster_size;
@@ -255,91 +336,32 @@ impl Qcow2Image {
         let (incompat, autoclear, header_length) =
             build_feature_flags(extended_l2, compression_type, data_file.is_some());
 
-        // Build header
-        let header = Header {
-            version: 3,
-            backing_file_offset: 0,
-            backing_file_size: 0,
-            cluster_bits,
-            virtual_size: options.virtual_size,
-            crypt_method: if encryption.is_some() { crate::format::constants::CRYPT_LUKS } else { 0 },
-            l1_table_entries: l1_entries,
-            l1_table_offset: ClusterOffset(l1_offset),
-            refcount_table_offset: ClusterOffset(rt_offset),
-            refcount_table_clusters: 1,
-            snapshot_count: 0,
-            snapshots_offset: ClusterOffset(0),
-            incompatible_features: incompat,
-            compatible_features: crate::format::feature_flags::CompatibleFeatures::empty(),
-            autoclear_features: autoclear,
-            refcount_order,
-            header_length,
-            compression_type,
-        };
+        let header = build_create_header(
+            cluster_bits, options.virtual_size, encryption.is_some(),
+            l1_entries, l1_offset, rt_offset, incompat, autoclear,
+            refcount_order, header_length, compression_type,
+        );
 
-        // Build header extensions
-        let mut extensions = Vec::new();
-        if let Some(ref data) = luks_header_data {
-            extensions.push(HeaderExtension::FullDiskEncryption {
-                offset: luks_offset,
-                length: data.len() as u64,
-            });
-        }
-        if let Some(ref name) = data_file {
-            extensions.push(HeaderExtension::ExternalDataFile(name.clone()));
-        }
+        let extensions = build_create_extensions(&luks_header_data, luks_offset, &data_file);
 
-        // Write initial layout: zeroed clusters + refcount table/block
-        write_initial_layout(backend.as_ref(), cluster_size, initial_clusters, rt_offset, rb_offset)?;
+        write_image_to_backend(
+            backend.as_ref(), &header, &extensions, header_length,
+            cluster_size, initial_clusters, rt_offset, rb_offset,
+            luks_offset, luks_clusters, &luks_header_data,
+        )?;
 
-        // Write header (over the zeroed cluster 0)
-        let mut header_buf = vec![0u8; cluster_size as usize];
-        header.write_to(&mut header_buf)?;
-
-        // Write header extensions after the header
-        if !extensions.is_empty() {
-            let ext_data = HeaderExtension::write_all(&extensions);
-            let ext_offset = header_length as usize;
-            header_buf[ext_offset..ext_offset + ext_data.len()].copy_from_slice(&ext_data);
-        }
-
-        backend.write_all_at(&header_buf, 0)?;
-
-        // Write LUKS header if encrypted
-        if let Some(ref luks_data) = luks_header_data {
-            let padded_len = (luks_clusters as usize) * (cluster_size as usize);
-            let mut padded = vec![0u8; padded_len];
-            padded[..luks_data.len()].copy_from_slice(luks_data);
-            backend.write_all_at(&padded, luks_offset)?;
-        }
-
-        backend.flush()?;
-
-        // Build in-memory structures
         let l1_table = L1Table::new_empty(l1_entries);
         let file_size = backend.file_size()?;
         let mapper = ClusterMapper::new(l1_table, ClusterGeometry { cluster_bits, extended_l2 }, file_size);
-        // Fresh images have no free clusters, so append mode avoids
-        // unnecessary refcount-block scanning during allocation.
         let refcount_manager = RefcountManager::load_with_mode(
             backend.as_ref(), &header, AllocationMode::Append,
         )?;
 
         Ok(Self::new_inner(
-            header,
-            extensions,
-            backend,
-            None,  // data_backend
-            mapper,
-            None,  // backing_chain
-            None,  // backing_image
-            ReadMode::Strict,
-            Vec::new(),
-            Some(refcount_manager),
-            true,  // writable
-            false, // has_auto_bitmaps
-            false, // has_hashes
-            crypt_context,
+            header, extensions, backend,
+            None, mapper, None, None,
+            ReadMode::Strict, Vec::new(),
+            Some(refcount_manager), true, false, false, crypt_context,
         ))
     }
 

@@ -18,10 +18,10 @@ pub(super) fn discover_qcow2_files(path: &Path) -> Result<Vec<PathBuf>> {
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
             let p = entry.path();
-            if p.is_file() {
-                if has_qcow2_extension(&p) || has_qcow2_magic(&p) {
-                    files.push(p);
-                }
+            if p.is_file()
+                && (has_qcow2_extension(&p) || has_qcow2_magic(&p))
+            {
+                files.push(p);
             }
         }
         files.sort();

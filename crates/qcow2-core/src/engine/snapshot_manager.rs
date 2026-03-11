@@ -761,38 +761,12 @@ impl<'a> SnapshotManager<'a> {
         cluster_size: usize,
     ) -> Result<()> {
         // First, decrement refcounts for current active hash data clusters
-        if let Some(active_ext) = self.find_hash_extension().cloned() {
-            if active_ext.hash_table_offset != 0 && active_ext.hash_table_entries > 0 {
-                let table_byte_size =
-                    active_ext.hash_table_entries as usize * HASH_TABLE_ENTRY_SIZE;
-                let mut buf = vec![0u8; table_byte_size];
-                self.backend
-                    .read_exact_at(&mut buf, active_ext.hash_table_offset)?;
-                let table = HashTable::read_from(&buf, active_ext.hash_table_entries)?;
-
-                for entry in table.iter() {
-                    if let Some(data_offset) = entry.data_offset() {
-                        self.refcount_manager
-                            .decrement_refcount(data_offset, self.backend, self.cache)?;
-                    }
-                }
-
-                // Free old active hash table clusters
-                let table_clusters = (table_byte_size + cluster_size - 1) / cluster_size;
-                for i in 0..table_clusters {
-                    let offset =
-                        active_ext.hash_table_offset + (i as u64 * cluster_size as u64);
-                    self.refcount_manager
-                        .decrement_refcount(offset, self.backend, self.cache)?;
-                }
-            }
-        }
+        self.free_active_hash_table(cluster_size)?;
 
         // Check if the snapshot has hash table info
         let snap_ht_offset = match snapshot.hash_table_offset {
             Some(off) if off != 0 => off,
             _ => {
-                // Snapshot has no hashes — remove active hash extension if present
                 self.extensions
                     .retain(|e| !matches!(e, HeaderExtension::Blake3Hashes(_)));
                 return Ok(());
@@ -808,21 +782,62 @@ impl<'a> SnapshotManager<'a> {
             return Ok(());
         }
 
-        // Read the snapshot's hash table
+        self.restore_hash_table_from_snapshot(
+            snap_ht_offset, snap_ht_entries, snap_hash_size, snap_chunk_bits, cluster_size,
+        )
+    }
+
+    /// Free the active hash table's data and table clusters.
+    fn free_active_hash_table(&mut self, cluster_size: usize) -> Result<()> {
+        let active_ext = match self.find_hash_extension().cloned() {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+        if active_ext.hash_table_offset == 0 || active_ext.hash_table_entries == 0 {
+            return Ok(());
+        }
+
+        let table_byte_size = active_ext.hash_table_entries as usize * HASH_TABLE_ENTRY_SIZE;
+        let mut buf = vec![0u8; table_byte_size];
+        self.backend
+            .read_exact_at(&mut buf, active_ext.hash_table_offset)?;
+        let table = HashTable::read_from(&buf, active_ext.hash_table_entries)?;
+
+        for entry in table.iter() {
+            if let Some(data_offset) = entry.data_offset() {
+                self.refcount_manager
+                    .decrement_refcount(data_offset, self.backend, self.cache)?;
+            }
+        }
+
+        let table_clusters = (table_byte_size + cluster_size - 1) / cluster_size;
+        for i in 0..table_clusters {
+            let offset = active_ext.hash_table_offset + (i as u64 * cluster_size as u64);
+            self.refcount_manager
+                .decrement_refcount(offset, self.backend, self.cache)?;
+        }
+        Ok(())
+    }
+
+    /// Allocate, copy, and activate a hash table from a snapshot.
+    fn restore_hash_table_from_snapshot(
+        &mut self,
+        snap_ht_offset: u64,
+        snap_ht_entries: u32,
+        snap_hash_size: u8,
+        snap_chunk_bits: u8,
+        cluster_size: usize,
+    ) -> Result<()> {
         let table_byte_size = snap_ht_entries as usize * HASH_TABLE_ENTRY_SIZE;
         let table_clusters = (table_byte_size + cluster_size - 1) / cluster_size;
 
-        // Allocate new clusters for the restored active hash table
         let new_table_offset = self.refcount_manager.allocate_contiguous_clusters(
-            table_clusters as u64,
-            self.backend,
-            self.cache,
+            table_clusters as u64, self.backend, self.cache,
         )?;
 
         let file_size = self.backend.file_size()?;
         self.mapper.set_file_size(file_size);
 
-        // Copy snapshot hash table to new active location
         let total_size = table_clusters * cluster_size;
         let mut table_data = vec![0u8; total_size];
         self.backend
@@ -830,7 +845,6 @@ impl<'a> SnapshotManager<'a> {
         self.backend
             .write_all_at(&table_data, new_table_offset.0)?;
 
-        // Increment refcounts for hash data clusters (shared with snapshot)
         let table = HashTable::read_from(&table_data[..table_byte_size], snap_ht_entries)?;
         for entry in table.iter() {
             if let Some(data_offset) = entry.data_offset() {
@@ -839,7 +853,6 @@ impl<'a> SnapshotManager<'a> {
             }
         }
 
-        // Update or insert the active hash extension
         let new_ext = Blake3Extension {
             hash_table_offset: new_table_offset.0,
             hash_table_entries: snap_ht_entries,
@@ -860,7 +873,6 @@ impl<'a> SnapshotManager<'a> {
                 .push(HeaderExtension::Blake3Hashes(new_ext));
         }
 
-        // Write updated extensions to disk
         let ext_data = HeaderExtension::write_all(self.extensions);
         let ext_start = self.header.header_length as u64;
         self.backend.write_all_at(&ext_data, ext_start)?;

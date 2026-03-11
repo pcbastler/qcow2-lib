@@ -162,7 +162,7 @@ fn write_spanning_three_clusters() {
 #[test]
 fn snapshot_cow_preserves_old_data() {
     let dir = tempfile::tempdir().unwrap();
-    let (path, mut image) = create_file(&dir, "snap_cow.qcow2", 1 << 20);
+    let (_path, mut image) = create_file(&dir, "snap_cow.qcow2", 1 << 20);
 
     image.write_at(&vec![0xAA; CLUSTER_SIZE], 0).unwrap();
     image.flush().unwrap();
@@ -255,7 +255,7 @@ fn cow_decompresses_on_partial_write() {
     image.flush().unwrap();
 
     // Partial write into compressed cluster triggers decompress + COW
-    image.write_at(&vec![0xFF; 128], 256).unwrap();
+    image.write_at(&[0xFF; 128], 256).unwrap();
     image.flush().unwrap();
 
     let mut buf = vec![0u8; CLUSTER_SIZE];

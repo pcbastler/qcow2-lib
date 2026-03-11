@@ -21,6 +21,7 @@ pub struct ImageEntry {
     pub reference_raw: String,
 }
 
+#[allow(dead_code)]
 pub struct TestResult {
     pub name: String,
     pub image: String,
@@ -346,146 +347,153 @@ pub fn print_matrix(results: &[TestResult]) {
     let nw = images.iter().map(|s| s.len()).max().unwrap_or(20).max(5) + 2;
 
     if has_qemu {
-        // Comparison matrix: each cell shows "rescue/qemu"
-        let cw = 13; // column width for "100/  0" style
-
-        println!();
-        println!("=== Comparison: qcow2-rescue vs qemu-img repair ===");
-        println!("  (cell format: rescue% / qemu%)");
-        println!();
-
-        // Header
-        print!("{:<nw$} |", "Image");
-        for hdr in COL_HEADERS {
-            print!("{:^width$}|", hdr, width = cw);
-        }
-        println!();
-        print!("{:-<nw$}-+", "");
-        for _ in COL_HEADERS {
-            print!("{:-<width$}+", "", width = cw);
-        }
-        println!();
-
-        // Rows
-        for img in &images {
-            print!("{:<nw$} |", img);
-            for &corr in CORRUPTION_COLS {
-                if let Some(&(_, rpct, qpct)) = lookup.get(&(img.as_str(), corr)) {
-                    let qstr = match qpct {
-                        Some(q) => format!("{q:3.0}"),
-                        None => " --".into(),
-                    };
-                    let cell = format!("{:3.0} / {}", rpct, qstr);
-                    print!("{:^width$}|", cell, width = cw);
-                } else {
-                    print!("{:^width$}|", "-", width = cw);
-                }
-            }
-            println!();
-        }
-
-        // Separator
-        print!("{:-<nw$}-+", "");
-        for _ in COL_HEADERS {
-            print!("{:-<width$}+", "", width = cw);
-        }
-        println!();
-
-        // Summary: average per corruption
-        print!("{:<nw$} |", "avg rescue");
-        for &corr in CORRUPTION_COLS {
-            let vals: Vec<f64> = results.iter()
-                .filter(|r| r.corruption == corr)
-                .map(|r| r.match_pct)
-                .collect();
-            let avg = if vals.is_empty() { 0.0 } else { vals.iter().sum::<f64>() / vals.len() as f64 };
-            print!("{:^width$}|", format!("{avg:5.1}%"), width = cw);
-        }
-        println!();
-
-        print!("{:<nw$} |", "avg qemu");
-        for &corr in CORRUPTION_COLS {
-            let vals: Vec<f64> = results.iter()
-                .filter(|r| r.corruption == corr)
-                .filter_map(|r| r.qemu_match_pct)
-                .collect();
-            if vals.is_empty() {
-                print!("{:^width$}|", "--", width = cw);
-            } else {
-                let avg = vals.iter().sum::<f64>() / vals.len() as f64;
-                print!("{:^width$}|", format!("{avg:5.1}%"), width = cw);
-            }
-        }
-        println!();
-
-        // Wins comparison
-        println!();
-        let mut rescue_wins = 0u32;
-        let mut qemu_wins = 0u32;
-        let mut ties = 0u32;
-        for r in results {
-            if let Some(q) = r.qemu_match_pct {
-                if r.match_pct > q + 0.1 {
-                    rescue_wins += 1;
-                } else if q > r.match_pct + 0.1 {
-                    qemu_wins += 1;
-                } else {
-                    ties += 1;
-                }
-            }
-        }
-        println!("  rescue wins: {rescue_wins} | qemu wins: {qemu_wins} | ties: {ties}");
+        print_comparison_matrix(results, &images, &lookup, nw);
     } else {
-        // Original rescue-only matrix
-        println!();
-        print!("{:<nw$} |", "Image");
-        for hdr in COL_HEADERS {
-            print!("{:^width$}|", hdr, width = COL_WIDTH);
-        }
-        println!();
-        print!("{:-<nw$}-+", "");
-        for _ in COL_HEADERS {
-            print!("{:-<width$}+", "", width = COL_WIDTH);
-        }
-        println!();
-
-        for img in &images {
-            print!("{:<nw$} |", img);
-            for &corr in CORRUPTION_COLS {
-                if let Some(&(passed, pct, _)) = lookup.get(&(img.as_str(), corr)) {
-                    let cell = if passed {
-                        format!("{:3.0}% OK", pct)
-                    } else {
-                        format!("{:3.0}% FAIL", pct)
-                    };
-                    print!("{:^width$}|", cell, width = COL_WIDTH);
-                } else {
-                    print!("{:^width$}|", "-", width = COL_WIDTH);
-                }
-            }
-            println!();
-        }
-
-        print!("{:-<nw$}-+", "");
-        for _ in COL_HEADERS {
-            print!("{:-<width$}+", "", width = COL_WIDTH);
-        }
-        println!();
-
-        print!("{:<nw$} |", "PASSED");
-        for &corr in CORRUPTION_COLS {
-            let p = results.iter().filter(|r| r.corruption == corr && r.passed).count();
-            let t = results.iter().filter(|r| r.corruption == corr).count();
-            let cell = format!("{p}/{t}");
-            print!("{:^width$}|", cell, width = COL_WIDTH);
-        }
-        println!();
+        print_rescue_only_matrix(results, &images, &lookup, nw);
     }
 
     let total = results.len();
     let passed = results.iter().filter(|r| r.passed).count();
     println!();
     println!("Total: {passed}/{total} passed, {} failed", total - passed);
+}
+
+type Lookup<'a> = std::collections::HashMap<(&'a str, &'a str), (bool, f64, Option<f64>)>;
+
+fn print_table_header(nw: usize, headers: &[&str], col_width: usize) {
+    print!("{:<nw$} |", "Image");
+    for hdr in headers {
+        print!("{:^width$}|", hdr, width = col_width);
+    }
+    println!();
+    print_table_separator(nw, headers.len(), col_width);
+}
+
+fn print_table_separator(nw: usize, cols: usize, col_width: usize) {
+    print!("{:-<nw$}-+", "");
+    for _ in 0..cols {
+        print!("{:-<width$}+", "", width = col_width);
+    }
+    println!();
+}
+
+#[allow(clippy::cognitive_complexity)]
+fn print_comparison_matrix(
+    results: &[TestResult],
+    images: &[String],
+    lookup: &Lookup<'_>,
+    nw: usize,
+) {
+    let cw = 13;
+
+    println!();
+    println!("=== Comparison: qcow2-rescue vs qemu-img repair ===");
+    println!("  (cell format: rescue% / qemu%)");
+    println!();
+
+    print_table_header(nw, COL_HEADERS, cw);
+
+    for img in images {
+        print!("{:<nw$} |", img);
+        for &corr in CORRUPTION_COLS {
+            if let Some(&(_, rpct, qpct)) = lookup.get(&(img.as_str(), corr)) {
+                let qstr = match qpct {
+                    Some(q) => format!("{q:3.0}"),
+                    None => " --".into(),
+                };
+                let cell = format!("{:3.0} / {}", rpct, qstr);
+                print!("{:^width$}|", cell, width = cw);
+            } else {
+                print!("{:^width$}|", "-", width = cw);
+            }
+        }
+        println!();
+    }
+
+    print_table_separator(nw, COL_HEADERS.len(), cw);
+
+    // Average per corruption
+    print!("{:<nw$} |", "avg rescue");
+    for &corr in CORRUPTION_COLS {
+        let vals: Vec<f64> = results.iter()
+            .filter(|r| r.corruption == corr)
+            .map(|r| r.match_pct)
+            .collect();
+        let avg = if vals.is_empty() { 0.0 } else { vals.iter().sum::<f64>() / vals.len() as f64 };
+        print!("{:^width$}|", format!("{avg:5.1}%"), width = cw);
+    }
+    println!();
+
+    print!("{:<nw$} |", "avg qemu");
+    for &corr in CORRUPTION_COLS {
+        let vals: Vec<f64> = results.iter()
+            .filter(|r| r.corruption == corr)
+            .filter_map(|r| r.qemu_match_pct)
+            .collect();
+        if vals.is_empty() {
+            print!("{:^width$}|", "--", width = cw);
+        } else {
+            let avg = vals.iter().sum::<f64>() / vals.len() as f64;
+            print!("{:^width$}|", format!("{avg:5.1}%"), width = cw);
+        }
+    }
+    println!();
+
+    // Wins comparison
+    println!();
+    let mut rescue_wins = 0u32;
+    let mut qemu_wins = 0u32;
+    let mut ties = 0u32;
+    for r in results {
+        if let Some(q) = r.qemu_match_pct {
+            if r.match_pct > q + 0.1 {
+                rescue_wins += 1;
+            } else if q > r.match_pct + 0.1 {
+                qemu_wins += 1;
+            } else {
+                ties += 1;
+            }
+        }
+    }
+    println!("  rescue wins: {rescue_wins} | qemu wins: {qemu_wins} | ties: {ties}");
+}
+
+fn print_rescue_only_matrix(
+    results: &[TestResult],
+    images: &[String],
+    lookup: &Lookup<'_>,
+    nw: usize,
+) {
+    println!();
+    print_table_header(nw, COL_HEADERS, COL_WIDTH);
+
+    for img in images {
+        print!("{:<nw$} |", img);
+        for &corr in CORRUPTION_COLS {
+            if let Some(&(passed, pct, _)) = lookup.get(&(img.as_str(), corr)) {
+                let cell = if passed {
+                    format!("{:3.0}% OK", pct)
+                } else {
+                    format!("{:3.0}% FAIL", pct)
+                };
+                print!("{:^width$}|", cell, width = COL_WIDTH);
+            } else {
+                print!("{:^width$}|", "-", width = COL_WIDTH);
+            }
+        }
+        println!();
+    }
+
+    print_table_separator(nw, COL_HEADERS.len(), COL_WIDTH);
+
+    print!("{:<nw$} |", "PASSED");
+    for &corr in CORRUPTION_COLS {
+        let p = results.iter().filter(|r| r.corruption == corr && r.passed).count();
+        let t = results.iter().filter(|r| r.corruption == corr).count();
+        let cell = format!("{p}/{t}");
+        print!("{:^width$}|", cell, width = COL_WIDTH);
+    }
+    println!();
 }
 
 // ---------------------------------------------------------------------------

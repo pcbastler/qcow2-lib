@@ -21,6 +21,7 @@ pub enum OutputFormat {
 }
 
 /// Run the convert subcommand.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     input: &Path,
     output: &Path,
@@ -109,7 +110,7 @@ mod tests {
     fn detect_format_raw() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("test.raw");
-        std::fs::write(&path, &[0u8; 512]).unwrap();
+        std::fs::write(&path, [0u8; 512]).unwrap();
         assert!(matches!(detect_format(&path).unwrap(), InputFormat::Raw));
     }
 

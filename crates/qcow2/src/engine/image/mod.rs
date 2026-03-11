@@ -130,6 +130,7 @@ impl Qcow2Image {
     ///
     /// Fields not passed as arguments use sensible defaults:
     /// `dirty = false`, `compressed_cursor = 0`, `compressor = StdCompressor`.
+    #[allow(clippy::too_many_arguments)]
     fn new_inner(
         header: Header,
         extensions: Vec<HeaderExtension>,
@@ -259,20 +260,47 @@ impl Qcow2Image {
         data_backend: Option<Box<dyn IoBackend>>,
         password: Option<&[u8]>,
     ) -> Result<Self> {
-        // Read header (read enough for the largest possible v3 header)
+        let (header, extensions, file_size) =
+            Self::read_header_and_extensions(backend.as_ref())?;
+
+        let mapper = Self::build_mapper(backend.as_ref(), &header, file_size)?;
+
+        let mut warnings = Vec::new();
+        let (backing_chain, backing_image) =
+            Self::resolve_backing(&header, backend.as_ref(), image_dir, read_mode, &mut warnings)?;
+
+        let data_backend = Self::resolve_data_backend(
+            &header, &extensions, data_backend, image_dir,
+        )?;
+
+        let has_auto_bitmaps = Self::detect_auto_bitmaps(backend.as_ref(), &extensions);
+        let has_hashes = hash_manager::detect_hashes(&extensions);
+
+        let crypt_context = Self::recover_crypt_context(
+            &header, &extensions, backend.as_ref(), password,
+        )?;
+
+        Ok(Self::new_inner(
+            header, extensions, backend, data_backend,
+            mapper, backing_chain, backing_image,
+            read_mode, warnings,
+            None, false, has_auto_bitmaps, has_hashes, crypt_context,
+        ))
+    }
+
+    /// Read and validate the header, extensions, and file size.
+    fn read_header_and_extensions(
+        backend: &dyn IoBackend,
+    ) -> Result<(Header, Vec<HeaderExtension>, u64)> {
         let mut header_buf = vec![0u8; 512];
         let file_size = backend.file_size()?;
         let read_size = header_buf.len().min(file_size as usize);
         backend.read_exact_at(&mut header_buf[..read_size], 0)?;
         let header = Header::read_from(&header_buf[..read_size])?;
-
-        // Validate header offsets against physical file size
         header.validate_against_file(file_size)?;
 
-        // Read header extensions (between header end and first cluster boundary)
         let ext_start = header.header_length as u64;
-        let cluster_size = header.cluster_size();
-        let ext_end = cluster_size.min(file_size);
+        let ext_end = header.cluster_size().min(file_size);
         let extensions = if ext_start < ext_end {
             let mut ext_buf = vec![0u8; (ext_end - ext_start) as usize];
             backend.read_exact_at(&mut ext_buf, ext_start)?;
@@ -281,7 +309,6 @@ impl Qcow2Image {
             Vec::new()
         };
 
-        // Validate BLAKE3 hash table offset is cluster-aligned
         for ext in &extensions {
             if let HeaderExtension::Blake3Hashes(blake3) = ext {
                 if blake3.hash_table_offset != 0
@@ -295,7 +322,15 @@ impl Qcow2Image {
             }
         }
 
-        // Read L1 table (with checked arithmetic for allocation size)
+        Ok((header, extensions, file_size))
+    }
+
+    /// Read L1 table and build the cluster mapper.
+    fn build_mapper(
+        backend: &dyn IoBackend,
+        header: &Header,
+        file_size: u64,
+    ) -> Result<ClusterMapper> {
         let l1_size = (header.l1_table_entries as usize)
             .checked_mul(crate::format::constants::L1_ENTRY_SIZE)
             .ok_or(FormatError::ArithmeticOverflow {
@@ -304,143 +339,117 @@ impl Qcow2Image {
         let mut l1_buf = vec![0u8; l1_size];
         backend.read_exact_at(&mut l1_buf, header.l1_table_offset.0)?;
         let l1_table = L1Table::read_from(&l1_buf, header.l1_table_entries)?;
+        Ok(ClusterMapper::new(l1_table, header.geometry(), file_size))
+    }
 
-        // Build cluster mapper
-        let mapper = ClusterMapper::new(l1_table, header.geometry(), file_size);
-
-        // Resolve backing chain and open backing image
-        let mut warnings = Vec::new();
-        let mut backing_chain = None;
-        let mut backing_image = None;
-
-        if header.has_backing_file() {
-            if let Some(dir) = image_dir {
-                let name = backing_mod::read_backing_file_name(
-                    backend.as_ref(),
-                    header.backing_file_offset,
-                    header.backing_file_size,
-                )?;
-                match BackingChain::resolve(&name, dir) {
-                    Ok(chain) => {
-                        // Open the immediate backing file for read-through
-                        let backing_path = &chain.entries()[0].path;
-                        match Qcow2Image::open_with_mode(backing_path, read_mode) {
-                            Ok(img) => {
-                                backing_image = Some(Box::new(img));
-                            }
-                            Err(e) if read_mode == ReadMode::Lenient => {
-                                warnings.push(ReadWarning {
-                                    guest_offset: 0,
-                                    message: format!("failed to open backing file: {e}"),
-                                });
-                            }
-                            Err(e) => return Err(e),
-                        }
-                        backing_chain = Some(chain);
-                    }
+    /// Resolve the backing chain and open the backing image.
+    fn resolve_backing(
+        header: &Header,
+        backend: &dyn IoBackend,
+        image_dir: Option<&Path>,
+        read_mode: ReadMode,
+        warnings: &mut Vec<ReadWarning>,
+    ) -> Result<(Option<BackingChain>, Option<Box<Qcow2Image>>)> {
+        if !header.has_backing_file() {
+            return Ok((None, None));
+        }
+        let dir = match image_dir {
+            Some(d) => d,
+            None => return Ok((None, None)),
+        };
+        let name = backing_mod::read_backing_file_name(
+            backend, header.backing_file_offset, header.backing_file_size,
+        )?;
+        match BackingChain::resolve(&name, dir) {
+            Ok(chain) => {
+                let backing_path = &chain.entries()[0].path;
+                match Qcow2Image::open_with_mode(backing_path, read_mode) {
+                    Ok(img) => Ok((Some(chain), Some(Box::new(img)))),
                     Err(e) if read_mode == ReadMode::Lenient => {
                         warnings.push(ReadWarning {
                             guest_offset: 0,
-                            message: format!("backing file resolution failed: {e}"),
+                            message: format!("failed to open backing file: {e}"),
                         });
+                        Ok((Some(chain), None))
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => Err(e),
                 }
             }
+            Err(e) if read_mode == ReadMode::Lenient => {
+                warnings.push(ReadWarning {
+                    guest_offset: 0,
+                    message: format!("backing file resolution failed: {e}"),
+                });
+                Ok((None, None))
+            }
+            Err(e) => Err(e),
         }
+    }
 
-        // Open external data file if EXTERNAL_DATA_FILE feature is set
-        let data_backend = if header
-            .incompatible_features
-            .contains(IncompatibleFeatures::EXTERNAL_DATA_FILE)
-        {
-            // Require RAW_EXTERNAL — non-raw external data files are not supported
-            if !header
-                .autoclear_features
-                .contains(AutoclearFeatures::RAW_EXTERNAL)
-            {
-                return Err(Error::RawExternalRequired);
-            }
-            if let Some(db) = data_backend {
-                // Caller provided the data backend directly
-                Some(db)
-            } else if let Some(dir) = image_dir {
-                // Path-based open: find the filename in header extensions
-                let data_file_name = extensions
-                    .iter()
-                    .find_map(|e| match e {
-                        HeaderExtension::ExternalDataFile(name) => Some(name.clone()),
-                        _ => None,
-                    })
-                    .ok_or(Error::MissingExternalDataFilePath)?;
-                let data_path = dir.join(&data_file_name);
-                let db = SyncFileBackend::open(&data_path).map_err(|e| {
-                    if let Error::Io { message, .. } = &e {
-                        Error::ExternalDataFileOpen {
-                            message: message.clone(),
-                            path: data_path.display().to_string(),
-                        }
-                    } else {
-                        e
-                    }
-                })?;
-                Some(Box::new(db) as Box<dyn IoBackend>)
+    /// Resolve the external data file backend.
+    fn resolve_data_backend(
+        header: &Header,
+        extensions: &[HeaderExtension],
+        data_backend: Option<Box<dyn IoBackend>>,
+        image_dir: Option<&Path>,
+    ) -> Result<Option<Box<dyn IoBackend>>> {
+        if !header.incompatible_features.contains(IncompatibleFeatures::EXTERNAL_DATA_FILE) {
+            return Ok(None);
+        }
+        if !header.autoclear_features.contains(AutoclearFeatures::RAW_EXTERNAL) {
+            return Err(Error::RawExternalRequired);
+        }
+        if let Some(db) = data_backend {
+            return Ok(Some(db));
+        }
+        let dir = image_dir.ok_or(Error::MissingExternalDataFilePath)?;
+        let data_file_name = extensions
+            .iter()
+            .find_map(|e| match e {
+                HeaderExtension::ExternalDataFile(name) => Some(name.clone()),
+                _ => None,
+            })
+            .ok_or(Error::MissingExternalDataFilePath)?;
+        let data_path = dir.join(&data_file_name);
+        let db = SyncFileBackend::open(&data_path).map_err(|e| {
+            if let Error::Io { message, .. } = &e {
+                Error::ExternalDataFileOpen {
+                    message: message.clone(),
+                    path: data_path.display().to_string(),
+                }
             } else {
-                return Err(Error::MissingExternalDataFilePath);
+                e
             }
-        } else {
-            None
-        };
+        })?;
+        Ok(Some(Box::new(db) as Box<dyn IoBackend>))
+    }
 
-        // Check if any bitmap has auto-tracking enabled
-        let has_auto_bitmaps = Self::detect_auto_bitmaps(backend.as_ref(), &extensions);
-
-        // Check if BLAKE3 hash extension exists
-        let has_hashes = hash_manager::detect_hashes(&extensions);
-
-        // Recover encryption context if image is LUKS-encrypted
-        let crypt_context = if header.crypt_method == crate::format::constants::CRYPT_LUKS {
-            let pw = password.ok_or(Error::NoPasswordProvided)?;
-
-            // Find LUKS header location from FullDiskEncryption extension
-            let (luks_offset, luks_length) = extensions
-                .iter()
-                .find_map(|e| match e {
-                    HeaderExtension::FullDiskEncryption { offset, length } => {
-                        Some((*offset, *length))
-                    }
-                    _ => None,
-                })
-                .ok_or(Error::InvalidLuksHeader {
-                    message: "missing FullDiskEncryption header extension".to_string(),
-                })?;
-
-            // Read LUKS header data
-            let mut luks_data = vec![0u8; luks_length as usize];
-            backend.read_exact_at(&mut luks_data, luks_offset)?;
-
-            let ctx = crate::engine::encryption::recover_master_key(&luks_data, pw)?;
-            Some(ctx)
-        } else {
-            None
-        };
-
-        Ok(Self::new_inner(
-            header,
-            extensions,
-            backend,
-            data_backend,
-            mapper,
-            backing_chain,
-            backing_image,
-            read_mode,
-            warnings,
-            None,  // refcount_manager (read-only)
-            false, // writable
-            has_auto_bitmaps,
-            has_hashes,
-            crypt_context,
-        ))
+    /// Recover the encryption context from the LUKS header if encrypted.
+    fn recover_crypt_context(
+        header: &Header,
+        extensions: &[HeaderExtension],
+        backend: &dyn IoBackend,
+        password: Option<&[u8]>,
+    ) -> Result<Option<crate::engine::encryption::CryptContext>> {
+        if header.crypt_method != crate::format::constants::CRYPT_LUKS {
+            return Ok(None);
+        }
+        let pw = password.ok_or(Error::NoPasswordProvided)?;
+        let (luks_offset, luks_length) = extensions
+            .iter()
+            .find_map(|e| match e {
+                HeaderExtension::FullDiskEncryption { offset, length } => {
+                    Some((*offset, *length))
+                }
+                _ => None,
+            })
+            .ok_or(Error::InvalidLuksHeader {
+                message: "missing FullDiskEncryption header extension".to_string(),
+            })?;
+        let mut luks_data = vec![0u8; luks_length as usize];
+        backend.read_exact_at(&mut luks_data, luks_offset)?;
+        let ctx = crate::engine::encryption::recover_master_key(&luks_data, pw)?;
+        Ok(Some(ctx))
     }
 
     /// Read `buf.len()` bytes starting at the given guest offset.

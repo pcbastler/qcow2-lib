@@ -97,112 +97,26 @@ impl Header {
     /// - The header data is too short
     /// - Any field fails validation
     pub fn read_from(bytes: &[u8]) -> Result<Self> {
-        // Check minimum length for v2
-        if bytes.len() < HEADER_V2_LENGTH {
-            return Err(Error::HeaderTooShort {
-                expected: HEADER_V2_LENGTH,
-                actual: bytes.len(),
-            });
-        }
-
-        // Validate magic
-        let magic = BigEndian::read_u32(&bytes[OFF_MAGIC..]);
-        if magic != QCOW2_MAGIC {
-            return Err(Error::InvalidMagic {
-                expected: QCOW2_MAGIC,
-                found: magic,
-            });
-        }
-
-        // Read version
-        let version = BigEndian::read_u32(&bytes[OFF_VERSION..]);
-        if version != VERSION_2 && version != VERSION_3 {
-            return Err(Error::UnsupportedVersion { version });
-        }
-
-        // For v3, ensure we have enough data
-        if version == VERSION_3 && bytes.len() < HEADER_V3_MIN_LENGTH {
-            return Err(Error::HeaderTooShort {
-                expected: HEADER_V3_MIN_LENGTH,
-                actual: bytes.len(),
-            });
-        }
-
-        // Read common fields
-        let backing_file_offset = BigEndian::read_u64(&bytes[OFF_BACKING_FILE_OFFSET..]);
-        let backing_file_size = BigEndian::read_u32(&bytes[OFF_BACKING_FILE_SIZE..]);
-        let cluster_bits = BigEndian::read_u32(&bytes[OFF_CLUSTER_BITS..]);
-        let virtual_size = BigEndian::read_u64(&bytes[OFF_VIRTUAL_SIZE..]);
-        let crypt_method = BigEndian::read_u32(&bytes[OFF_CRYPT_METHOD..]);
-        let l1_table_entries = BigEndian::read_u32(&bytes[OFF_L1_TABLE_ENTRIES..]);
-        let l1_table_offset = ClusterOffset(BigEndian::read_u64(&bytes[OFF_L1_TABLE_OFFSET..]));
-        let refcount_table_offset =
-            ClusterOffset(BigEndian::read_u64(&bytes[OFF_REFCOUNT_TABLE_OFFSET..]));
-        let refcount_table_clusters = BigEndian::read_u32(&bytes[OFF_REFCOUNT_TABLE_CLUSTERS..]);
-        let snapshot_count = BigEndian::read_u32(&bytes[OFF_SNAPSHOT_COUNT..]);
-        let snapshots_offset =
-            ClusterOffset(BigEndian::read_u64(&bytes[OFF_SNAPSHOTS_OFFSET..]));
+        let (version, common) = Self::read_common_fields(bytes)?;
 
         // Read v3 fields or use v2 defaults
-        let (
-            incompatible_features,
-            compatible_features,
-            autoclear_features,
-            refcount_order,
-            header_length,
-            compression_type,
-        ) = if version == VERSION_3 {
-            let incompat_bits = BigEndian::read_u64(&bytes[OFF_INCOMPATIBLE_FEATURES..]);
-            let compat_bits = BigEndian::read_u64(&bytes[OFF_COMPATIBLE_FEATURES..]);
-            let auto_bits = BigEndian::read_u64(&bytes[OFF_AUTOCLEAR_FEATURES..]);
-            let refcount_order = BigEndian::read_u32(&bytes[OFF_REFCOUNT_ORDER..]);
-            let header_length = BigEndian::read_u32(&bytes[OFF_HEADER_LENGTH..]);
-
-            // Compression type is at byte 104, only present if both:
-            // - the header declares it extends past that offset (header_length > 104)
-            // - the buffer is actually large enough to read it
-            let compression_type =
-                if (header_length as usize) > OFF_COMPRESSION_TYPE
-                    && bytes.len() > OFF_COMPRESSION_TYPE
-                {
-                    bytes[OFF_COMPRESSION_TYPE]
-                } else {
-                    COMPRESSION_DEFLATE
-                };
-
-            (
-                IncompatibleFeatures::from_bits_retain(incompat_bits),
-                CompatibleFeatures::from_bits_retain(compat_bits),
-                AutoclearFeatures::from_bits_retain(auto_bits),
-                refcount_order,
-                header_length,
-                compression_type,
-            )
-        } else {
-            // v2 defaults
-            (
-                IncompatibleFeatures::empty(),
-                CompatibleFeatures::empty(),
-                AutoclearFeatures::empty(),
-                DEFAULT_REFCOUNT_ORDER_V2,
-                HEADER_V2_LENGTH as u32,
-                COMPRESSION_DEFLATE,
-            )
-        };
+        let (incompatible_features, compatible_features, autoclear_features,
+             refcount_order, header_length, compression_type) =
+            Self::read_version_fields(version, bytes);
 
         let header = Self {
             version,
-            backing_file_offset,
-            backing_file_size,
-            cluster_bits,
-            virtual_size,
-            crypt_method,
-            l1_table_entries,
-            l1_table_offset,
-            refcount_table_offset,
-            refcount_table_clusters,
-            snapshot_count,
-            snapshots_offset,
+            backing_file_offset: common.0,
+            backing_file_size: common.1,
+            cluster_bits: common.2,
+            virtual_size: common.3,
+            crypt_method: common.4,
+            l1_table_entries: common.5,
+            l1_table_offset: common.6,
+            refcount_table_offset: common.7,
+            refcount_table_clusters: common.8,
+            snapshot_count: common.9,
+            snapshots_offset: common.10,
             incompatible_features,
             compatible_features,
             autoclear_features,
@@ -213,6 +127,92 @@ impl Header {
 
         header.validate_structural()?;
         Ok(header)
+    }
+
+    /// Read and validate magic/version, then parse the common (v2) fields.
+    #[allow(clippy::type_complexity)]
+    fn read_common_fields(
+        bytes: &[u8],
+    ) -> Result<(u32, (u64, u32, u32, u64, u32, u32, ClusterOffset, ClusterOffset, u32, u32, ClusterOffset))> {
+        if bytes.len() < HEADER_V2_LENGTH {
+            return Err(Error::HeaderTooShort {
+                expected: HEADER_V2_LENGTH,
+                actual: bytes.len(),
+            });
+        }
+
+        let magic = BigEndian::read_u32(&bytes[OFF_MAGIC..]);
+        if magic != QCOW2_MAGIC {
+            return Err(Error::InvalidMagic {
+                expected: QCOW2_MAGIC,
+                found: magic,
+            });
+        }
+
+        let version = BigEndian::read_u32(&bytes[OFF_VERSION..]);
+        if version != VERSION_2 && version != VERSION_3 {
+            return Err(Error::UnsupportedVersion { version });
+        }
+
+        if version == VERSION_3 && bytes.len() < HEADER_V3_MIN_LENGTH {
+            return Err(Error::HeaderTooShort {
+                expected: HEADER_V3_MIN_LENGTH,
+                actual: bytes.len(),
+            });
+        }
+
+        Ok((version, (
+            BigEndian::read_u64(&bytes[OFF_BACKING_FILE_OFFSET..]),
+            BigEndian::read_u32(&bytes[OFF_BACKING_FILE_SIZE..]),
+            BigEndian::read_u32(&bytes[OFF_CLUSTER_BITS..]),
+            BigEndian::read_u64(&bytes[OFF_VIRTUAL_SIZE..]),
+            BigEndian::read_u32(&bytes[OFF_CRYPT_METHOD..]),
+            BigEndian::read_u32(&bytes[OFF_L1_TABLE_ENTRIES..]),
+            ClusterOffset(BigEndian::read_u64(&bytes[OFF_L1_TABLE_OFFSET..])),
+            ClusterOffset(BigEndian::read_u64(&bytes[OFF_REFCOUNT_TABLE_OFFSET..])),
+            BigEndian::read_u32(&bytes[OFF_REFCOUNT_TABLE_CLUSTERS..]),
+            BigEndian::read_u32(&bytes[OFF_SNAPSHOT_COUNT..]),
+            ClusterOffset(BigEndian::read_u64(&bytes[OFF_SNAPSHOTS_OFFSET..])),
+        )))
+    }
+
+    /// Read v3-specific fields, or return v2 defaults.
+    fn read_version_fields(
+        version: u32,
+        bytes: &[u8],
+    ) -> (IncompatibleFeatures, CompatibleFeatures, AutoclearFeatures, u32, u32, u8) {
+        if version == VERSION_3 {
+            let incompat_bits = BigEndian::read_u64(&bytes[OFF_INCOMPATIBLE_FEATURES..]);
+            let compat_bits = BigEndian::read_u64(&bytes[OFF_COMPATIBLE_FEATURES..]);
+            let auto_bits = BigEndian::read_u64(&bytes[OFF_AUTOCLEAR_FEATURES..]);
+            let refcount_order = BigEndian::read_u32(&bytes[OFF_REFCOUNT_ORDER..]);
+            let header_length = BigEndian::read_u32(&bytes[OFF_HEADER_LENGTH..]);
+            let compression_type =
+                if (header_length as usize) > OFF_COMPRESSION_TYPE
+                    && bytes.len() > OFF_COMPRESSION_TYPE
+                {
+                    bytes[OFF_COMPRESSION_TYPE]
+                } else {
+                    COMPRESSION_DEFLATE
+                };
+            (
+                IncompatibleFeatures::from_bits_retain(incompat_bits),
+                CompatibleFeatures::from_bits_retain(compat_bits),
+                AutoclearFeatures::from_bits_retain(auto_bits),
+                refcount_order,
+                header_length,
+                compression_type,
+            )
+        } else {
+            (
+                IncompatibleFeatures::empty(),
+                CompatibleFeatures::empty(),
+                AutoclearFeatures::empty(),
+                DEFAULT_REFCOUNT_ORDER_V2,
+                HEADER_V2_LENGTH as u32,
+                COMPRESSION_DEFLATE,
+            )
+        }
     }
 
     /// Serialize this header into the provided buffer.
@@ -401,9 +401,6 @@ impl Header {
     /// size is known. Catches malicious or corrupted images with offsets
     /// that point beyond EOF, oversized allocations, or inconsistent fields.
     pub fn validate_against_file(&self, file_size: u64) -> Result<()> {
-        let cluster_size = self.cluster_size();
-
-        // virtual_size must be non-zero
         if self.virtual_size == 0 {
             return Err(Error::AllocationTooLarge {
                 requested: 0,
@@ -412,88 +409,96 @@ impl Header {
             });
         }
 
-        // L1 table: offset + entries*8 must fit in file
-        if self.l1_table_entries > 0 {
-            let l1_byte_size = (self.l1_table_entries as u64)
-                .checked_mul(L1_ENTRY_SIZE as u64)
-                .ok_or(Error::ArithmeticOverflow {
-                    context: "l1_table_entries * L1_ENTRY_SIZE",
-                })?;
-            let l1_end = self
-                .l1_table_offset
-                .0
-                .checked_add(l1_byte_size)
-                .ok_or(Error::ArithmeticOverflow {
-                    context: "l1_table_offset + l1_byte_size",
-                })?;
-            if l1_end > file_size {
-                return Err(Error::MetadataOffsetBeyondEof {
-                    offset: self.l1_table_offset.0,
-                    size: l1_byte_size,
-                    file_size,
-                    context: "L1 table",
-                });
-            }
-        }
+        self.validate_l1_table(file_size)?;
+        self.validate_refcount_table(file_size)?;
+        self.validate_backing_file(file_size)?;
+        self.validate_snapshot_table(file_size)?;
+        self.validate_header_length_and_compression()
+    }
 
-        // Refcount table: must be cluster-aligned and fit in file
-        if self.refcount_table_clusters > 0 {
-            if !self
-                .refcount_table_offset
-                .is_cluster_aligned(self.cluster_bits)
-            {
-                return Err(Error::RefcountBlockMisaligned {
-                    offset: self.refcount_table_offset.0,
-                });
-            }
-            let rt_byte_size = (self.refcount_table_clusters as u64)
-                .checked_mul(cluster_size)
-                .ok_or(Error::ArithmeticOverflow {
-                    context: "refcount_table_clusters * cluster_size",
-                })?;
-            let rt_end = self
-                .refcount_table_offset
-                .0
-                .checked_add(rt_byte_size)
-                .ok_or(Error::ArithmeticOverflow {
-                    context: "refcount_table_offset + rt_byte_size",
-                })?;
-            if rt_end > file_size {
-                return Err(Error::MetadataOffsetBeyondEof {
-                    offset: self.refcount_table_offset.0,
-                    size: rt_byte_size,
-                    file_size,
-                    context: "refcount table",
-                });
-            }
+    fn validate_l1_table(&self, file_size: u64) -> Result<()> {
+        if self.l1_table_entries == 0 {
+            return Ok(());
         }
-
-        // Backing file name: must respect MAX_BACKING_FILE_NAME and fit in file
-        if self.has_backing_file() {
-            if self.backing_file_size > MAX_BACKING_FILE_NAME {
-                return Err(Error::AllocationTooLarge {
-                    requested: self.backing_file_size as u64,
-                    max: MAX_BACKING_FILE_NAME as u64,
-                    context: "backing file name",
-                });
-            }
-            let bf_end = self
-                .backing_file_offset
-                .checked_add(self.backing_file_size as u64)
-                .ok_or(Error::ArithmeticOverflow {
-                    context: "backing_file_offset + backing_file_size",
-                })?;
-            if bf_end > file_size {
-                return Err(Error::MetadataOffsetBeyondEof {
-                    offset: self.backing_file_offset,
-                    size: self.backing_file_size as u64,
-                    file_size,
-                    context: "backing file name",
-                });
-            }
+        let l1_byte_size = (self.l1_table_entries as u64)
+            .checked_mul(L1_ENTRY_SIZE as u64)
+            .ok_or(Error::ArithmeticOverflow {
+                context: "l1_table_entries * L1_ENTRY_SIZE",
+            })?;
+        let l1_end = self.l1_table_offset.0
+            .checked_add(l1_byte_size)
+            .ok_or(Error::ArithmeticOverflow {
+                context: "l1_table_offset + l1_byte_size",
+            })?;
+        if l1_end > file_size {
+            return Err(Error::MetadataOffsetBeyondEof {
+                offset: self.l1_table_offset.0,
+                size: l1_byte_size,
+                file_size,
+                context: "L1 table",
+            });
         }
+        Ok(())
+    }
 
-        // Snapshot table: offset must be within file
+    fn validate_refcount_table(&self, file_size: u64) -> Result<()> {
+        if self.refcount_table_clusters == 0 {
+            return Ok(());
+        }
+        if !self.refcount_table_offset.is_cluster_aligned(self.cluster_bits) {
+            return Err(Error::RefcountBlockMisaligned {
+                offset: self.refcount_table_offset.0,
+            });
+        }
+        let rt_byte_size = (self.refcount_table_clusters as u64)
+            .checked_mul(self.cluster_size())
+            .ok_or(Error::ArithmeticOverflow {
+                context: "refcount_table_clusters * cluster_size",
+            })?;
+        let rt_end = self.refcount_table_offset.0
+            .checked_add(rt_byte_size)
+            .ok_or(Error::ArithmeticOverflow {
+                context: "refcount_table_offset + rt_byte_size",
+            })?;
+        if rt_end > file_size {
+            return Err(Error::MetadataOffsetBeyondEof {
+                offset: self.refcount_table_offset.0,
+                size: rt_byte_size,
+                file_size,
+                context: "refcount table",
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_backing_file(&self, file_size: u64) -> Result<()> {
+        if !self.has_backing_file() {
+            return Ok(());
+        }
+        if self.backing_file_size > MAX_BACKING_FILE_NAME {
+            return Err(Error::AllocationTooLarge {
+                requested: self.backing_file_size as u64,
+                max: MAX_BACKING_FILE_NAME as u64,
+                context: "backing file name",
+            });
+        }
+        let bf_end = self.backing_file_offset
+            .checked_add(self.backing_file_size as u64)
+            .ok_or(Error::ArithmeticOverflow {
+                context: "backing_file_offset + backing_file_size",
+            })?;
+        if bf_end > file_size {
+            return Err(Error::MetadataOffsetBeyondEof {
+                offset: self.backing_file_offset,
+                size: self.backing_file_size as u64,
+                file_size,
+                context: "backing file name",
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_snapshot_table(&self, file_size: u64) -> Result<()> {
         if self.snapshot_count > 0 && self.snapshots_offset.0 >= file_size {
             return Err(Error::MetadataOffsetBeyondEof {
                 offset: self.snapshots_offset.0,
@@ -502,17 +507,17 @@ impl Header {
                 context: "snapshot table",
             });
         }
+        Ok(())
+    }
 
-        // header_length must not exceed cluster_size (header lives in first cluster)
-        if (self.header_length as u64) > cluster_size {
+    fn validate_header_length_and_compression(&self) -> Result<()> {
+        if (self.header_length as u64) > self.cluster_size() {
             return Err(Error::AllocationTooLarge {
                 requested: self.header_length as u64,
-                max: cluster_size,
+                max: self.cluster_size(),
                 context: "header_length exceeds cluster size",
             });
         }
-
-        // Only deflate and zstandard compression are supported
         if self.compression_type != COMPRESSION_DEFLATE
             && self.compression_type != COMPRESSION_ZSTD
         {
@@ -520,7 +525,6 @@ impl Header {
                 compression_type: self.compression_type,
             });
         }
-
         Ok(())
     }
 }

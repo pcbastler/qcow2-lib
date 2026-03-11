@@ -10,7 +10,7 @@ pub fn run_init(path: &Path, hash_size: Option<u8>, chunk_size: Option<u64>) -> 
     // Convert chunk_size (bytes, power-of-2) to hash_chunk_bits
     let hash_chunk_bits = match chunk_size {
         Some(cs) => {
-            if !cs.is_power_of_two() || cs < 4096 || cs > (1 << 24) {
+            if !cs.is_power_of_two() || !(4096..=(1 << 24)).contains(&cs) {
                 return Err(qcow2::error::FormatError::InvalidHashChunkBits {
                     bits: 0,
                     min: 12,
@@ -49,9 +49,9 @@ pub fn run_rehash(path: &Path) -> Result<()> {
 pub fn run_verify(path: &Path) -> Result<()> {
     let mut image = Qcow2Image::open_rw(path)?;
 
-    let info = image.hash_info().ok_or_else(|| {
+    let info = image.hash_info().ok_or(
         qcow2::error::Error::HashNotInitialized
-    })?;
+    )?;
 
     if !info.consistent {
         println!("Warning: autoclear bit not set — hashes may be stale.");
@@ -111,9 +111,9 @@ pub fn run_info(path: &Path) -> Result<()> {
 pub fn run_export(path: &Path, range: Option<(u64, u64)>, json: bool) -> Result<()> {
     let mut image = Qcow2Image::open_rw(path)?;
 
-    let info = image.hash_info().ok_or_else(|| {
+    let info = image.hash_info().ok_or(
         qcow2::error::Error::HashNotInitialized
-    })?;
+    )?;
 
     let entries = image.hash_export(range)?;
 

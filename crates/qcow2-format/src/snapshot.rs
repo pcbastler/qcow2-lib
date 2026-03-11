@@ -75,102 +75,103 @@ impl SnapshotHeader {
         let vm_state_size_32 = BigEndian::read_u32(&bytes[32..]) as u64;
         let extra_data_size = BigEndian::read_u32(&bytes[36..]);
 
-        // Read extra data fields
+        let (extra_end, vm_state_size, virtual_disk_size,
+             hash_table_offset, hash_table_entries, hash_size, hash_chunk_bits) =
+            Self::read_extra_data(bytes, base_offset, extra_data_size, vm_state_size_32)?;
+
+        let (unique_id, name, consumed) =
+            Self::read_strings(bytes, base_offset, extra_end, id_str_size, name_size)?;
+
+        Ok((
+            Self {
+                l1_table_offset, l1_table_entries, unique_id, name,
+                timestamp_seconds, timestamp_nanoseconds, vm_clock_nanoseconds,
+                vm_state_size, virtual_disk_size,
+                hash_table_offset, hash_table_entries, hash_size, hash_chunk_bits,
+                extra_data_size,
+            },
+            consumed,
+        ))
+    }
+
+    /// Parse the variable-length extra data section.
+    #[allow(clippy::type_complexity)]
+    fn read_extra_data(
+        bytes: &[u8],
+        base_offset: u64,
+        extra_data_size: u32,
+        vm_state_size_32: u64,
+    ) -> Result<(usize, u64, Option<u64>, Option<u64>, Option<u32>, Option<u8>, Option<u8>)> {
         let extra_start = SNAPSHOT_FIXED_SIZE;
         let extra_end = extra_start
             .checked_add(extra_data_size as usize)
-            .ok_or(Error::ArithmeticOverflow {
-                context: "snapshot extra_data_size",
-            })?;
+            .ok_or(Error::ArithmeticOverflow { context: "snapshot extra_data_size" })?;
 
         if bytes.len() < extra_end {
             return Err(Error::SnapshotTruncated {
-                offset: base_offset,
-                expected: extra_end,
-                actual: bytes.len(),
+                offset: base_offset, expected: extra_end, actual: bytes.len(),
             });
         }
 
-        // If extra_data_size >= 8, use the 64-bit vm_state_size
         let vm_state_size = if extra_data_size >= 8 {
             BigEndian::read_u64(&bytes[extra_start..])
         } else {
             vm_state_size_32
         };
 
-        // If extra_data_size >= 16, read virtual_disk_size
         let virtual_disk_size = if extra_data_size >= 16 {
             Some(BigEndian::read_u64(&bytes[extra_start + 8..]))
         } else {
             None
         };
 
-        // If extra_data_size >= 32, read BLAKE3 hash table fields
-        let (hash_table_offset, hash_table_entries, hash_size, hash_chunk_bits) =
-            if extra_data_size >= 32 {
-                let ht_offset = BigEndian::read_u64(&bytes[extra_start + 16..]);
-                let ht_entries = BigEndian::read_u32(&bytes[extra_start + 24..]);
-                let hs = bytes[extra_start + 28];
-                let hcb = bytes[extra_start + 29];
-                if ht_offset != 0 {
-                    (Some(ht_offset), Some(ht_entries), Some(hs), Some(hcb))
-                } else {
-                    (None, None, None, None)
-                }
+        let (ht_off, ht_ent, hs, hcb) = if extra_data_size >= 32 {
+            let ht_offset = BigEndian::read_u64(&bytes[extra_start + 16..]);
+            let ht_entries = BigEndian::read_u32(&bytes[extra_start + 24..]);
+            let hash_sz = bytes[extra_start + 28];
+            let chunk_bits = bytes[extra_start + 29];
+            if ht_offset != 0 {
+                (Some(ht_offset), Some(ht_entries), Some(hash_sz), Some(chunk_bits))
             } else {
                 (None, None, None, None)
-            };
+            }
+        } else {
+            (None, None, None, None)
+        };
 
-        // Variable-length strings follow extra data
-        let strings_start = extra_end;
+        Ok((extra_end, vm_state_size, virtual_disk_size, ht_off, ht_ent, hs, hcb))
+    }
+
+    /// Parse the variable-length id and name strings after the extra data.
+    fn read_strings(
+        bytes: &[u8],
+        base_offset: u64,
+        strings_start: usize,
+        id_str_size: usize,
+        name_size: usize,
+    ) -> Result<(String, String, usize)> {
         let id_end = strings_start
             .checked_add(id_str_size)
-            .ok_or(Error::ArithmeticOverflow {
-                context: "snapshot id_str_size",
-            })?;
+            .ok_or(Error::ArithmeticOverflow { context: "snapshot id_str_size" })?;
         let name_end = id_end
             .checked_add(name_size)
-            .ok_or(Error::ArithmeticOverflow {
-                context: "snapshot name_size",
-            })?;
+            .ok_or(Error::ArithmeticOverflow { context: "snapshot name_size" })?;
 
         if bytes.len() < name_end {
             return Err(Error::SnapshotTruncated {
-                offset: base_offset,
-                expected: name_end,
-                actual: bytes.len(),
+                offset: base_offset, expected: name_end, actual: bytes.len(),
             });
         }
 
-        let unique_id =
-            String::from_utf8_lossy(&bytes[strings_start..id_end]).into_owned();
+        let unique_id = String::from_utf8_lossy(&bytes[strings_start..id_end]).into_owned();
         let name = String::from_utf8_lossy(&bytes[id_end..name_end]).into_owned();
 
-        // Total consumed = name_end padded to 8-byte boundary
         let padded = name_end.checked_add(7).ok_or(Error::ArithmeticOverflow {
             context: "snapshot padding",
         })?;
         let consumed = padded & !7;
 
-        Ok((
-            Self {
-                l1_table_offset,
-                l1_table_entries,
-                unique_id,
-                name,
-                timestamp_seconds,
-                timestamp_nanoseconds,
-                vm_clock_nanoseconds,
-                vm_state_size,
-                virtual_disk_size,
-                hash_table_offset,
-                hash_table_entries,
-                hash_size,
-                hash_chunk_bits,
-                extra_data_size,
-            },
-            consumed,
-        ))
+        Ok((unique_id, name, consumed))
     }
 
     /// Parse the entire snapshot table.

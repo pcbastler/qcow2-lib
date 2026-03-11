@@ -12,7 +12,7 @@ const CSU: u64 = CS as u64;
 
 fn create_file(dir: &tempfile::TempDir, name: &str, vs: u64) -> Qcow2Image {
     Qcow2Image::create(
-        &dir.path().join(name),
+        dir.path().join(name),
         CreateOptions {
             virtual_size: vs,
             cluster_bits: None,

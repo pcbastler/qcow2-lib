@@ -668,7 +668,7 @@ mod tests {
     #[test]
     fn entry_from_raw_data() {
         // Offset in bits 9..=55
-        let raw = 0x00_0000_0001_0000_00u64; // cluster at 0x10000 (bits 9..=55 encode this)
+        let raw = 0x0000_0000_0100_0000_u64; // cluster at 0x10000 (bits 9..=55 encode this)
         let entry = BitmapTableEntry::from_raw(raw);
         match entry.state() {
             BitmapTableEntryState::Data(offset) => {

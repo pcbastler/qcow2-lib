@@ -45,6 +45,7 @@ pub fn reconstruct(path: &Path, cluster_map: &ClusterMapReport) -> Result<Recons
 }
 
 /// Reconstruct with a specific conflict resolution strategy.
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 pub fn reconstruct_with_strategy(
     path: &Path,
     cluster_map: &ClusterMapReport,
@@ -95,6 +96,7 @@ pub fn reconstruct_with_strategy(
     // The header's choice gets a small bonus in scoring to break ties.
     let file_size = cluster_map.file_size;
 
+    #[allow(clippy::type_complexity)]
     let mut best_result: Option<(
         BTreeMap<u64, MappingEntry>,
         u32, // l2_tables_verified
@@ -230,7 +232,7 @@ pub fn reconstruct_with_strategy(
     //       then assign remaining orphans from the partition start slot.
     // 2. Fallback: fill remaining orphans into any unmapped guest offsets.
     if !orphan_data_offsets.is_empty() {
-        let l2_entries_per_table = (cluster_size / 8) as u64; // standard L2
+        let l2_entries_per_table = cluster_size / 8; // standard L2
         let occupied_guests: HashSet<u64> = mappings.keys().copied().collect();
 
         // Try to detect partition layout from the first orphan cluster.
@@ -367,6 +369,7 @@ pub fn reconstruct_with_strategy(
 ///
 /// Returns (mappings, l2_verified, l2_suspicious, l1_entries, conflicts,
 ///          corrupted_l2_offsets, missing_l2_ranges).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
 fn reconstruct_with_geometry(
     file: &mut std::fs::File,
     l1_result: &Option<Vec<u8>>,
@@ -513,7 +516,7 @@ fn reconstruct_with_geometry(
                 let mut hits = 0usize;
                 let mut plausible = 0usize;
                 let mut nonzero = 0usize;
-                for &(_, ref entry) in &entries {
+                for (_, entry) in &entries {
                     let host = match entry {
                         L2Entry::Standard { host_offset, .. } if host_offset.0 > 0 => {
                             Some(host_offset.0)
@@ -857,8 +860,8 @@ mod tests {
 
         // Verify subcluster info is present and shows all-allocated
         for m in &report.mappings {
-            let sc = m.subclusters.as_ref().expect(
-                &format!("expected subcluster info for guest_offset {}", m.guest_offset),
+            let sc = m.subclusters.as_ref().unwrap_or_else(||
+                panic!("expected subcluster info for guest_offset {}", m.guest_offset),
             );
             assert_eq!(sc.raw_bitmap, 0x0000_0000_FFFF_FFFF);
             assert_eq!(sc.allocated_count, 32);
@@ -999,7 +1002,7 @@ mod tests {
             // But offset 0 is rejected by the > 0 check already. Use the refcount table
             // area or header cluster at a plausible-looking offset instead.
             // Let's make L2[0] point to the L2 table itself (cluster 2 = metadata)
-            let l2_self = 2 * cluster_size | (1u64 << 63);
+            let l2_self = (2 * cluster_size) | (1u64 << 63);
             BigEndian::write_u64(&mut entry, l2_self);
             f.write_all(&entry).unwrap();
 

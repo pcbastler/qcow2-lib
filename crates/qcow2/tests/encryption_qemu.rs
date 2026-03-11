@@ -250,6 +250,7 @@ fn round_trip_qemu_create_our_write_qemu_read() {
 /// This test creates a QEMU-encrypted image and traces each step of the
 /// key recovery pipeline to isolate where the WrongPassword failure occurs.
 #[test]
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 fn debug_qemu_key_recovery_step_by_step() {
     if !has_qemu_io() {
         eprintln!("skipping: qemu-io not available");

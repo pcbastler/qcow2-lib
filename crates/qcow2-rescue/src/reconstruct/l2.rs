@@ -83,7 +83,9 @@ pub(super) fn read_l2_table(
 /// - Host offset must be cluster-aligned and within the file
 /// - Host offset must point to a cluster classified as Data or Compressed
 ///   (not Header, L1, L2, Refcount, or Empty)
+///
 /// Returns the number of conflicts encountered.
+#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
 pub(super) fn add_l2_mappings(
     entries: &[(u32, L2Entry)],
     l1_idx: u64,

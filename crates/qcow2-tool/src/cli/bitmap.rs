@@ -16,8 +16,8 @@ pub fn run_list(path: &Path) -> Result<()> {
     }
 
     println!(
-        "{:<24} {:>12} {:>6} {:>7} {:>8}  {}",
-        "Name", "Granularity", "Type", "In-Use", "Auto", "Table Entries"
+        "{:<24} {:>12} {:>6} {:>7} {:>8}  Table Entries",
+        "Name", "Granularity", "Type", "In-Use", "Auto"
     );
     println!("{}", "-".repeat(75));
     for b in &bitmaps {

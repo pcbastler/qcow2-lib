@@ -12,7 +12,7 @@ const CSU: u64 = CS as u64;
 
 fn create_file(dir: &tempfile::TempDir, name: &str, vs: u64) -> Qcow2Image {
     Qcow2Image::create(
-        &dir.path().join(name),
+        dir.path().join(name),
         CreateOptions {
             virtual_size: vs,
             cluster_bits: None,
@@ -218,7 +218,7 @@ fn truncate_free_tail_shrinks_file() {
     image.flush().unwrap();
 
     let size_before = std::fs::metadata(&path).unwrap().len();
-    let freed = image.truncate_free_tail().unwrap();
+    let _freed = image.truncate_free_tail().unwrap();
     image.flush().unwrap();
 
     let size_after = std::fs::metadata(&path).unwrap().len();

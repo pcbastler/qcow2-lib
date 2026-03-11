@@ -14,6 +14,7 @@ use crate::report::*;
 /// Normal allocated clusters should have refcount == 1.
 ///
 /// Returns `None` if the header or refcount table is unreadable.
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 pub(super) fn cross_check_refcounts(
     file: &mut std::fs::File,
     cluster_size: u64,

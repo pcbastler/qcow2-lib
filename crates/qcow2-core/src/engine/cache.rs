@@ -20,19 +20,14 @@ use crate::format::types::ClusterOffset;
 use crate::lru::LruCache;
 
 /// Controls how metadata modifications are persisted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CacheMode {
     /// Modifications stay in cache, flushed on flush()/eviction.
     /// Higher throughput, dirty entries lost on crash (recovered via DIRTY flag).
+    #[default]
     WriteBack,
     /// Every modification written to disk immediately (legacy behavior).
     WriteThrough,
-}
-
-impl Default for CacheMode {
-    fn default() -> Self {
-        CacheMode::WriteBack
-    }
 }
 
 /// A cached metadata entry with dirty tracking.
@@ -399,6 +394,7 @@ impl MetadataCache {
     }
 
     /// Drain all entries (for close/drop). Returns dirty L2 and refcount entries.
+    #[allow(clippy::type_complexity)]
     pub fn drain_dirty(&mut self) -> (Vec<(u64, L2Table)>, Vec<(u64, RefcountBlock)>) {
         (self.l2_tables.drain_dirty(), self.refcount_blocks.drain_dirty())
     }

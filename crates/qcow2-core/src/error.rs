@@ -392,6 +392,15 @@ impl fmt::Display for Error {
                 }
                 Ok(())
             }
+            _ => self.fmt_engine_error(f),
+        }
+    }
+}
+
+impl Error {
+    fn fmt_engine_error(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Format(_) | Self::Io { .. } => unreachable!(),
             Self::L2TableMisaligned { offset } =>
                 write!(f, "L2 table at offset 0x{offset:x} is not cluster-aligned"),
             Self::DecompressionFailed { kind, message, guest_offset } =>
@@ -408,16 +417,14 @@ impl fmt::Display for Error {
                 write!(f, "invalid virtual_size {size}: must be greater than 0"),
             Self::OffsetBeyondDiskSize { offset, disk_size } =>
                 write!(f, "offset 0x{offset:x} exceeds virtual disk size 0x{disk_size:x}"),
-            Self::ReadOnly =>
-                write!(f, "image is opened read-only"),
+            Self::ReadOnly => write!(f, "image is opened read-only"),
             Self::RefcountTableFull =>
                 write!(f, "refcount table is full (no space for new clusters)"),
             Self::RefcountOverflow { cluster_offset, current, max } =>
                 write!(f, "refcount overflow at cluster offset 0x{cluster_offset:x}: current {current}, max {max}"),
             Self::SnapshotNotFound { identifier } =>
                 write!(f, "snapshot not found: {identifier}"),
-            Self::SnapshotNameEmpty =>
-                write!(f, "snapshot name must not be empty"),
+            Self::SnapshotNameEmpty => write!(f, "snapshot name must not be empty"),
             Self::SnapshotNameDuplicate { name } =>
                 write!(f, "snapshot with name {name:?} already exists"),
             Self::CreateFailed { message, path } =>
@@ -428,20 +435,22 @@ impl fmt::Display for Error {
                 write!(f, "cannot shrink image from {current} to {requested} bytes (shrink not yet supported)"),
             Self::ResizeNotAligned { size, cluster_size } =>
                 write!(f, "resize target {size} is not aligned to cluster size {cluster_size}"),
-            Self::ConversionFailed { message } =>
-                write!(f, "conversion failed: {message}"),
+            Self::ConversionFailed { message } => write!(f, "conversion failed: {message}"),
+            _ => self.fmt_extended_error(f),
+        }
+    }
+
+    fn fmt_extended_error(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Self::CompressionTooLarge { compressed_size, cluster_size, guest_offset } =>
                 write!(f, "compression ineffective: compressed size {compressed_size} >= cluster size {cluster_size} at guest offset 0x{guest_offset:x}"),
             Self::ShrinkDataLoss { cluster_offset, context } =>
                 write!(f, "shrink would lose data: cluster at offset 0x{cluster_offset:x} is still allocated ({context})"),
-            Self::RepairFailed { message } =>
-                write!(f, "repair failed: {message}"),
-            Self::BitmapNotFound { name } =>
-                write!(f, "bitmap not found: {name}"),
+            Self::RepairFailed { message } => write!(f, "repair failed: {message}"),
+            Self::BitmapNotFound { name } => write!(f, "bitmap not found: {name}"),
             Self::BitmapNameDuplicate { name } =>
                 write!(f, "bitmap with name {name:?} already exists"),
-            Self::BitmapNameEmpty =>
-                write!(f, "bitmap name must not be empty"),
+            Self::BitmapNameEmpty => write!(f, "bitmap name must not be empty"),
             Self::BitmapTableMisaligned { offset } =>
                 write!(f, "bitmap table at offset 0x{offset:x} is not cluster-aligned"),
             Self::InvalidSubclusterBitmap { l2_index, subcluster_index } =>
@@ -458,28 +467,25 @@ impl fmt::Display for Error {
                 write!(f, "decryption failed for cluster at guest offset 0x{guest_offset:x}: {message}"),
             Self::EncryptionFailed { guest_offset, message } =>
                 write!(f, "encryption failed for cluster at guest offset 0x{guest_offset:x}: {message}"),
-            Self::InvalidLuksHeader { message } =>
-                write!(f, "invalid LUKS header: {message}"),
+            Self::InvalidLuksHeader { message } => write!(f, "invalid LUKS header: {message}"),
             Self::UnsupportedCipher { cipher_name, cipher_mode } =>
                 write!(f, "unsupported cipher: {cipher_name}-{cipher_mode}"),
             Self::KeyDerivationFailed { message } =>
                 write!(f, "key derivation failed: {message}"),
-            Self::WrongPassword =>
-                write!(f, "wrong password: no key slot could be unlocked"),
+            Self::WrongPassword => write!(f, "wrong password: no key slot could be unlocked"),
             Self::NoPasswordProvided =>
                 write!(f, "image is encrypted but no password was provided"),
             Self::EncryptionWithCompression =>
                 write!(f, "encryption and compression are mutually exclusive"),
-            Self::LuksKeySlotsFull =>
-                write!(f, "all LUKS key slots are full"),
+            Self::LuksKeySlotsFull => write!(f, "all LUKS key slots are full"),
             Self::HashTableMisaligned { offset } =>
                 write!(f, "hash table at offset 0x{offset:x} is not cluster-aligned"),
             Self::HeaderExtensionOverflow { needed, cluster_size } =>
                 write!(f, "header extensions ({needed} bytes) exceed cluster 0 ({cluster_size} bytes)"),
-            Self::HashNotInitialized =>
-                write!(f, "hash extension not initialized"),
+            Self::HashNotInitialized => write!(f, "hash extension not initialized"),
             Self::HashVerifyFailed { hash_chunk_index, guest_offset, expected, actual } =>
                 write!(f, "hash mismatch at hash chunk {hash_chunk_index} (0x{guest_offset:x}): expected {expected}, actual {actual}"),
+            _ => unreachable!(),
         }
     }
 }

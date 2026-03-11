@@ -302,6 +302,7 @@ fn heavy_scattered_writes_with_pattern_verification() {
 // ============================================================
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn bitmask_pattern_verification() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bitmask.qcow2");

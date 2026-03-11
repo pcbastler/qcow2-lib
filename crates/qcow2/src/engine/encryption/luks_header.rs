@@ -35,6 +35,7 @@ pub const LUKS1_NUM_KEY_SLOTS: usize = 8;
 
 /// Parsed LUKS header (version-independent).
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum LuksHeader {
     V1(Luks1Header),
     V2(Luks2Header),
@@ -575,6 +576,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn luks1_header_round_trip() {
         let mut header = Luks1Header {
             cipher_name: "aes".to_string(),

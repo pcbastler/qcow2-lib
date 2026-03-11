@@ -43,9 +43,7 @@ pub fn detect_cluster_size(path: &Path) -> Result<u64> {
             header_buf[22],
             header_buf[23],
         ]);
-        if cluster_bits >= qcow2_format::constants::MIN_CLUSTER_BITS
-            && cluster_bits <= qcow2_format::constants::MAX_CLUSTER_BITS
-        {
+        if (qcow2_format::constants::MIN_CLUSTER_BITS..=qcow2_format::constants::MAX_CLUSTER_BITS).contains(&cluster_bits) {
             let cs = 1u64 << cluster_bits;
             println!(
                 "  header partially corrupt but cluster_bits={} readable, cluster_size={}",

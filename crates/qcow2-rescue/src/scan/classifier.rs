@@ -447,8 +447,8 @@ mod tests {
         buf[0] = 0x78;
         buf[1] = 0x9C;
         // Fill with pseudo-compressed data (realistic: most of the cluster is used)
-        for i in 2..32768 {
-            buf[i] = ((i * 7 + 3) % 256) as u8;
+        for (i, byte) in buf[2..32768].iter_mut().enumerate() {
+            *byte = (((i + 2) * 7 + 3) % 256) as u8;
         }
 
         let result = classify_cluster(&buf, 65536, 65536);
@@ -464,8 +464,8 @@ mod tests {
         // Zstd magic
         buf[0] = 0x28; buf[1] = 0xB5; buf[2] = 0x2F; buf[3] = 0xFD;
         // Fill with pseudo-compressed data
-        for i in 4..32768 {
-            buf[i] = ((i * 11 + 5) % 256) as u8;
+        for (i, byte) in buf[4..32768].iter_mut().enumerate() {
+            *byte = (((i + 4) * 11 + 5) % 256) as u8;
         }
 
         let result = classify_cluster(&buf, 65536, 65536);
@@ -507,7 +507,7 @@ mod tests {
         for i in 0..entry_count / 2 {
             let base = i * 16;
             // Word 1: zero flag set (bit 0), no host offset
-            BigEndian::write_u64(&mut buf[base..], L2_ZERO_FLAG as u64);
+            BigEndian::write_u64(&mut buf[base..], L2_ZERO_FLAG);
             // Word 2: SubclusterBitmap — all zero (bits 32-63 set)
             BigEndian::write_u64(&mut buf[base + 8..], 0xFFFF_FFFF_0000_0000);
         }

@@ -6,7 +6,6 @@
 use qcow2::engine::image::{CreateOptions, Qcow2Image};
 use qcow2::io::MemoryBackend;
 
-const KB: u64 = 1024;
 const MB: u64 = 1024 * 1024;
 
 fn create_extended_l2_image(virtual_size: u64, cluster_bits: u32) -> Qcow2Image {
@@ -27,7 +26,7 @@ fn create_extended_l2_image(virtual_size: u64, cluster_bits: u32) -> Qcow2Image 
 
 #[test]
 fn create_extended_l2_image_valid_header() {
-    let image = create_extended_l2_image(1 * MB, 16);
+    let image = create_extended_l2_image(MB, 16);
     assert!(image.header().has_extended_l2());
     assert_eq!(image.header().l2_entry_size(), 16);
     assert_eq!(image.header().subcluster_size(), Some(2048)); // 64KB / 32
@@ -36,7 +35,7 @@ fn create_extended_l2_image_valid_header() {
 #[test]
 fn create_extended_l2_image_cluster_bits_14() {
     // Minimum cluster_bits for extended L2
-    let image = create_extended_l2_image(1 * MB, 14);
+    let image = create_extended_l2_image(MB, 14);
     assert!(image.header().has_extended_l2());
     assert_eq!(image.cluster_size(), 16384);
     assert_eq!(image.header().subcluster_size(), Some(512)); // 16KB / 32
@@ -48,7 +47,7 @@ fn create_extended_l2_rejects_small_clusters() {
     let result = Qcow2Image::create_on_backend(
         backend,
         CreateOptions {
-            virtual_size: 1 * MB,
+            virtual_size: MB,
             cluster_bits: Some(12), // 4KB — too small for extended L2
             extended_l2: true, compression_type: None,
             data_file: None, encryption: None,
@@ -61,7 +60,7 @@ fn create_extended_l2_rejects_small_clusters() {
 
 #[test]
 fn write_full_cluster_and_read_back() {
-    let mut image = create_extended_l2_image(1 * MB, 16);
+    let mut image = create_extended_l2_image(MB, 16);
     let cluster_size = image.cluster_size() as usize;
 
     let data: Vec<u8> = (0..cluster_size).map(|i| (i % 256) as u8).collect();
@@ -74,7 +73,7 @@ fn write_full_cluster_and_read_back() {
 
 #[test]
 fn write_partial_cluster_reads_zeros_outside() {
-    let mut image = create_extended_l2_image(1 * MB, 16);
+    let mut image = create_extended_l2_image(MB, 16);
     let sc_size = image.header().subcluster_size().unwrap() as usize; // 2048
 
     // Write to the first subcluster only
@@ -97,7 +96,7 @@ fn write_partial_cluster_reads_zeros_outside() {
 
 #[test]
 fn write_multiple_subclusters_separately() {
-    let mut image = create_extended_l2_image(1 * MB, 16);
+    let mut image = create_extended_l2_image(MB, 16);
     let sc_size = image.header().subcluster_size().unwrap() as usize;
 
     // Write to SC 0
@@ -132,7 +131,7 @@ fn write_multiple_subclusters_separately() {
 
 #[test]
 fn write_spanning_subcluster_boundary() {
-    let mut image = create_extended_l2_image(1 * MB, 16);
+    let mut image = create_extended_l2_image(MB, 16);
     let sc_size = image.header().subcluster_size().unwrap() as usize;
 
     // Write data spanning SC 2 and SC 3
@@ -148,7 +147,7 @@ fn write_spanning_subcluster_boundary() {
 
 #[test]
 fn overwrite_subcluster_in_place() {
-    let mut image = create_extended_l2_image(1 * MB, 16);
+    let mut image = create_extended_l2_image(MB, 16);
     let sc_size = image.header().subcluster_size().unwrap() as usize;
 
     // First write
@@ -193,7 +192,7 @@ fn read_spanning_two_clusters() {
 
 #[test]
 fn unallocated_cluster_reads_zeros() {
-    let image = create_extended_l2_image(1 * MB, 16);
+    let image = create_extended_l2_image(MB, 16);
     let mut buf = vec![0xFF; 4096];
     // Use a const binding for the image
     let mut image = image;
@@ -205,7 +204,7 @@ fn unallocated_cluster_reads_zeros() {
 
 #[test]
 fn write_entire_cluster_verify_all_subclusters() {
-    let mut image = create_extended_l2_image(1 * MB, 16);
+    let mut image = create_extended_l2_image(MB, 16);
     let cluster_size = image.cluster_size() as usize;
     let sc_size = image.header().subcluster_size().unwrap() as usize;
 
@@ -229,7 +228,7 @@ fn write_entire_cluster_verify_all_subclusters() {
 
 #[test]
 fn snapshot_cow_preserves_subclusters() {
-    let mut image = create_extended_l2_image(1 * MB, 16);
+    let mut image = create_extended_l2_image(MB, 16);
     let sc_size = image.header().subcluster_size().unwrap() as usize;
 
     // Write to SC 0 and SC 10
@@ -290,7 +289,7 @@ mod qemu_interop {
         let mut image = Qcow2Image::create(
             &path,
             CreateOptions {
-                virtual_size: 1 * MB,
+                virtual_size: MB,
                 cluster_bits: Some(16),
                 extended_l2: true, compression_type: None,
             data_file: None, encryption: None,
@@ -331,7 +330,7 @@ mod qemu_interop {
         let mut image = Qcow2Image::create(
             &path,
             CreateOptions {
-                virtual_size: 1 * MB,
+                virtual_size: MB,
                 cluster_bits: Some(16),
                 extended_l2: true, compression_type: None,
             data_file: None, encryption: None,
@@ -426,7 +425,7 @@ mod qemu_interop {
         let mut image = Qcow2Image::create(
             &path,
             CreateOptions {
-                virtual_size: 1 * MB,
+                virtual_size: MB,
                 cluster_bits: Some(16),
                 extended_l2: true, compression_type: None,
             data_file: None, encryption: None,
