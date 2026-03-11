@@ -577,7 +577,7 @@ mod tests {
         .unwrap();
 
         // First 4 clusters should have refcount 1
-        let refcount_manager = image.refcount_manager.as_ref().unwrap();
+        let refcount_manager = image.meta.refcount_manager.as_ref().unwrap();
         let cache = &mut MetadataCache::new(CacheConfig::default());
         let cluster_size = image.cluster_size();
         for i in 0..4 {

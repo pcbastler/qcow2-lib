@@ -32,14 +32,14 @@ impl Qcow2Image {
             backing.resize(self.virtual_size())?;
         }
 
-        let cluster_size = self.header.cluster_size();
-        let l1_len = self.mapper.l1_table().len();
-        let l2_entries_per_table = self.header.l2_entries_per_table();
+        let cluster_size = self.meta.header.cluster_size();
+        let l1_len = self.meta.mapper.l1_table().len();
+        let l2_entries_per_table = self.meta.header.l2_entries_per_table();
 
         // Walk L1 → L2 → entries, copy allocated data to backing
         for l1_idx in 0..l1_len {
             let l1_entry = self
-                .mapper
+                .meta.mapper
                 .l1_table()
                 .get(crate::format::types::L1Index(l1_idx))?;
             let l2_offset = match l1_entry.l2_table_offset() {
@@ -51,7 +51,7 @@ impl Qcow2Image {
             let l2_table = {
                 let mut buf = vec![0u8; cluster_size as usize];
                 self.backend.read_exact_at(&mut buf, l2_offset.0)?;
-                crate::format::l2::L2Table::read_from(&buf, self.header.geometry())?
+                crate::format::l2::L2Table::read_from(&buf, self.meta.header.geometry())?
             };
 
             for l2_idx in 0..l2_entries_per_table {
@@ -88,7 +88,7 @@ impl Qcow2Image {
                             &compressed,
                             cluster_size as usize,
                             guest_offset,
-                            self.header.compression_type,
+                            self.meta.header.compression_type,
                         )?;
                         backing.write_at(&decompressed, guest_offset)?;
                     }
@@ -109,29 +109,29 @@ impl Qcow2Image {
     ///
     /// Pass `None` to remove the backing file reference entirely.
     pub fn rebase_unsafe(&mut self, new_backing: Option<&Path>) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
-        let cluster_size = self.header.cluster_size();
+        let cluster_size = self.meta.header.cluster_size();
 
         match new_backing {
             None => {
                 // Remove backing file reference
                 // Zero out old name on disk
-                if self.header.has_backing_file() {
-                    let old_offset = self.header.backing_file_offset;
-                    let old_size = self.header.backing_file_size as usize;
+                if self.meta.header.has_backing_file() {
+                    let old_offset = self.meta.header.backing_file_offset;
+                    let old_size = self.meta.header.backing_file_size as usize;
                     let zeros = vec![0u8; old_size];
                     self.backend.write_all_at(&zeros, old_offset)?;
                 }
 
-                self.header.backing_file_offset = 0;
-                self.header.backing_file_size = 0;
+                self.meta.header.backing_file_offset = 0;
+                self.meta.header.backing_file_size = 0;
 
                 // Rewrite header
-                let mut header_buf = vec![0u8; self.header.serialized_length()];
-                self.header.write_to(&mut header_buf)?;
+                let mut header_buf = vec![0u8; self.meta.header.serialized_length()];
+                self.meta.header.write_to(&mut header_buf)?;
                 self.backend.write_all_at(&header_buf, 0)?;
                 self.backend.flush()?;
 
@@ -160,9 +160,9 @@ impl Qcow2Image {
                 }
 
                 // Zero out old name if present
-                if self.header.has_backing_file() {
-                    let old_offset = self.header.backing_file_offset;
-                    let old_size = self.header.backing_file_size as usize;
+                if self.meta.header.has_backing_file() {
+                    let old_offset = self.meta.header.backing_file_offset;
+                    let old_size = self.meta.header.backing_file_size as usize;
                     let zeros = vec![0u8; old_size];
                     self.backend.write_all_at(&zeros, old_offset)?;
                 }
@@ -172,12 +172,12 @@ impl Qcow2Image {
                     .write_all_at(name_bytes, backing_file_offset)?;
 
                 // Update header
-                self.header.backing_file_offset = backing_file_offset;
-                self.header.backing_file_size = name_bytes.len() as u32;
+                self.meta.header.backing_file_offset = backing_file_offset;
+                self.meta.header.backing_file_size = name_bytes.len() as u32;
 
                 // Rewrite header
-                let mut header_buf = vec![0u8; self.header.serialized_length()];
-                self.header.write_to(&mut header_buf)?;
+                let mut header_buf = vec![0u8; self.meta.header.serialized_length()];
+                self.meta.header.write_to(&mut header_buf)?;
                 self.backend.write_all_at(&header_buf, 0)?;
                 self.backend.flush()?;
 

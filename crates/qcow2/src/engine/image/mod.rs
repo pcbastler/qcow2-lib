@@ -27,6 +27,7 @@ use crate::engine::cache::{CacheConfig, CacheMode, CacheStats, MetadataCache};
 use crate::engine::cluster_mapping::ClusterMapper;
 use crate::engine::compression;
 use crate::engine::hash_manager;
+use crate::engine::image_meta::ImageMeta;
 use crate::engine::read_mode::{ReadMode, ReadWarning};
 use crate::engine::reader::Qcow2Reader;
 use crate::engine::refcount_manager::RefcountManager;
@@ -56,26 +57,13 @@ use crate::io::IoBackend;
 /// image.read_at(&mut buf, 0).unwrap();
 /// ```
 pub struct Qcow2Image {
-    header: Header,
-    extensions: Vec<HeaderExtension>,
+    /// All mutable metadata state (shared with Qcow2ImageAsync via Mutex).
+    meta: ImageMeta,
     backend: Box<dyn IoBackend>,
     /// Separate I/O backend for guest data when using an external data file.
     data_backend: Option<Box<dyn IoBackend>>,
-    mapper: ClusterMapper,
-    cache: MetadataCache,
     backing_chain: Option<BackingChain>,
     backing_image: Option<Box<Qcow2Image>>,
-    read_mode: ReadMode,
-    warnings: Vec<ReadWarning>,
-    refcount_manager: Option<RefcountManager>,
-    writable: bool,
-    dirty: bool,
-    /// Byte offset for packing compressed clusters into shared host clusters.
-    compressed_cursor: u64,
-    /// Cached flag: true if any bitmap has the AUTO flag set.
-    has_auto_bitmaps: bool,
-    /// Cached flag: true if a BLAKE3 hash extension exists.
-    has_hashes: bool,
     /// Encryption context (set when image has crypt_method=2 and password provided).
     crypt_context: Option<crate::engine::encryption::CryptContext>,
     /// Compression backend for deflate/zstd.
@@ -84,7 +72,7 @@ pub struct Qcow2Image {
 
 impl crate::io::BackingImage for Qcow2Image {
     fn virtual_size(&self) -> u64 {
-        self.header.virtual_size
+        self.meta.header.virtual_size
     }
 
     fn read_at(&mut self, buf: &mut [u8], guest_offset: u64) -> crate::error::Result<()> {
@@ -148,22 +136,24 @@ impl Qcow2Image {
         crypt_context: Option<crate::engine::encryption::CryptContext>,
     ) -> Self {
         Self {
-            header,
-            extensions,
+            meta: ImageMeta {
+                header,
+                extensions,
+                mapper,
+                cache: MetadataCache::new(CacheConfig::default()),
+                refcount_manager,
+                writable,
+                dirty: false,
+                compressed_cursor: 0,
+                has_auto_bitmaps,
+                has_hashes,
+                read_mode,
+                warnings,
+            },
             backend,
             data_backend,
-            mapper,
-            cache: MetadataCache::new(CacheConfig::default()),
             backing_chain,
             backing_image,
-            read_mode,
-            warnings,
-            refcount_manager,
-            writable,
-            dirty: false,
-            compressed_cursor: 0,
-            has_auto_bitmaps,
-            has_hashes,
             crypt_context,
             compressor: compression::StdCompressor,
         }
@@ -237,10 +227,10 @@ impl Qcow2Image {
 
         let refcount_manager = RefcountManager::load(
             image.backend.as_ref(),
-            &image.header,
+            &image.meta.header,
         )?;
-        image.refcount_manager = Some(refcount_manager);
-        image.writable = true;
+        image.meta.refcount_manager = Some(refcount_manager);
+        image.meta.writable = true;
         Ok(image)
     }
 
@@ -467,15 +457,15 @@ impl Qcow2Image {
         }
 
         let mut reader = Qcow2Reader::new(
-            &self.mapper,
+            &self.meta.mapper,
             self.backend.as_ref(),
             self.backend.as_ref(),
-            &mut self.cache,
-            self.header.cluster_bits,
-            self.header.virtual_size,
-            self.header.compression_type,
-            self.read_mode,
-            &mut self.warnings,
+            &mut self.meta.cache,
+            self.meta.header.cluster_bits,
+            self.meta.header.virtual_size,
+            self.meta.header.compression_type,
+            self.meta.read_mode,
+            &mut self.meta.warnings,
             self.backing_image.as_deref_mut().map(|b| b as &mut dyn crate::io::BackingImage),
             self.crypt_context.as_ref(),
             &self.compressor,
@@ -485,27 +475,27 @@ impl Qcow2Image {
 
     /// The parsed image header.
     pub fn header(&self) -> &Header {
-        &self.header
+        &self.meta.header
     }
 
     /// The header extensions found in the image.
     pub fn extensions(&self) -> &[HeaderExtension] {
-        &self.extensions
+        &self.meta.extensions
     }
 
     /// The virtual disk size in bytes.
     pub fn virtual_size(&self) -> u64 {
-        self.header.virtual_size
+        self.meta.header.virtual_size
     }
 
     /// The cluster size in bytes.
     pub fn cluster_size(&self) -> u64 {
-        self.header.cluster_size()
+        self.meta.header.cluster_size()
     }
 
     /// The cluster_bits value from the header.
     pub fn cluster_bits(&self) -> u32 {
-        self.header.cluster_bits
+        self.meta.header.cluster_bits
     }
 
     /// Whether the image is encrypted (crypt_method != 0).
@@ -520,12 +510,12 @@ impl Qcow2Image {
 
     /// Current cache statistics for diagnostics.
     pub fn cache_stats(&self) -> &CacheStats {
-        self.cache.stats()
+        self.meta.cache.stats()
     }
 
     /// Current cache write mode.
     pub fn cache_mode(&self) -> CacheMode {
-        self.cache.mode()
+        self.meta.cache.mode()
     }
 
     /// Set the cache write mode.
@@ -534,14 +524,14 @@ impl Qcow2Image {
     /// flushed to disk first. Switching from WriteThrough to WriteBack is
     /// always safe (no flush needed).
     pub fn set_cache_mode(&mut self, mode: CacheMode) -> Result<()> {
-        if self.cache.mode() == mode {
+        if self.meta.cache.mode() == mode {
             return Ok(());
         }
         // Flush dirty entries before switching to WriteThrough
         if mode == CacheMode::WriteThrough {
             self.flush_dirty_metadata()?;
         }
-        self.cache.set_mode(mode);
+        self.meta.cache.set_mode(mode);
         Ok(())
     }
 
@@ -573,24 +563,24 @@ impl Qcow2Image {
 
     /// The current read mode.
     pub fn read_mode(&self) -> ReadMode {
-        self.read_mode
+        self.meta.read_mode
     }
 
     /// Change the read mode for subsequent reads.
     pub fn set_read_mode(&mut self, mode: ReadMode) {
-        self.read_mode = mode;
+        self.meta.read_mode = mode;
     }
 
     /// Warnings collected during lenient-mode reads.
     ///
     /// Empty in strict mode since errors are returned immediately.
     pub fn warnings(&self) -> &[ReadWarning] {
-        &self.warnings
+        &self.meta.warnings
     }
 
     /// Clear all collected warnings.
     pub fn clear_warnings(&mut self) {
-        self.warnings.clear();
+        self.meta.warnings.clear();
     }
 
     // ---- Write API ----
@@ -615,7 +605,7 @@ impl Qcow2Image {
         // If external data file, reopen in rw mode
         if image.has_external_data_file() {
             let data_file_name = image
-                .extensions
+                .meta.extensions
                 .iter()
                 .find_map(|e| match e {
                     HeaderExtension::ExternalDataFile(name) => Some(name.clone()),
@@ -639,10 +629,10 @@ impl Qcow2Image {
         // Load refcount manager for write support
         let refcount_manager = RefcountManager::load(
             image.backend.as_ref(),
-            &image.header,
+            &image.meta.header,
         )?;
-        image.refcount_manager = Some(refcount_manager);
-        image.writable = true;
+        image.meta.refcount_manager = Some(refcount_manager);
+        image.meta.writable = true;
 
         Ok(image)
     }
@@ -655,10 +645,10 @@ impl Qcow2Image {
 
         let refcount_manager = RefcountManager::load(
             image.backend.as_ref(),
-            &image.header,
+            &image.meta.header,
         )?;
-        image.refcount_manager = Some(refcount_manager);
-        image.writable = true;
+        image.meta.refcount_manager = Some(refcount_manager);
+        image.meta.writable = true;
 
         Ok(image)
     }
@@ -669,12 +659,12 @@ impl Qcow2Image {
     /// Sets the DIRTY flag on the first write. All metadata updates are
     /// written through to disk immediately.
     pub fn write_at(&mut self, buf: &[u8], guest_offset: u64) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
         // Set dirty flag on first write
-        if !self.dirty {
+        if !self.meta.dirty {
             self.mark_dirty()?;
         }
 
@@ -684,20 +674,20 @@ impl Qcow2Image {
             None => self.backend.as_ref(),
         };
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
         let mut writer = Qcow2Writer::new(
-            &mut self.mapper,
-            self.header.l1_table_offset,
+            &mut self.meta.mapper,
+            self.meta.header.l1_table_offset,
             self.backend.as_ref(),
             data_be,
-            &mut self.cache,
+            &mut self.meta.cache,
             refcount_manager,
-            self.header.cluster_bits,
-            self.header.virtual_size,
-            self.header.compression_type,
+            self.meta.header.cluster_bits,
+            self.meta.header.virtual_size,
+            self.meta.header.compression_type,
             raw_external,
             self.backing_image.as_deref_mut().map(|b| b as &mut dyn crate::io::BackingImage),
             self.crypt_context.as_ref(),
@@ -706,12 +696,12 @@ impl Qcow2Image {
         writer.write_at(buf, guest_offset)?;
 
         // Auto-track dirty bitmaps
-        if self.has_auto_bitmaps {
+        if self.meta.has_auto_bitmaps {
             self.track_bitmap_write(guest_offset, buf.len() as u64)?;
         }
 
         // Update per-cluster hashes
-        if self.has_hashes {
+        if self.meta.has_hashes {
             self.update_hashes_for_write(guest_offset, buf.len() as u64)?;
         }
 
@@ -724,7 +714,7 @@ impl Qcow2Image {
     /// leaked space is recoverable, dangling L2 refs are not), then L2 tables,
     /// then issues an fsync, and finally clears the DIRTY header bit.
     pub fn flush(&mut self) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
@@ -732,7 +722,7 @@ impl Qcow2Image {
 
         self.backend.flush()?;
 
-        if self.dirty {
+        if self.meta.dirty {
             self.clear_dirty()?;
         }
 
@@ -743,19 +733,19 @@ impl Qcow2Image {
     fn flush_dirty_metadata(&mut self) -> Result<()> {
         qcow2_core::engine::metadata_io::flush_dirty_metadata(
             self.backend.as_ref(),
-            &mut self.cache,
-            self.header.cluster_bits,
+            &mut self.meta.cache,
+            self.meta.header.cluster_bits,
         )
     }
 
     /// Whether the image is opened for writing.
     pub fn is_writable(&self) -> bool {
-        self.writable
+        self.meta.writable
     }
 
     /// Whether the DIRTY flag is currently set.
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.meta.dirty
     }
 
     /// Set the DIRTY incompatible feature flag in the on-disk header.
@@ -763,35 +753,35 @@ impl Qcow2Image {
     /// Also clears the BITMAPS autoclear bit if bitmaps exist, since
     /// bitmaps may be inconsistent while the image is dirty.
     fn mark_dirty(&mut self) -> Result<()> {
-        self.header.incompatible_features |= IncompatibleFeatures::DIRTY;
+        self.meta.header.incompatible_features |= IncompatibleFeatures::DIRTY;
 
         // Clear autoclear bits while image is dirty
-        if self.has_auto_bitmaps
+        if self.meta.has_auto_bitmaps
             && self
-                .header
+                .meta.header
                 .autoclear_features
                 .contains(AutoclearFeatures::BITMAPS)
         {
-            self.header.autoclear_features -= AutoclearFeatures::BITMAPS;
+            self.meta.header.autoclear_features -= AutoclearFeatures::BITMAPS;
         }
-        if self.has_hashes
+        if self.meta.has_hashes
             && self
-                .header
+                .meta.header
                 .autoclear_features
                 .contains(AutoclearFeatures::BLAKE3_HASHES)
         {
-            self.header.autoclear_features -= AutoclearFeatures::BLAKE3_HASHES;
+            self.meta.header.autoclear_features -= AutoclearFeatures::BLAKE3_HASHES;
         }
 
         // Single batched I/O for both feature fields
         qcow2_core::engine::metadata_io::write_dirty_header_fields(
             self.backend.as_ref(),
-            self.header.incompatible_features,
-            self.header.autoclear_features,
+            self.meta.header.incompatible_features,
+            self.meta.header.autoclear_features,
         )?;
 
         self.backend.flush()?;
-        self.dirty = true;
+        self.meta.dirty = true;
         Ok(())
     }
 
@@ -799,35 +789,35 @@ impl Qcow2Image {
     ///
     /// Restores the BITMAPS autoclear bit if bitmaps exist.
     fn clear_dirty(&mut self) -> Result<()> {
-        self.header.incompatible_features -= IncompatibleFeatures::DIRTY;
+        self.meta.header.incompatible_features -= IncompatibleFeatures::DIRTY;
 
         // Restore autoclear bits on clean close
-        if self.has_auto_bitmaps
+        if self.meta.has_auto_bitmaps
             && !self
-                .header
+                .meta.header
                 .autoclear_features
                 .contains(AutoclearFeatures::BITMAPS)
         {
-            self.header.autoclear_features |= AutoclearFeatures::BITMAPS;
+            self.meta.header.autoclear_features |= AutoclearFeatures::BITMAPS;
         }
-        if self.has_hashes
+        if self.meta.has_hashes
             && !self
-                .header
+                .meta.header
                 .autoclear_features
                 .contains(AutoclearFeatures::BLAKE3_HASHES)
         {
-            self.header.autoclear_features |= AutoclearFeatures::BLAKE3_HASHES;
+            self.meta.header.autoclear_features |= AutoclearFeatures::BLAKE3_HASHES;
         }
 
         // Single batched I/O for both feature fields
         qcow2_core::engine::metadata_io::write_dirty_header_fields(
             self.backend.as_ref(),
-            self.header.incompatible_features,
-            self.header.autoclear_features,
+            self.meta.header.incompatible_features,
+            self.meta.header.autoclear_features,
         )?;
 
         self.backend.flush()?;
-        self.dirty = false;
+        self.meta.dirty = false;
         Ok(())
     }
 
@@ -848,12 +838,12 @@ impl Qcow2Image {
         data: &[u8],
         guest_offset: u64,
     ) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
         let cluster_size = self.cluster_size() as usize;
-        match compression::compress_cluster(data, cluster_size, self.header.compression_type)? {
+        match compression::compress_cluster(data, cluster_size, self.meta.header.compression_type)? {
             Some(compressed) => self.write_compressed_at(&compressed, guest_offset),
             None => self.write_at(data, guest_offset),
         }
@@ -865,7 +855,7 @@ impl Qcow2Image {
         compressed_data: &[u8],
         guest_offset: u64,
     ) -> Result<()> {
-        if !self.dirty {
+        if !self.meta.dirty {
             self.mark_dirty()?;
         }
 
@@ -877,28 +867,28 @@ impl Qcow2Image {
         }
 
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
         let mut writer = Qcow2Writer::new(
-            &mut self.mapper,
-            self.header.l1_table_offset,
+            &mut self.meta.mapper,
+            self.meta.header.l1_table_offset,
             self.backend.as_ref(),
             self.backend.as_ref(),
-            &mut self.cache,
+            &mut self.meta.cache,
             refcount_manager,
-            self.header.cluster_bits,
-            self.header.virtual_size,
-            self.header.compression_type,
+            self.meta.header.cluster_bits,
+            self.meta.header.virtual_size,
+            self.meta.header.compression_type,
             false,
             self.backing_image.as_deref_mut().map(|b| b as &mut dyn crate::io::BackingImage),
             self.crypt_context.as_ref(),
             &self.compressor,
         );
-        writer.set_compressed_cursor(self.compressed_cursor);
+        writer.set_compressed_cursor(self.meta.compressed_cursor);
         let result = writer.write_compressed_at(compressed_data, guest_offset);
-        self.compressed_cursor = writer.compressed_cursor();
+        self.meta.compressed_cursor = writer.compressed_cursor();
         result
     }
 
@@ -913,12 +903,12 @@ impl Qcow2Image {
         &mut self,
     ) -> Result<crate::engine::integrity::IntegrityReport> {
         // Flush dirty metadata so the check sees current on-disk state
-        if self.writable {
+        if self.meta.writable {
             self.flush_dirty_metadata()?;
         }
         crate::engine::integrity::check_integrity(
             self.backend.as_ref(),
-            &self.header,
+            &self.meta.header,
         )
     }
 
@@ -934,20 +924,20 @@ impl Qcow2Image {
         self.flush_dirty_metadata()?;
         let report = crate::engine::integrity::check_integrity(
             self.backend.as_ref(),
-            &self.header,
+            &self.meta.header,
         )?;
 
         if let Some(repair_mode) = mode {
             if !report.is_clean() {
                 let refcount_manager = self
-                    .refcount_manager
+                    .meta.refcount_manager
                     .as_mut()
                     .ok_or(Error::ReadOnly)?;
                 crate::engine::integrity::repair_refcounts(
                     self.backend.as_ref(),
-                    &self.header,
+                    &self.meta.header,
                     refcount_manager,
-                    &mut self.cache,
+                    &mut self.meta.cache,
                     repair_mode,
                 )?;
                 self.backend.flush()?;
@@ -996,9 +986,61 @@ impl Qcow2Image {
     }
 }
 
+impl Qcow2Image {
+    /// Decompose into constituent parts for `Qcow2ImageAsync` conversion.
+    #[allow(clippy::type_complexity)]
+    pub fn into_parts(
+        self,
+    ) -> (
+        ImageMeta,
+        Box<dyn IoBackend>,
+        Option<Box<dyn IoBackend>>,
+        Option<BackingChain>,
+        Option<Box<Qcow2Image>>,
+        Option<crate::engine::encryption::CryptContext>,
+        compression::StdCompressor,
+    ) {
+        // Prevent Drop from running (which would flush)
+        let me = std::mem::ManuallyDrop::new(self);
+
+        // Safety: we take ownership of each field exactly once and never use `me` again.
+        unsafe {
+            let meta = std::ptr::read(&me.meta);
+            let backend = std::ptr::read(&me.backend);
+            let data_backend = std::ptr::read(&me.data_backend);
+            let backing_chain = std::ptr::read(&me.backing_chain);
+            let backing_image = std::ptr::read(&me.backing_image);
+            let crypt_context = std::ptr::read(&me.crypt_context);
+            let compressor = std::ptr::read(&me.compressor);
+            (meta, backend, data_backend, backing_chain, backing_image, crypt_context, compressor)
+        }
+    }
+
+    /// Reconstruct from constituent parts (inverse of `into_parts`).
+    pub fn from_parts(
+        meta: ImageMeta,
+        backend: Box<dyn IoBackend>,
+        data_backend: Option<Box<dyn IoBackend>>,
+        backing_chain: Option<BackingChain>,
+        backing_image: Option<Box<Qcow2Image>>,
+        crypt_context: Option<crate::engine::encryption::CryptContext>,
+        compressor: compression::StdCompressor,
+    ) -> Self {
+        Self {
+            meta,
+            backend,
+            data_backend,
+            backing_chain,
+            backing_image,
+            crypt_context,
+            compressor,
+        }
+    }
+}
+
 impl Drop for Qcow2Image {
     fn drop(&mut self) {
-        if self.writable {
+        if self.meta.writable {
             // Best-effort flush of dirty metadata on drop.
             // Errors are silently ignored since Drop cannot return errors.
             let _ = self.flush_dirty_metadata();

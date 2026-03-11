@@ -14,7 +14,7 @@ impl Qcow2Image {
     /// If the new size requires more L1 table entries than currently allocated,
     /// the L1 table is grown in-place or relocated to a new cluster range.
     pub fn resize(&mut self, new_virtual_size: u64) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
@@ -28,7 +28,7 @@ impl Qcow2Image {
             });
         }
 
-        let old_virtual_size = self.header.virtual_size;
+        let old_virtual_size = self.meta.header.virtual_size;
 
         // No-op if same size
         if new_virtual_size == old_virtual_size {
@@ -40,7 +40,7 @@ impl Qcow2Image {
         let bytes_per_l1_entry = l2_entries * cluster_size;
         let new_l1_entries =
             ((new_virtual_size + bytes_per_l1_entry - 1) / bytes_per_l1_entry) as u32;
-        let old_l1_entries = self.header.l1_table_entries;
+        let old_l1_entries = self.meta.header.l1_table_entries;
 
         if new_virtual_size < old_virtual_size {
             // Shrink
@@ -53,7 +53,7 @@ impl Qcow2Image {
         self.flush_dirty_metadata()?;
 
         // Update header
-        self.header.virtual_size = new_virtual_size;
+        self.meta.header.virtual_size = new_virtual_size;
         self.write_header_resize_fields()?;
         self.backend.flush()?;
 
@@ -74,7 +74,7 @@ impl Qcow2Image {
         let new_l1_clusters = (new_l1_bytes + cluster_size_usize - 1) / cluster_size_usize;
 
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
@@ -84,16 +84,16 @@ impl Qcow2Image {
             // Read old L1 data
             let mut old_l1_data = vec![0u8; old_l1_clusters * cluster_size_usize];
             self.backend
-                .read_exact_at(&mut old_l1_data, self.header.l1_table_offset.0)?;
+                .read_exact_at(&mut old_l1_data, self.meta.header.l1_table_offset.0)?;
 
             // Allocate contiguous clusters for the new L1 table
             let new_l1_offset = refcount_manager.allocate_contiguous_clusters(
                 new_l1_clusters as u64,
                 self.backend.as_ref(),
-                &mut self.cache,
+                &mut self.meta.cache,
             )?;
             let file_size = self.backend.file_size()?;
-            self.mapper.set_file_size(file_size);
+            self.meta.mapper.set_file_size(file_size);
 
             // Write old data to new location, zero-padded
             let mut new_l1_data = vec![0u8; new_l1_clusters * cluster_size_usize];
@@ -101,33 +101,33 @@ impl Qcow2Image {
             self.backend.write_all_at(&new_l1_data, new_l1_offset.0)?;
 
             // Free old L1 clusters
-            let old_l1_offset = self.header.l1_table_offset;
+            let old_l1_offset = self.meta.header.l1_table_offset;
             for i in 0..old_l1_clusters {
                 let cluster_off = ClusterOffset(old_l1_offset.0 + (i as u64 * cluster_size));
                 refcount_manager.decrement_refcount(
                     cluster_off.0,
                     self.backend.as_ref(),
-                    &mut self.cache,
+                    &mut self.meta.cache,
                 )?;
             }
 
             // Update header and mapper
-            self.header.l1_table_offset = new_l1_offset;
-            self.header.l1_table_entries = new_l1_entries;
+            self.meta.header.l1_table_offset = new_l1_offset;
+            self.meta.header.l1_table_entries = new_l1_entries;
 
             // Rebuild L1 table from new data
             let new_table = L1Table::read_from(&new_l1_data, new_l1_entries)?;
-            self.mapper.replace_l1_table(new_table);
+            self.meta.mapper.replace_l1_table(new_table);
         } else {
             // In-place grow: just extend with zero entries at the end
             let zero_entries = new_l1_entries - old_l1_entries;
             let zero_bytes = vec![0u8; zero_entries as usize * 8];
             let write_offset =
-                self.header.l1_table_offset.0 + old_l1_entries as u64 * 8;
+                self.meta.header.l1_table_offset.0 + old_l1_entries as u64 * 8;
             self.backend.write_all_at(&zero_bytes, write_offset)?;
 
-            self.header.l1_table_entries = new_l1_entries;
-            self.mapper.l1_table_mut().grow(new_l1_entries);
+            self.meta.header.l1_table_entries = new_l1_entries;
+            self.meta.mapper.l1_table_mut().grow(new_l1_entries);
         }
 
         Ok(())
@@ -146,15 +146,15 @@ impl Qcow2Image {
         let cluster_size = self.cluster_size();
 
         // Refuse if snapshots exist — shrinking with snapshots is unsafe
-        if self.header.snapshot_count > 0 {
+        if self.meta.header.snapshot_count > 0 {
             return Err(Error::ShrinkNotSupported {
-                current: self.header.virtual_size,
+                current: self.meta.header.virtual_size,
                 requested: new_virtual_size,
             });
         }
 
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
@@ -172,7 +172,7 @@ impl Qcow2Image {
 
         for l1_idx in first_l1_to_check..old_l1_entries {
             let l1_entry = self
-                .mapper
+                .meta.mapper
                 .l1_entry(crate::format::types::L1Index(l1_idx))?;
             let l2_offset = match l1_entry.l2_table_offset() {
                 Some(o) => o,
@@ -183,7 +183,7 @@ impl Qcow2Image {
             let mut l2_buf = vec![0u8; cluster_size as usize];
             self.backend.read_exact_at(&mut l2_buf, l2_offset.0)?;
             let l2_table =
-                crate::format::l2::L2Table::read_from(&l2_buf, self.header.geometry())?;
+                crate::format::l2::L2Table::read_from(&l2_buf, self.meta.header.geometry())?;
 
             // Check entries that correspond to guest offsets >= new_virtual_size
             let l1_guest_base = l1_idx as u64 * entries_per_l2 * cluster_size;
@@ -223,25 +223,25 @@ impl Qcow2Image {
                 refcount_manager.decrement_refcount(
                     l2_offset.0,
                     self.backend.as_ref(),
-                    &mut self.cache,
+                    &mut self.meta.cache,
                 )?;
 
                 // Null the L1 entry on disk
                 let l1_disk_offset =
-                    self.header.l1_table_offset.0 + l1_idx as u64 * 8;
+                    self.meta.header.l1_table_offset.0 + l1_idx as u64 * 8;
                 self.backend.write_all_at(&[0u8; 8], l1_disk_offset)?;
             }
         }
 
         // Shrink the in-memory L1 table
-        self.mapper.l1_table_mut().shrink(new_l1_entries);
-        self.header.l1_table_entries = new_l1_entries;
+        self.meta.mapper.l1_table_mut().shrink(new_l1_entries);
+        self.meta.header.l1_table_entries = new_l1_entries;
 
         // Flush dirty refcount blocks from shrink operations, then
         // invalidate cache — L2 tables and refcount blocks may reference
         // clusters that no longer exist after shrink.
         self.flush_dirty_metadata()?;
-        self.cache.clear();
+        self.meta.cache.clear();
 
         Ok(())
     }
@@ -252,7 +252,7 @@ impl Qcow2Image {
     /// then truncates the file to free unused space at the end. Returns
     /// the number of bytes saved.
     pub fn truncate_free_tail(&mut self) -> Result<u64> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
@@ -265,7 +265,7 @@ impl Qcow2Image {
         }
 
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_ref()
             .expect("writable image must have refcount_manager");
 
@@ -275,7 +275,7 @@ impl Qcow2Image {
             let rc = refcount_manager.get_refcount(
                 cluster_idx * cluster_size,
                 self.backend.as_ref(),
-                &mut self.cache,
+                &mut self.meta.cache,
             )?;
             if rc > 0 {
                 last_used = cluster_idx;
@@ -292,12 +292,12 @@ impl Qcow2Image {
         self.backend.set_len(new_file_size)?;
 
         // Update mapper's file size
-        self.mapper.set_file_size(new_file_size);
+        self.meta.mapper.set_file_size(new_file_size);
 
         // Flush dirty entries, then invalidate cache — refcount blocks may
         // reference truncated regions.
         self.flush_dirty_metadata()?;
-        self.cache.clear();
+        self.meta.cache.clear();
 
         Ok(saved)
     }
@@ -306,16 +306,16 @@ impl Qcow2Image {
     fn write_header_resize_fields(&self) -> Result<()> {
         // virtual_size at offset 24
         let mut buf8 = [0u8; 8];
-        BigEndian::write_u64(&mut buf8, self.header.virtual_size);
+        BigEndian::write_u64(&mut buf8, self.meta.header.virtual_size);
         self.backend.write_all_at(&buf8, 24)?;
 
         // l1_table_entries at offset 36
         let mut buf4 = [0u8; 4];
-        BigEndian::write_u32(&mut buf4, self.header.l1_table_entries);
+        BigEndian::write_u32(&mut buf4, self.meta.header.l1_table_entries);
         self.backend.write_all_at(&buf4, 36)?;
 
         // l1_table_offset at offset 40
-        BigEndian::write_u64(&mut buf8, self.header.l1_table_offset.0);
+        BigEndian::write_u64(&mut buf8, self.meta.header.l1_table_offset.0);
         self.backend.write_all_at(&buf8, 40)?;
 
         Ok(())

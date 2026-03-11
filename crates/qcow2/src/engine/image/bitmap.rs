@@ -10,7 +10,7 @@ use super::Qcow2Image;
 impl Qcow2Image {
     /// List all persistent bitmaps in the image.
     pub fn bitmap_list(&self) -> Result<Vec<BitmapInfo>> {
-        let ext = match self.extensions.iter().find_map(|e| match e {
+        let ext = match self.meta.extensions.iter().find_map(|e| match e {
             HeaderExtension::Bitmaps(b) => Some(b),
             _ => None,
         }) {
@@ -51,25 +51,25 @@ impl Qcow2Image {
         granularity_bits: Option<u8>,
         auto: bool,
     ) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
         let granularity = granularity_bits.unwrap_or(BITMAP_DEFAULT_GRANULARITY_BITS);
 
-        let cluster_bits = self.header.cluster_bits;
-        let virtual_size = self.header.virtual_size;
+        let cluster_bits = self.meta.header.cluster_bits;
+        let virtual_size = self.meta.header.virtual_size;
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
-            &mut self.cache,
+            &mut self.meta.cache,
             refcount_manager,
-            &mut self.header,
-            &mut self.extensions,
+            &mut self.meta.header,
+            &mut self.meta.extensions,
             cluster_bits,
             virtual_size,
         );
@@ -77,58 +77,58 @@ impl Qcow2Image {
 
         // Update cached auto-bitmap flag
         if auto {
-            self.has_auto_bitmaps = true;
+            self.meta.has_auto_bitmaps = true;
         }
         Ok(())
     }
 
     /// Delete a persistent bitmap by name.
     pub fn bitmap_delete(&mut self, name: &str) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
-        let cluster_bits = self.header.cluster_bits;
-        let virtual_size = self.header.virtual_size;
+        let cluster_bits = self.meta.header.cluster_bits;
+        let virtual_size = self.meta.header.virtual_size;
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
-            &mut self.cache,
+            &mut self.meta.cache,
             refcount_manager,
-            &mut self.header,
-            &mut self.extensions,
+            &mut self.meta.header,
+            &mut self.meta.extensions,
             cluster_bits,
             virtual_size,
         );
         mgr.delete_bitmap(name)?;
 
         // Re-check auto-bitmap flag
-        self.has_auto_bitmaps = Self::detect_auto_bitmaps(
+        self.meta.has_auto_bitmaps = Self::detect_auto_bitmaps(
             self.backend.as_ref(),
-            &self.extensions,
+            &self.meta.extensions,
         );
         Ok(())
     }
 
     /// Query whether a specific guest offset is dirty in a bitmap.
     pub fn bitmap_get_dirty(&mut self, name: &str, guest_offset: u64) -> Result<bool> {
-        let cluster_bits = self.header.cluster_bits;
-        let virtual_size = self.header.virtual_size;
+        let cluster_bits = self.meta.header.cluster_bits;
+        let virtual_size = self.meta.header.virtual_size;
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
-            &mut self.cache,
+            &mut self.meta.cache,
             refcount_manager,
-            &mut self.header,
-            &mut self.extensions,
+            &mut self.meta.header,
+            &mut self.meta.extensions,
             cluster_bits,
             virtual_size,
         );
@@ -142,23 +142,23 @@ impl Qcow2Image {
         guest_offset: u64,
         len: u64,
     ) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
-        let cluster_bits = self.header.cluster_bits;
-        let virtual_size = self.header.virtual_size;
+        let cluster_bits = self.meta.header.cluster_bits;
+        let virtual_size = self.meta.header.virtual_size;
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
-            &mut self.cache,
+            &mut self.meta.cache,
             refcount_manager,
-            &mut self.header,
-            &mut self.extensions,
+            &mut self.meta.header,
+            &mut self.meta.extensions,
             cluster_bits,
             virtual_size,
         );
@@ -167,23 +167,23 @@ impl Qcow2Image {
 
     /// Clear all dirty bits in a bitmap (reset to all-zeros).
     pub fn bitmap_clear(&mut self, name: &str) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
-        let cluster_bits = self.header.cluster_bits;
-        let virtual_size = self.header.virtual_size;
+        let cluster_bits = self.meta.header.cluster_bits;
+        let virtual_size = self.meta.header.virtual_size;
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
-            &mut self.cache,
+            &mut self.meta.cache,
             refcount_manager,
-            &mut self.header,
-            &mut self.extensions,
+            &mut self.meta.header,
+            &mut self.meta.extensions,
             cluster_bits,
             virtual_size,
         );
@@ -192,28 +192,28 @@ impl Qcow2Image {
 
     /// Enable auto-tracking (set the AUTO flag) on a bitmap.
     pub fn bitmap_enable_tracking(&mut self, name: &str) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
-        let cluster_bits = self.header.cluster_bits;
-        let virtual_size = self.header.virtual_size;
+        let cluster_bits = self.meta.header.cluster_bits;
+        let virtual_size = self.meta.header.virtual_size;
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
-            &mut self.cache,
+            &mut self.meta.cache,
             refcount_manager,
-            &mut self.header,
-            &mut self.extensions,
+            &mut self.meta.header,
+            &mut self.meta.extensions,
             cluster_bits,
             virtual_size,
         );
         mgr.enable_tracking(name)?;
-        self.has_auto_bitmaps = true;
+        self.meta.has_auto_bitmaps = true;
         Ok(())
     }
 
@@ -221,19 +221,19 @@ impl Qcow2Image {
     ///
     /// Called internally by `write_at()` when auto-bitmaps are active.
     pub(super) fn track_bitmap_write(&mut self, guest_offset: u64, len: u64) -> Result<()> {
-        let cluster_bits = self.header.cluster_bits;
-        let virtual_size = self.header.virtual_size;
+        let cluster_bits = self.meta.header.cluster_bits;
+        let virtual_size = self.meta.header.virtual_size;
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
-            &mut self.cache,
+            &mut self.meta.cache,
             refcount_manager,
-            &mut self.header,
-            &mut self.extensions,
+            &mut self.meta.header,
+            &mut self.meta.extensions,
             cluster_bits,
             virtual_size,
         );
@@ -242,32 +242,32 @@ impl Qcow2Image {
 
     /// Disable auto-tracking (clear the AUTO flag) on a bitmap.
     pub fn bitmap_disable_tracking(&mut self, name: &str) -> Result<()> {
-        if !self.writable {
+        if !self.meta.writable {
             return Err(Error::ReadOnly);
         }
 
-        let cluster_bits = self.header.cluster_bits;
-        let virtual_size = self.header.virtual_size;
+        let cluster_bits = self.meta.header.cluster_bits;
+        let virtual_size = self.meta.header.virtual_size;
         let refcount_manager = self
-            .refcount_manager
+            .meta.refcount_manager
             .as_mut()
             .expect("writable image must have refcount_manager");
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
-            &mut self.cache,
+            &mut self.meta.cache,
             refcount_manager,
-            &mut self.header,
-            &mut self.extensions,
+            &mut self.meta.header,
+            &mut self.meta.extensions,
             cluster_bits,
             virtual_size,
         );
         mgr.disable_tracking(name)?;
 
         // Re-check auto-bitmap flag
-        self.has_auto_bitmaps = Self::detect_auto_bitmaps(
+        self.meta.has_auto_bitmaps = Self::detect_auto_bitmaps(
             self.backend.as_ref(),
-            &self.extensions,
+            &self.meta.extensions,
         );
         Ok(())
     }

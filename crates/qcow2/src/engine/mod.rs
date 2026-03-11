@@ -9,7 +9,7 @@
 
 // Re-export core engine modules
 pub use qcow2_core::engine::{
-    bitmap_manager, cache, cluster_mapping, hash_manager, read_mode, reader,
+    bitmap_manager, cache, cluster_mapping, hash_manager, image_meta, read_mode, reader,
     refcount_manager, snapshot_manager, writer,
 };
 
@@ -19,6 +19,7 @@ pub mod compression;
 pub mod converter;
 pub mod encryption;
 pub mod image;
+pub mod image_async;
 pub mod integrity;
 
 // Re-exports for convenience
@@ -27,6 +28,7 @@ pub use qcow2_core::engine::{
     ReadMode, ReadWarning, SnapshotInfo,
 };
 pub use image::Qcow2Image;
+pub use image_async::Qcow2ImageAsync;
 pub use integrity::{IntegrityReport, RepairMode, RepairResult};
 
 #[cfg(test)]
