@@ -288,6 +288,98 @@ impl Qcow2ImageAsync {
         Ok(())
     }
 
+    /// Write a cluster, attempting compression first.
+    ///
+    /// Compression runs **outside** any lock (CPU-bound parallelism).
+    /// The compressed data is then written under the meta mutex with full
+    /// packing support (`compressed_cursor`), so space efficiency is preserved.
+    ///
+    /// `guest_offset` must be cluster-aligned and `data.len()` must equal
+    /// the cluster size.
+    pub fn write_cluster_maybe_compressed(
+        &self,
+        data: &[u8],
+        guest_offset: u64,
+    ) -> Result<()> {
+        let cluster_size = 1usize << self.cluster_bits;
+        let compression_type = {
+            let meta = self.meta.lock().map_err(|_| poisoned_err())?;
+            meta.header.compression_type
+        };
+
+        // Compress OUTSIDE the lock — this is the CPU-bound work that
+        // benefits from parallelism.
+        match compression::compress_cluster(data, cluster_size, compression_type)? {
+            Some(compressed) => self.write_compressed_chunk(&compressed, guest_offset),
+            None => self.write_chunk(data, guest_offset),
+        }
+    }
+
+    /// Write pre-compressed data as a compressed cluster.
+    ///
+    /// Holds the L2 write lock and meta mutex for the entire operation
+    /// (allocation + write + L2 update + cursor advance). The data written
+    /// is small (compressed), so the lock duration is brief.
+    fn write_compressed_chunk(
+        &self,
+        compressed_data: &[u8],
+        guest_offset: u64,
+    ) -> Result<()> {
+        let l1_index = self.l1_index_for(guest_offset);
+
+        // Hold L2 write lock (exclusive) for the entire write
+        let _l2_guard = if l1_index < self.l2_locks.len() {
+            Some(self.l2_locks[l1_index].write().map_err(|_| poisoned_err())?)
+        } else {
+            None
+        };
+
+        // Lock meta for the entire compressed write operation
+        let mut meta = self.meta.lock().map_err(|_| poisoned_err())?;
+
+        if !meta.writable {
+            return Err(Error::ReadOnly);
+        }
+
+        // Set dirty flag on first write
+        if !meta.dirty {
+            Self::mark_dirty_inner(&mut meta, self.backend.as_ref())?;
+        }
+
+        if self.data_backend.is_some() {
+            return Err(Error::CompressedWithExternalData);
+        }
+        if self.crypt_context.is_some() {
+            return Err(Error::EncryptionWithCompression);
+        }
+
+        let meta_ref = &mut *meta;
+        let refcount_manager = meta_ref
+            .refcount_manager
+            .as_mut()
+            .expect("writable image must have refcount_manager");
+
+        let mut writer = Qcow2Writer::new(
+            &mut meta_ref.mapper,
+            meta_ref.header.l1_table_offset,
+            self.backend.as_ref(),
+            self.backend.as_ref(),
+            &mut meta_ref.cache,
+            refcount_manager,
+            meta_ref.header.cluster_bits,
+            meta_ref.header.virtual_size,
+            meta_ref.header.compression_type,
+            false, // no external data file for compressed
+            None,  // no backing image in async mode
+            self.crypt_context.as_ref(),
+            &self.compressor,
+        );
+        writer.set_compressed_cursor(meta_ref.compressed_cursor);
+        let result = writer.write_compressed_at(compressed_data, guest_offset);
+        meta_ref.compressed_cursor = writer.compressed_cursor();
+        result
+    }
+
     /// Flush all dirty cached metadata to disk and clear the DIRTY flag.
     pub fn flush(&self) -> Result<()> {
         let mut meta = self.meta.lock().map_err(|_| poisoned_err())?;

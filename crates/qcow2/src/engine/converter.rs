@@ -160,8 +160,9 @@ pub fn convert_from_raw(
 /// using `thread::scope`. Each thread reads from the raw input (lock-free pread)
 /// and writes to the QCOW2 output via `Qcow2ImageAsync` (per-L2 locking).
 ///
-/// Compressed writes are not supported in parallel mode (they require
-/// sequential cursor tracking). Falls back to single-threaded for `compress=true`.
+/// Compressed writes are also parallelized: each thread compresses clusters
+/// independently (CPU-bound), then writes the compressed data under the meta
+/// mutex with full packing support (`compressed_cursor`).
 pub fn convert_from_raw_parallel(
     input_path: &Path,
     output_path: &Path,
@@ -171,8 +172,7 @@ pub fn convert_from_raw_parallel(
     encryption: Option<EncryptionOptions>,
     num_threads: usize,
 ) -> Result<()> {
-    // Compressed writes require sequential cursor — fall back to single-threaded
-    if compress || num_threads <= 1 {
+    if num_threads <= 1 {
         return convert_from_raw(input_path, output_path, compress, compression_type, data_file, encryption);
     }
 
@@ -227,7 +227,7 @@ pub fn convert_from_raw_parallel(
             handles.push(s.spawn(move || {
                 process_raw_range(
                     input_be.as_ref(), &dest, start_offset, end_offset,
-                    cluster_size, batch_size,
+                    cluster_size, batch_size, compress,
                 )
             }));
         }
@@ -343,7 +343,12 @@ pub fn convert_qcow2_to_qcow2(
     Ok(())
 }
 
-/// Process a range of batches: read from input, skip zeros, write non-zero runs to dest.
+/// Process a range of batches: read from input, skip zeros, write non-zero data to dest.
+///
+/// When `compress` is true, writes one cluster at a time via
+/// `write_cluster_maybe_compressed` (compression runs in the calling thread,
+/// only the small compressed write is serialized by the meta mutex).
+/// When `compress` is false, coalesces non-zero runs for larger batch writes.
 fn process_raw_range(
     input: &dyn IoBackend,
     dest: &Qcow2ImageAsync,
@@ -351,6 +356,7 @@ fn process_raw_range(
     end_offset: u64,
     cluster_size: usize,
     batch_size: usize,
+    compress: bool,
 ) -> Result<()> {
     let mut buf = vec![0u8; batch_size];
     let mut offset = start_offset;
@@ -369,18 +375,27 @@ fn process_raw_range(
                 continue;
             }
 
-            let run_start = pos;
-            pos += chunk;
-            while pos < read_size {
-                let next_chunk = cluster_size.min(read_size - pos);
-                if is_all_zeros(&buf[pos..pos + next_chunk]) {
-                    break;
+            if compress {
+                // Compressed path: one cluster at a time
+                dest.write_cluster_maybe_compressed(
+                    &buf[pos..pos + chunk],
+                    offset + pos as u64,
+                )?;
+                pos += chunk;
+            } else {
+                // Uncompressed path: coalesce non-zero runs
+                let run_start = pos;
+                pos += chunk;
+                while pos < read_size {
+                    let next_chunk = cluster_size.min(read_size - pos);
+                    if is_all_zeros(&buf[pos..pos + next_chunk]) {
+                        break;
+                    }
+                    pos += next_chunk;
                 }
-                pos += next_chunk;
+                let run_offset = offset + run_start as u64;
+                dest.write_at(&buf[run_start..pos], run_offset)?;
             }
-
-            let run_offset = offset + run_start as u64;
-            dest.write_at(&buf[run_start..pos], run_offset)?;
         }
         offset += read_size as u64;
     }
@@ -606,21 +621,64 @@ mod tests {
     }
 
     #[test]
-    fn convert_parallel_fallback_on_compress() {
+    fn convert_parallel_compressed_round_trip() {
         let dir = TempDir::new().unwrap();
         let raw_path = dir.path().join("input.raw");
 
+        // Create raw with compressible data in multiple clusters
         let mut raw_data = vec![0u8; 256 * 1024];
-        raw_data[..4096].fill(0xAA);
+        for (i, byte) in raw_data.iter_mut().enumerate() {
+            *byte = (i % 4) as u8; // highly compressible
+        }
         std::fs::write(&raw_path, &raw_data).unwrap();
 
-        let qcow2_path = dir.path().join("compressed.qcow2");
-        // compress=true should fall back to sequential
+        let qcow2_path = dir.path().join("parallel_compressed.qcow2");
         convert_from_raw_parallel(&raw_path, &qcow2_path, true, None, None, None, 4).unwrap();
 
+        // Verify data integrity
         let mut image = Qcow2Image::open(&qcow2_path).unwrap();
-        let mut buf = vec![0u8; 4096];
+        let mut buf = vec![0u8; raw_data.len()];
         image.read_at(&mut buf, 0).unwrap();
-        assert!(buf.iter().all(|&b| b == 0xAA));
+        assert_eq!(buf, raw_data);
+    }
+
+    #[test]
+    fn convert_parallel_compressed_matches_sequential() {
+        let dir = TempDir::new().unwrap();
+        let raw_path = dir.path().join("input.raw");
+
+        // Scattered compressible data across multiple clusters
+        let mut raw_data = vec![0u8; 512 * 1024];
+        for i in 0..8 {
+            let start = i * 65536;
+            for j in 0..65536 {
+                raw_data[start + j] = ((i * 7 + j) % 5) as u8;
+            }
+        }
+        std::fs::write(&raw_path, &raw_data).unwrap();
+
+        let seq_path = dir.path().join("seq_compressed.qcow2");
+        let par_path = dir.path().join("par_compressed.qcow2");
+
+        convert_from_raw(&raw_path, &seq_path, true, None, None, None).unwrap();
+        convert_from_raw_parallel(&raw_path, &par_path, true, None, None, None, 4).unwrap();
+
+        // Both must produce identical guest-visible data
+        let mut seq_img = Qcow2Image::open(&seq_path).unwrap();
+        let mut par_img = Qcow2Image::open(&par_path).unwrap();
+
+        let mut seq_buf = vec![0u8; raw_data.len()];
+        let mut par_buf = vec![0u8; raw_data.len()];
+        seq_img.read_at(&mut seq_buf, 0).unwrap();
+        par_img.read_at(&mut par_buf, 0).unwrap();
+
+        assert_eq!(seq_buf, par_buf, "parallel and sequential compressed conversions differ");
+
+        // Both should produce compressed output (smaller than uncompressed)
+        let seq_size = std::fs::metadata(&seq_path).unwrap().len();
+        let par_size = std::fs::metadata(&par_path).unwrap().len();
+        let raw_size = raw_data.len() as u64;
+        assert!(seq_size < raw_size, "sequential compressed should be smaller than raw");
+        assert!(par_size < raw_size, "parallel compressed should be smaller than raw");
     }
 }
