@@ -666,4 +666,510 @@ mod tests {
         let result = parse_cipher_mode("serpent", "cbc-plain64");
         assert!(result.is_err());
     }
+
+    // ---- LUKS1 error paths ----
+
+    #[test]
+    fn luks1_header_too_short() {
+        let mut data = vec![0u8; 100];
+        data[..6].copy_from_slice(LUKS_MAGIC);
+        BigEndian::write_u16(&mut data[6..8], 1);
+        let err = Luks1Header::parse(&data).unwrap_err();
+        assert!(err.to_string().contains("too short"));
+    }
+
+    #[test]
+    fn luks_header_data_too_short_for_magic() {
+        let data = vec![0u8; 4];
+        let err = LuksHeader::parse(&data).unwrap_err();
+        assert!(err.to_string().contains("too short"));
+    }
+
+    #[test]
+    fn luks_header_unsupported_version() {
+        let mut data = vec![0u8; LUKS1_HEADER_SIZE];
+        data[..6].copy_from_slice(LUKS_MAGIC);
+        BigEndian::write_u16(&mut data[6..8], 99);
+        let err = LuksHeader::parse(&data).unwrap_err();
+        assert!(err.to_string().contains("unsupported LUKS version"));
+    }
+
+    #[test]
+    fn luks1_multiple_active_slots() {
+        let mut header = Luks1Header {
+            cipher_name: "aes".to_string(),
+            cipher_mode_str: "xts-plain64".to_string(),
+            hash_spec: "sha256".to_string(),
+            payload_offset: 4096,
+            key_bytes: 64,
+            mk_digest: [0x42; 20],
+            mk_digest_salt: [0xAA; 32],
+            mk_digest_iter: 100000,
+            uuid: "uuid-test".to_string(),
+            key_slots: Default::default(),
+        };
+        // Activate slots 0 and 3
+        header.key_slots[0].active = true;
+        header.key_slots[0].iterations = 50000;
+        header.key_slots[0].salt = [0xBB; 32];
+        header.key_slots[0].key_material_offset = 8;
+        header.key_slots[3].active = true;
+        header.key_slots[3].iterations = 75000;
+        header.key_slots[3].salt = [0xCC; 32];
+        header.key_slots[3].key_material_offset = 512;
+
+        let serialized = header.serialize();
+        let parsed = Luks1Header::parse(&serialized).unwrap();
+        assert!(parsed.key_slots[0].active);
+        assert!(!parsed.key_slots[1].active);
+        assert!(!parsed.key_slots[2].active);
+        assert!(parsed.key_slots[3].active);
+        assert_eq!(parsed.key_slots[3].iterations, 75000);
+    }
+
+    #[test]
+    fn luks1_total_header_size() {
+        let header = Luks1Header {
+            cipher_name: "aes".to_string(),
+            cipher_mode_str: "xts-plain64".to_string(),
+            hash_spec: "sha256".to_string(),
+            payload_offset: 4096,
+            key_bytes: 64,
+            mk_digest: [0; 20],
+            mk_digest_salt: [0; 32],
+            mk_digest_iter: 1000,
+            uuid: "test".to_string(),
+            key_slots: Default::default(),
+        };
+        assert_eq!(header.total_header_size(), 4096 * 512);
+    }
+
+    #[test]
+    fn luks1_af_hash_sha256() {
+        let mut data = vec![0u8; LUKS1_HEADER_SIZE];
+        data[..6].copy_from_slice(LUKS_MAGIC);
+        BigEndian::write_u16(&mut data[6..8], 1);
+        write_string(&mut data[72..104], "sha256");
+        let header = Luks1Header::parse(&data).unwrap();
+        assert_eq!(header.af_hash().unwrap(), super::super::af_splitter::AfHash::Sha256);
+    }
+
+    #[test]
+    fn luks1_mk_digest_kdf() {
+        let header = Luks1Header {
+            cipher_name: "aes".to_string(),
+            cipher_mode_str: "xts-plain64".to_string(),
+            hash_spec: "sha256".to_string(),
+            payload_offset: 4096,
+            key_bytes: 64,
+            mk_digest: [0; 20],
+            mk_digest_salt: [0xAA; 32],
+            mk_digest_iter: 50000,
+            uuid: "test".to_string(),
+            key_slots: Default::default(),
+        };
+        let kdf = header.mk_digest_kdf().unwrap();
+        match kdf {
+            super::super::key_derivation::Kdf::Pbkdf2 { iterations, .. } => {
+                assert_eq!(iterations, 50000);
+            }
+            _ => panic!("expected Pbkdf2"),
+        }
+    }
+
+    #[test]
+    fn luks1_key_slot_kdf() {
+        let mut header = Luks1Header {
+            cipher_name: "aes".to_string(),
+            cipher_mode_str: "xts-plain64".to_string(),
+            hash_spec: "sha256".to_string(),
+            payload_offset: 4096,
+            key_bytes: 64,
+            mk_digest: [0; 20],
+            mk_digest_salt: [0; 32],
+            mk_digest_iter: 1000,
+            uuid: "test".to_string(),
+            key_slots: Default::default(),
+        };
+        header.key_slots[2].iterations = 99999;
+        header.key_slots[2].salt = [0xDD; 32];
+        let kdf = header.key_slot_kdf(2).unwrap();
+        match kdf {
+            super::super::key_derivation::Kdf::Pbkdf2 { iterations, salt, .. } => {
+                assert_eq!(iterations, 99999);
+                assert_eq!(salt, vec![0xDD; 32]);
+            }
+            _ => panic!("expected Pbkdf2"),
+        }
+    }
+
+    #[test]
+    fn luks_header_key_bytes_delegation() {
+        let mut data = vec![0u8; LUKS1_HEADER_SIZE];
+        data[..6].copy_from_slice(LUKS_MAGIC);
+        BigEndian::write_u16(&mut data[6..8], 1);
+        BigEndian::write_u32(&mut data[108..112], 32);
+        let header = LuksHeader::parse(&data).unwrap();
+        assert_eq!(header.key_bytes(), 32);
+    }
+
+    #[test]
+    fn luks_header_uuid_delegation() {
+        let mut data = vec![0u8; LUKS1_HEADER_SIZE];
+        data[..6].copy_from_slice(LUKS_MAGIC);
+        BigEndian::write_u16(&mut data[6..8], 1);
+        write_string(&mut data[168..208], "my-uuid-1234");
+        let header = LuksHeader::parse(&data).unwrap();
+        assert_eq!(header.uuid(), "my-uuid-1234");
+    }
+
+    // ---- parse_cipher_mode edge cases ----
+
+    #[test]
+    fn cipher_mode_xts_plain() {
+        assert_eq!(parse_cipher_mode("aes", "xts-plain").unwrap(), CipherMode::AesXtsPlain64);
+    }
+
+    #[test]
+    fn cipher_mode_xts_bare() {
+        assert_eq!(parse_cipher_mode("aes", "xts").unwrap(), CipherMode::AesXtsPlain64);
+    }
+
+    #[test]
+    fn cipher_mode_cbc_essiv_with_hash() {
+        assert_eq!(
+            parse_cipher_mode("aes", "cbc-essiv:sha256").unwrap(),
+            CipherMode::AesCbcEssiv
+        );
+    }
+
+    #[test]
+    fn cipher_mode_non_aes_rejected() {
+        assert!(parse_cipher_mode("twofish", "xts-plain64").is_err());
+    }
+
+    #[test]
+    fn cipher_mode_unknown_mode_rejected() {
+        assert!(parse_cipher_mode("aes", "ecb").is_err());
+    }
+
+    // ---- LUKS2 tests ----
+
+    fn make_luks2_data(json: &str) -> Vec<u8> {
+        let hdr_size = 16384u64; // typical LUKS2 header size
+        let total = hdr_size as usize;
+        let mut data = vec![0u8; total];
+
+        // Binary header (4096 bytes)
+        data[..6].copy_from_slice(LUKS_MAGIC);
+        BigEndian::write_u16(&mut data[6..8], 2);
+        BigEndian::write_u64(&mut data[8..16], hdr_size);
+        BigEndian::write_u64(&mut data[16..24], 1); // seqid
+        write_string(&mut data[24..72], "test-label");
+        write_string(&mut data[72..104], "sha256");
+        // salt at 104..168 (zeroed)
+        write_string(&mut data[168..208], "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        BigEndian::write_u64(&mut data[208..216], 0); // hdr_offset
+
+        // JSON metadata at offset 4096
+        let json_bytes = json.as_bytes();
+        data[4096..4096 + json_bytes.len()].copy_from_slice(json_bytes);
+
+        data
+    }
+
+    const LUKS2_JSON_MINIMAL: &str = r#"{
+        "keyslots": {
+            "0": {
+                "type": "luks2",
+                "key_size": 64,
+                "af": { "type": "luks1", "hash": "sha256", "stripes": 4000 },
+                "kdf": { "type": "pbkdf2", "salt": "AAAAAAAAAAAAAAAAAAAAAA==", "hash": "sha256", "iterations": 1000 },
+                "area": { "type": "raw", "offset": "32768", "size": "131072", "encryption": "aes-xts-plain64", "key_size": 64 }
+            }
+        },
+        "segments": {
+            "0": {
+                "type": "crypt",
+                "offset": "262144",
+                "size": "dynamic",
+                "encryption": "aes-xts-plain64",
+                "sector_size": 512
+            }
+        },
+        "digests": {
+            "0": {
+                "type": "pbkdf2",
+                "keyslots": ["0"],
+                "segments": ["0"],
+                "hash": "sha256",
+                "iterations": 1000,
+                "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "digest": "AAAAAAAAAAAAAAAAAAAAAA=="
+            }
+        }
+    }"#;
+
+    #[test]
+    fn luks2_header_parse_valid() {
+        let data = make_luks2_data(LUKS2_JSON_MINIMAL);
+        let header = LuksHeader::parse(&data).unwrap();
+        assert!(matches!(header, LuksHeader::V2(_)));
+        if let LuksHeader::V2(h) = &header {
+            assert_eq!(h.label, "test-label");
+            assert_eq!(h.uuid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+            assert_eq!(h.key_bytes, 64);
+            assert_eq!(h.seqid, 1);
+            assert_eq!(h.hdr_size, 16384);
+        }
+    }
+
+    #[test]
+    fn luks2_cipher_mode_xts() {
+        let data = make_luks2_data(LUKS2_JSON_MINIMAL);
+        let header = LuksHeader::parse(&data).unwrap();
+        assert_eq!(header.cipher_mode().unwrap(), CipherMode::AesXtsPlain64);
+    }
+
+    #[test]
+    fn luks2_cipher_mode_cbc() {
+        let json = LUKS2_JSON_MINIMAL.replace("aes-xts-plain64", "aes-cbc-essiv:sha256");
+        let data = make_luks2_data(&json);
+        let header = LuksHeader::parse(&data).unwrap();
+        assert_eq!(header.cipher_mode().unwrap(), CipherMode::AesCbcEssiv);
+    }
+
+    #[test]
+    fn luks2_key_bytes_and_uuid() {
+        let data = make_luks2_data(LUKS2_JSON_MINIMAL);
+        let header = LuksHeader::parse(&data).unwrap();
+        assert_eq!(header.key_bytes(), 64);
+        assert_eq!(header.uuid(), "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    }
+
+    #[test]
+    fn luks2_total_header_size() {
+        let data = make_luks2_data(LUKS2_JSON_MINIMAL);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            // Two copies of 16384 bytes
+            assert_eq!(h.total_header_size(), 2 * 16384);
+        } else {
+            panic!("expected V2");
+        }
+    }
+
+    #[test]
+    fn luks2_keyslot_kdf_pbkdf2() {
+        let data = make_luks2_data(LUKS2_JSON_MINIMAL);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            let kdf = h.keyslot_kdf("0").unwrap();
+            match kdf {
+                super::super::key_derivation::Kdf::Pbkdf2 { hash, iterations, .. } => {
+                    assert_eq!(iterations, 1000);
+                    assert_eq!(hash, super::super::key_derivation::KdfHash::Sha256);
+                }
+                _ => panic!("expected Pbkdf2"),
+            }
+        }
+    }
+
+    #[test]
+    fn luks2_keyslot_kdf_argon2id() {
+        let json = LUKS2_JSON_MINIMAL.replace(
+            r#""kdf": { "type": "pbkdf2", "salt": "AAAAAAAAAAAAAAAAAAAAAA==", "hash": "sha256", "iterations": 1000 }"#,
+            r#""kdf": { "type": "argon2id", "salt": "AAAAAAAAAAAAAAAAAAAAAA==", "time": 4, "memory": 1048576, "cpus": 4 }"#,
+        );
+        let data = make_luks2_data(&json);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            let kdf = h.keyslot_kdf("0").unwrap();
+            match kdf {
+                super::super::key_derivation::Kdf::Argon2id { time, memory, cpus, .. } => {
+                    assert_eq!(time, 4);
+                    assert_eq!(memory, 1048576);
+                    assert_eq!(cpus, 4);
+                }
+                _ => panic!("expected Argon2id"),
+            }
+        }
+    }
+
+    #[test]
+    fn luks2_keyslot_kdf_unsupported_type() {
+        let json = LUKS2_JSON_MINIMAL.replace(
+            r#""type": "pbkdf2""#,
+            r#""type": "scrypt""#,
+        );
+        let data = make_luks2_data(&json);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            let err = h.keyslot_kdf("0").unwrap_err();
+            assert!(err.to_string().contains("unsupported KDF type"));
+        }
+    }
+
+    #[test]
+    fn luks2_keyslot_kdf_not_found() {
+        let data = make_luks2_data(LUKS2_JSON_MINIMAL);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            let err = h.keyslot_kdf("99").unwrap_err();
+            assert!(err.to_string().contains("keyslot 99 not found"));
+        }
+    }
+
+    #[test]
+    fn luks2_keyslot_af_hash() {
+        let data = make_luks2_data(LUKS2_JSON_MINIMAL);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            let hash = h.keyslot_af_hash("0").unwrap();
+            assert_eq!(hash, super::super::af_splitter::AfHash::Sha256);
+        }
+    }
+
+    #[test]
+    fn luks2_keyslot_af_hash_not_found() {
+        let data = make_luks2_data(LUKS2_JSON_MINIMAL);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            assert!(h.keyslot_af_hash("99").is_err());
+        }
+    }
+
+    #[test]
+    fn luks2_digest_for_keyslot() {
+        let data = make_luks2_data(LUKS2_JSON_MINIMAL);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            let (digest, salt, expected) = h.digest_for_keyslot("0").unwrap();
+            assert_eq!(digest.hash, "sha256");
+            assert_eq!(digest.iterations, 1000);
+            assert!(!salt.is_empty());
+            assert!(!expected.is_empty());
+        }
+    }
+
+    #[test]
+    fn luks2_digest_for_missing_keyslot() {
+        let data = make_luks2_data(LUKS2_JSON_MINIMAL);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            let err = h.digest_for_keyslot("99").unwrap_err();
+            assert!(err.to_string().contains("no digest found"));
+        }
+    }
+
+    // ---- LUKS2 error paths ----
+
+    #[test]
+    fn luks2_header_too_short() {
+        let mut data = vec![0u8; 1000];
+        data[..6].copy_from_slice(LUKS_MAGIC);
+        BigEndian::write_u16(&mut data[6..8], 2);
+        let err = LuksHeader::parse(&data).unwrap_err();
+        assert!(err.to_string().contains("too short"));
+    }
+
+    #[test]
+    fn luks2_no_json_area() {
+        let mut data = vec![0u8; 4096];
+        data[..6].copy_from_slice(LUKS_MAGIC);
+        BigEndian::write_u16(&mut data[6..8], 2);
+        // hdr_size = 4096, so json_start == json_end
+        BigEndian::write_u64(&mut data[8..16], 4096);
+        let err = LuksHeader::parse(&data).unwrap_err();
+        assert!(err.to_string().contains("no JSON metadata"));
+    }
+
+    #[test]
+    fn luks2_invalid_json() {
+        let mut data = vec![0u8; 8192];
+        data[..6].copy_from_slice(LUKS_MAGIC);
+        BigEndian::write_u16(&mut data[6..8], 2);
+        BigEndian::write_u64(&mut data[8..16], 8192);
+        // Write invalid JSON
+        let bad_json = b"{ not valid json }";
+        data[4096..4096 + bad_json.len()].copy_from_slice(bad_json);
+        let err = LuksHeader::parse(&data).unwrap_err();
+        assert!(err.to_string().contains("JSON parse error"));
+    }
+
+    #[test]
+    fn luks2_invalid_utf8_json() {
+        let mut data = vec![0u8; 8192];
+        data[..6].copy_from_slice(LUKS_MAGIC);
+        BigEndian::write_u16(&mut data[6..8], 2);
+        BigEndian::write_u64(&mut data[8..16], 8192);
+        // Write invalid UTF-8 at json area
+        data[4096] = 0xFF;
+        data[4097] = 0xFE;
+        let err = LuksHeader::parse(&data).unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn luks2_cipher_mode_no_segments() {
+        let json = r#"{
+            "keyslots": {},
+            "segments": {},
+            "digests": {}
+        }"#;
+        let data = make_luks2_data(json);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            let err = h.cipher_mode().unwrap_err();
+            assert!(err.to_string().contains("no segments"));
+        }
+    }
+
+    #[test]
+    fn luks2_cipher_mode_invalid_encryption_string() {
+        let json = r#"{
+            "keyslots": {},
+            "segments": {
+                "0": {
+                    "type": "crypt",
+                    "offset": "0",
+                    "size": "dynamic",
+                    "encryption": "noprefix",
+                    "sector_size": 512
+                }
+            },
+            "digests": {}
+        }"#;
+        let data = make_luks2_data(json);
+        if let LuksHeader::V2(h) = LuksHeader::parse(&data).unwrap() {
+            assert!(h.cipher_mode().is_err());
+        }
+    }
+
+    // ---- read/write string helpers ----
+
+    #[test]
+    fn read_string_null_terminated() {
+        let mut buf = [0u8; 32];
+        buf[..5].copy_from_slice(b"hello");
+        assert_eq!(read_string(&buf), "hello");
+    }
+
+    #[test]
+    fn read_string_no_null() {
+        let buf = b"full";
+        assert_eq!(read_string(buf), "full");
+    }
+
+    #[test]
+    fn write_string_truncates() {
+        let mut buf = [0u8; 4];
+        write_string(&mut buf, "longstring");
+        // Should write at most 3 bytes (buf.len() - 1) + null terminator
+        assert_eq!(read_string(&buf), "lon");
+    }
+
+    // ---- base64 decode ----
+
+    #[test]
+    fn base64_decode_valid() {
+        let decoded = base64_decode("AQID").unwrap();
+        assert_eq!(decoded, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn base64_decode_invalid() {
+        let err = base64_decode("!!!invalid!!!").unwrap_err();
+        assert!(err.to_string().contains("base64 decode error"));
+    }
 }

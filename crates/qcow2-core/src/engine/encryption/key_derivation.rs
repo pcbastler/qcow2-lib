@@ -132,6 +132,7 @@ fn pbkdf2_derive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     #[test]
     fn pbkdf2_sha256_produces_output() {
@@ -221,6 +222,61 @@ mod tests {
             0xb5, 0x24, 0xaf, 0x60, 0x12, 0x06, 0x2f, 0xe0, 0x37, 0xa6,
         ];
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn kdf_hash_from_spec_sha1() {
+        assert_eq!(KdfHash::from_spec("sha1").unwrap(), KdfHash::Sha1);
+    }
+
+    #[test]
+    fn kdf_hash_from_spec_sha256() {
+        assert_eq!(KdfHash::from_spec("sha256").unwrap(), KdfHash::Sha256);
+    }
+
+    #[test]
+    fn kdf_hash_from_spec_sha512() {
+        assert_eq!(KdfHash::from_spec("sha512").unwrap(), KdfHash::Sha512);
+    }
+
+    #[test]
+    fn kdf_hash_from_spec_unknown() {
+        let err = KdfHash::from_spec("md5").unwrap_err();
+        assert!(err.to_string().contains("unsupported KDF hash"));
+    }
+
+    #[test]
+    fn pbkdf2_different_salts_different_output() {
+        let kdf1 = Kdf::Pbkdf2 {
+            hash: KdfHash::Sha256,
+            iterations: 100,
+            salt: vec![0x11; 32],
+        };
+        let kdf2 = Kdf::Pbkdf2 {
+            hash: KdfHash::Sha256,
+            iterations: 100,
+            salt: vec![0x22; 32],
+        };
+        let r1 = derive_key(&kdf1, b"password", 32).unwrap();
+        let r2 = derive_key(&kdf2, b"password", 32).unwrap();
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn pbkdf2_different_iterations_different_output() {
+        let kdf1 = Kdf::Pbkdf2 {
+            hash: KdfHash::Sha256,
+            iterations: 100,
+            salt: vec![0x42; 16],
+        };
+        let kdf2 = Kdf::Pbkdf2 {
+            hash: KdfHash::Sha256,
+            iterations: 200,
+            salt: vec![0x42; 16],
+        };
+        let r1 = derive_key(&kdf1, b"password", 32).unwrap();
+        let r2 = derive_key(&kdf2, b"password", 32).unwrap();
+        assert_ne!(r1, r2);
     }
 
     /// PBKDF2-HMAC-SHA256 with 64-byte output (two HMAC blocks).

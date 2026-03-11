@@ -431,4 +431,159 @@ mod tests {
         let digest = key_derivation::derive_key(&verify_kdf, &candidate, 20).unwrap();
         assert_eq!(digest, h.mk_digest.to_vec(), "digest verification should match");
     }
+
+    // ---- key material encrypt/decrypt edge cases ----
+
+    #[test]
+    fn key_material_encrypt_decrypt_round_trip_cbc_128() {
+        let key = vec![0x42u8; 16]; // AES-128-CBC
+        let original = vec![0xAA; 2048]; // 4 sectors
+        let mut data = original.clone();
+
+        encrypt_key_material(&key, CipherMode::AesCbcEssiv, &mut data).unwrap();
+        assert_ne!(data, original);
+
+        decrypt_key_material(&key, CipherMode::AesCbcEssiv, &mut data).unwrap();
+        assert_eq!(data, original);
+    }
+
+    #[test]
+    fn key_material_partial_last_sector_skipped() {
+        // Data with a trailing partial sector (< 512 bytes)
+        let key = vec![0x42u8; 64];
+        let original = vec![0xBB; 512 + 100]; // 1 full sector + 100 bytes
+        let mut data = original.clone();
+
+        encrypt_key_material(&key, CipherMode::AesXtsPlain64, &mut data).unwrap();
+        // First 512 bytes should be encrypted
+        assert_ne!(&data[..512], &original[..512]);
+        // Trailing 100 bytes should be untouched (skipped)
+        assert_eq!(&data[512..], &original[512..]);
+    }
+
+    #[test]
+    fn encrypt_sector_cbc_plain_invalid_key_length() {
+        let key = vec![0u8; 24]; // Not 16 or 32
+        let iv = [0u8; 16];
+        let mut sector = [0u8; 512];
+        let err = encrypt_sector_cbc_plain(&key, &iv, &mut sector).unwrap_err();
+        assert!(err.to_string().contains("unsupported CBC key length"));
+    }
+
+    #[test]
+    fn decrypt_sector_cbc_plain_invalid_key_length() {
+        let key = vec![0u8; 24];
+        let iv = [0u8; 16];
+        let mut sector = [0u8; 512];
+        let err = decrypt_sector_cbc_plain(&key, &iv, &mut sector).unwrap_err();
+        assert!(err.to_string().contains("unsupported CBC key length"));
+    }
+
+    #[test]
+    fn encrypt_decrypt_sector_cbc_plain_128_round_trip() {
+        let key = vec![0x55u8; 16];
+        let iv = make_plain_iv(42);
+        let original = [0xAA; 512];
+        let mut sector = original;
+
+        encrypt_sector_cbc_plain(&key, &iv, &mut sector).unwrap();
+        assert_ne!(sector, original);
+
+        decrypt_sector_cbc_plain(&key, &iv, &mut sector).unwrap();
+        assert_eq!(sector, original);
+    }
+
+    #[test]
+    fn encrypt_decrypt_sector_cbc_plain_256_round_trip() {
+        let key = vec![0x55u8; 32];
+        let iv = make_plain_iv(0);
+        let original = [0xBB; 512];
+        let mut sector = original;
+
+        encrypt_sector_cbc_plain(&key, &iv, &mut sector).unwrap();
+        assert_ne!(sector, original);
+
+        decrypt_sector_cbc_plain(&key, &iv, &mut sector).unwrap();
+        assert_eq!(sector, original);
+    }
+
+    #[test]
+    fn make_plain_iv_sector_zero() {
+        let iv = make_plain_iv(0);
+        assert_eq!(iv, [0u8; 16]);
+    }
+
+    #[test]
+    fn make_plain_iv_sector_one() {
+        let iv = make_plain_iv(1);
+        let mut expected = [0u8; 16];
+        expected[0] = 1;
+        assert_eq!(iv, expected);
+    }
+
+    #[test]
+    fn make_plain_iv_large_sector() {
+        let iv = make_plain_iv(0x0102_0304_0506_0708);
+        assert_eq!(&iv[..8], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert_eq!(&iv[8..], &[0u8; 8]);
+    }
+
+    #[test]
+    fn cipher_mode_strings_xts() {
+        let (name, mode) = cipher_mode_strings(CipherMode::AesXtsPlain64);
+        assert_eq!(name, "aes");
+        assert_eq!(mode, "xts-plain64");
+    }
+
+    #[test]
+    fn cipher_mode_strings_cbc() {
+        let (name, mode) = cipher_mode_strings(CipherMode::AesCbcEssiv);
+        assert_eq!(name, "aes");
+        assert_eq!(mode, "cbc-essiv:sha256");
+    }
+
+    #[test]
+    fn create_luks1_header_default_iterations() {
+        // Test without explicit iterations (uses default)
+        let (header_bytes, _master_key) = create_luks1_header(
+            b"pass",
+            CipherMode::AesXtsPlain64,
+            64,
+            None,
+        )
+        .unwrap();
+
+        let header = LuksHeader::parse(&header_bytes).unwrap();
+        if let LuksHeader::V1(h) = header {
+            assert_eq!(h.mk_digest_iter, DEFAULT_PBKDF2_ITERATIONS);
+            assert_eq!(h.key_slots[0].iterations, DEFAULT_PBKDF2_ITERATIONS);
+        } else {
+            panic!("expected V1");
+        }
+    }
+
+    #[test]
+    fn create_luks1_header_key_slot_alignment() {
+        let (header_bytes, _) = create_luks1_header(
+            b"pass",
+            CipherMode::AesXtsPlain64,
+            64,
+            Some(100),
+        )
+        .unwrap();
+
+        let header = LuksHeader::parse(&header_bytes).unwrap();
+        if let LuksHeader::V1(h) = header {
+            // All key material offsets should be 8-sector (4KB) aligned
+            for slot in &h.key_slots {
+                assert_eq!(slot.key_material_offset % 8, 0,
+                    "offset {} not 8-sector aligned", slot.key_material_offset);
+            }
+            // Only slot 0 active
+            assert!(h.key_slots[0].active);
+            for slot in &h.key_slots[1..] {
+                assert!(!slot.active);
+            }
+        }
+    }
 }

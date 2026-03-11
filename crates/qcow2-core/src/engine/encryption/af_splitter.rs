@@ -157,6 +157,7 @@ pub fn af_split(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
     use alloc::vec;
 
     #[test]
@@ -185,5 +186,133 @@ mod tests {
         let data = vec![0x42; 32];
         let diffused = diffuse(&data, AfHash::Sha256);
         assert_ne!(diffused, data);
+    }
+
+    // ---- AfHash parsing ----
+
+    #[test]
+    fn af_hash_from_spec_sha1() {
+        assert_eq!(AfHash::from_spec("sha1").unwrap(), AfHash::Sha1);
+    }
+
+    #[test]
+    fn af_hash_from_spec_sha256() {
+        assert_eq!(AfHash::from_spec("sha256").unwrap(), AfHash::Sha256);
+    }
+
+    #[test]
+    fn af_hash_from_spec_sha512() {
+        assert_eq!(AfHash::from_spec("sha512").unwrap(), AfHash::Sha512);
+    }
+
+    #[test]
+    fn af_hash_from_spec_unknown() {
+        let err = AfHash::from_spec("md5").unwrap_err();
+        assert!(err.to_string().contains("unsupported hash spec"));
+    }
+
+    // ---- AfHash digest_size ----
+
+    #[test]
+    fn af_hash_digest_sizes() {
+        assert_eq!(AfHash::Sha1.digest_size(), 20);
+        assert_eq!(AfHash::Sha256.digest_size(), 32);
+        assert_eq!(AfHash::Sha512.digest_size(), 64);
+    }
+
+    // ---- diffuse with different hashes ----
+
+    #[test]
+    fn diffuse_sha1_deterministic() {
+        let data = vec![0x42; 20]; // SHA1 digest size
+        let d1 = diffuse(&data, AfHash::Sha1);
+        let d2 = diffuse(&data, AfHash::Sha1);
+        assert_eq!(d1, d2);
+        assert_eq!(d1.len(), 20);
+    }
+
+    #[test]
+    fn diffuse_sha512_deterministic() {
+        let data = vec![0x42; 64]; // SHA512 digest size
+        let d1 = diffuse(&data, AfHash::Sha512);
+        let d2 = diffuse(&data, AfHash::Sha512);
+        assert_eq!(d1, d2);
+        assert_eq!(d1.len(), 64);
+    }
+
+    #[test]
+    fn diffuse_different_hashes_different_results() {
+        let data = vec![0x42; 32];
+        let d_sha256 = diffuse(&data, AfHash::Sha256);
+        // SHA1 produces 20-byte digest, so for 32-byte input:
+        // 1 full block (20 bytes) + 12-byte remainder
+        let d_sha1 = diffuse(&data, AfHash::Sha1);
+        // They should differ (different hash, but also different lengths for
+        // non-aligned data, though here both produce 32 bytes output)
+        assert_eq!(d_sha256.len(), 32);
+        assert_eq!(d_sha1.len(), 32);
+        assert_ne!(d_sha256, d_sha1);
+    }
+
+    #[test]
+    fn diffuse_with_remainder() {
+        // 50 bytes with SHA256 (digest=32): 1 full block + 18-byte remainder
+        let data = vec![0xAA; 50];
+        let diffused = diffuse(&data, AfHash::Sha256);
+        assert_eq!(diffused.len(), 50);
+    }
+
+    #[test]
+    fn diffuse_multi_block() {
+        // 96 bytes with SHA256 (digest=32): 3 full blocks, no remainder
+        let data = vec![0xBB; 96];
+        let diffused = diffuse(&data, AfHash::Sha256);
+        assert_eq!(diffused.len(), 96);
+        assert_ne!(diffused, data);
+    }
+
+    // ---- af_merge edge cases ----
+
+    #[test]
+    fn af_merge_single_stripe() {
+        // With 1 stripe, af_merge should return the data as-is (no diffuse loop)
+        let key = vec![0x42; 32];
+        let result = af_merge(&key, 32, 1, AfHash::Sha256).unwrap();
+        assert_eq!(result, key);
+    }
+
+    #[test]
+    fn af_merge_two_stripes() {
+        // With 2 stripes: d = stripe[0], result = diffuse(d) XOR stripe[1]
+        let key_len = 32;
+        let mut material = vec![0u8; key_len * 2];
+        material[..key_len].copy_from_slice(&[0xAA; 32]);
+        material[key_len..].copy_from_slice(&[0xBB; 32]);
+        let result = af_merge(&material, key_len, 2, AfHash::Sha256).unwrap();
+        assert_eq!(result.len(), key_len);
+        // Verify it's diffuse([0xAA;32]) XOR [0xBB;32]
+        let diffused = diffuse(&[0xAA; 32], AfHash::Sha256);
+        let mut expected = diffused;
+        for (e, b) in expected.iter_mut().zip([0xBB; 32].iter()) {
+            *e ^= b;
+        }
+        assert_eq!(result, expected);
+    }
+
+    // ---- xor_buffers ----
+
+    #[test]
+    fn xor_buffers_identity() {
+        let mut data = vec![0xFF; 16];
+        xor_buffers(&mut data, &[0xFF; 16]);
+        assert_eq!(data, vec![0; 16]);
+    }
+
+    #[test]
+    fn xor_buffers_with_zero() {
+        let original = vec![0xAB; 16];
+        let mut data = original.clone();
+        xor_buffers(&mut data, &[0; 16]);
+        assert_eq!(data, original);
     }
 }

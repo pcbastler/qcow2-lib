@@ -144,3 +144,101 @@ impl fmt::Debug for CryptContext {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
+    use alloc::vec;
+
+    #[test]
+    fn crypt_context_new_xts() {
+        let ctx = CryptContext::new(vec![0x42; 64], CipherMode::AesXtsPlain64);
+        assert_eq!(ctx.cipher_mode(), CipherMode::AesXtsPlain64);
+        assert_eq!(ctx.key_len(), 64);
+        assert_eq!(ctx.master_key(), &[0x42; 64]);
+    }
+
+    #[test]
+    fn crypt_context_new_cbc() {
+        let ctx = CryptContext::new(vec![0xAA; 32], CipherMode::AesCbcEssiv);
+        assert_eq!(ctx.cipher_mode(), CipherMode::AesCbcEssiv);
+        assert_eq!(ctx.key_len(), 32);
+    }
+
+    #[test]
+    fn crypt_context_cbc_encrypt_decrypt_round_trip() {
+        let ctx = CryptContext::new(vec![0x42; 32], CipherMode::AesCbcEssiv);
+        let original = vec![0xBB; 1024]; // 2 sectors
+        let mut data = original.clone();
+
+        ctx.encrypt_cluster(0, &mut data).unwrap();
+        assert_ne!(data, original);
+
+        ctx.decrypt_cluster(0, &mut data).unwrap();
+        assert_eq!(data, original);
+    }
+
+    #[test]
+    fn crypt_context_cbc_128_round_trip() {
+        let ctx = CryptContext::new(vec![0x37; 16], CipherMode::AesCbcEssiv);
+        let original = vec![0xCC; 512];
+        let mut data = original.clone();
+
+        ctx.encrypt_cluster(0, &mut data).unwrap();
+        assert_ne!(data, original);
+
+        ctx.decrypt_cluster(0, &mut data).unwrap();
+        assert_eq!(data, original);
+    }
+
+    #[test]
+    fn crypt_context_non_aligned_data_error() {
+        let ctx = CryptContext::new(vec![0x42; 64], CipherMode::AesXtsPlain64);
+        let mut data = vec![0xAA; 500]; // Not a multiple of 512
+        let err = ctx.encrypt_cluster(0, &mut data).unwrap_err();
+        assert!(err.to_string().contains("not a multiple of sector size"));
+    }
+
+    #[test]
+    fn crypt_context_empty_data() {
+        let ctx = CryptContext::new(vec![0x42; 64], CipherMode::AesXtsPlain64);
+        let mut data = vec![];
+        // 0 bytes is a multiple of 512 (0 sectors), should succeed
+        ctx.encrypt_cluster(0, &mut data).unwrap();
+    }
+
+    #[test]
+    fn crypt_context_clone() {
+        let ctx1 = CryptContext::new(vec![0x42; 64], CipherMode::AesXtsPlain64);
+        let ctx2 = ctx1.clone();
+        assert_eq!(ctx2.cipher_mode(), CipherMode::AesXtsPlain64);
+        assert_eq!(ctx2.key_len(), 64);
+        assert_eq!(ctx2.master_key(), ctx1.master_key());
+    }
+
+    #[test]
+    fn crypt_context_debug_no_key_leak() {
+        let ctx = CryptContext::new(vec![0x42; 64], CipherMode::AesXtsPlain64);
+        let debug = format!("{:?}", ctx);
+        assert!(debug.contains("AesXtsPlain64"));
+        assert!(debug.contains("key_len: 64"));
+        assert!(debug.contains("sector_size: 512"));
+        // Must NOT contain the actual key bytes
+        assert!(!debug.contains("0x42"));
+        assert!(!debug.contains("master_key"));
+    }
+
+    #[test]
+    fn crypt_context_different_offsets_different_ciphertext_cbc() {
+        let ctx = CryptContext::new(vec![0x42; 32], CipherMode::AesCbcEssiv);
+        let plaintext = vec![0xAA; 512];
+
+        let mut data1 = plaintext.clone();
+        let mut data2 = plaintext.clone();
+        ctx.encrypt_cluster(0, &mut data1).unwrap();
+        ctx.encrypt_cluster(512, &mut data2).unwrap();
+        assert_ne!(data1, data2, "different host offsets should produce different ciphertext");
+    }
+}
