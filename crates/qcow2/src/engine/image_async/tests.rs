@@ -207,3 +207,75 @@ fn flush_clears_dirty() {
     let sync_img = img.into_image();
     assert!(!sync_img.is_dirty());
 }
+
+/// Helper: create an overlay Qcow2Image with a backing image that has data written.
+fn create_overlay_with_backing(
+    backing_data: &[u8],
+    backing_offset: u64,
+    virtual_size: u64,
+) -> Qcow2Image {
+    let opts = CreateOptions {
+        virtual_size,
+        cluster_bits: Some(16),
+        extended_l2: false,
+        compression_type: None,
+        data_file: None,
+        encryption: None,
+    };
+
+    // Create backing image with data
+    let backing_backend = Box::new(MemoryBackend::new(Vec::new()));
+    let mut backing = Qcow2Image::create_on_backend(backing_backend, opts.clone()).unwrap();
+    backing.write_at(backing_data, backing_offset).unwrap();
+    backing.flush().unwrap();
+
+    // Create overlay and inject backing via into_parts/from_parts
+    let overlay = Qcow2Image::create_on_backend(
+        Box::new(MemoryBackend::new(Vec::new())),
+        opts,
+    )
+    .unwrap();
+    let (meta, be, data_be, bc, _, cc, comp) = overlay.into_parts();
+    Qcow2Image::from_parts(meta, be, data_be, bc, Some(Box::new(backing)), cc, comp)
+}
+
+#[test]
+fn read_with_backing() {
+    let backing_data = vec![0xBBu8; 512];
+    let overlay = create_overlay_with_backing(&backing_data, 0, 1 << 20);
+
+    let async_img = Qcow2ImageAsync::from_image(overlay).unwrap();
+
+    // Read from unallocated cluster — should fall through to backing
+    let mut buf = vec![0u8; 512];
+    async_img.read_at(&mut buf, 0).unwrap();
+    assert_eq!(buf, backing_data, "should read backing data for unallocated cluster");
+
+    // Write to overlay, then read back — should get overlay data
+    let overlay_data = vec![0xCCu8; 512];
+    async_img.write_at(&overlay_data, 65536).unwrap();
+    let mut buf2 = vec![0u8; 512];
+    async_img.read_at(&mut buf2, 65536).unwrap();
+    assert_eq!(buf2, overlay_data);
+}
+
+#[test]
+fn write_with_backing_cow() {
+    let cluster_size = 1u64 << 16;
+    let full_cluster = vec![0xAAu8; cluster_size as usize];
+    let overlay = create_overlay_with_backing(&full_cluster, 0, 1 << 20);
+
+    let async_img = Qcow2ImageAsync::from_image(overlay).unwrap();
+
+    // Partial write in the middle of the cluster (COW: rest from backing)
+    let partial = vec![0xFFu8; 512];
+    async_img.write_at(&partial, 1024).unwrap();
+
+    // Read the full cluster — should be: backing[0..1024] + 0xFF*512 + backing[1536..]
+    let mut result = vec![0u8; cluster_size as usize];
+    async_img.read_at(&mut result, 0).unwrap();
+
+    assert!(result[..1024].iter().all(|&b| b == 0xAA), "pre-write region should be from backing");
+    assert!(result[1024..1536].iter().all(|&b| b == 0xFF), "written region should be overlay data");
+    assert!(result[1536..].iter().all(|&b| b == 0xAA), "post-write region should be from backing");
+}

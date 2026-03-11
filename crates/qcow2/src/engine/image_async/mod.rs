@@ -38,13 +38,17 @@ fn poisoned_err() -> Error {
     }
 }
 
-/// Helper to create a "not supported" error.
-fn unsupported_err(msg: &str) -> Error {
-    Error::Io {
-        kind: IoErrorKind::InvalidInput,
-        message: msg.into(),
-        offset: 0,
-        context: "Qcow2ImageAsync conversion",
+/// Zero-cost adapter: implements `BackingImage` (`&mut self`) by delegating
+/// to `Qcow2ImageAsync::read_at` (`&self`). Lives on the stack, no allocation.
+struct AsyncBackingAdapter<'a>(&'a Qcow2ImageAsync);
+
+impl crate::io::BackingImage for AsyncBackingAdapter<'_> {
+    fn virtual_size(&self) -> u64 {
+        self.0.virtual_size().unwrap_or(0)
+    }
+
+    fn read_at(&mut self, buf: &mut [u8], guest_offset: u64) -> Result<()> {
+        self.0.read_at(buf, guest_offset)
     }
 }
 
@@ -70,6 +74,8 @@ pub struct Qcow2ImageAsync {
     cluster_bits: u32,
     /// Cached extended_l2 flag from header (immutable after open).
     extended_l2: bool,
+    /// Backing image for unallocated cluster fallback (recursively async).
+    backing: Option<Box<Qcow2ImageAsync>>,
 }
 
 // SAFETY: IoBackend is Send + Sync, Mutex/RwLock handle thread safety.
@@ -79,15 +85,16 @@ unsafe impl Sync for Qcow2ImageAsync {}
 impl Qcow2ImageAsync {
     /// Create a thread-safe image from an existing `Qcow2Image`.
     ///
-    /// Backing images and backing chains are not supported in the async
-    /// wrapper (they require `&mut self`).
+    /// If the image has a backing file, it is recursively converted to
+    /// a `Qcow2ImageAsync` so backing reads are also parallel.
     pub fn from_image(image: Qcow2Image) -> Result<Self> {
         let (meta, backend, data_backend, _backing_chain, backing_image, crypt_context, compressor) =
             image.into_parts();
 
-        if backing_image.is_some() {
-            return Err(unsupported_err("Qcow2ImageAsync does not support backing images"));
-        }
+        let backing = match backing_image {
+            Some(img) => Some(Box::new(Qcow2ImageAsync::from_image(*img)?)),
+            None => None,
+        };
 
         let cluster_bits = meta.header.cluster_bits;
         let extended_l2 = meta.mapper.geometry().extended_l2;
@@ -103,6 +110,7 @@ impl Qcow2ImageAsync {
             compressor,
             cluster_bits,
             extended_l2,
+            backing,
         })
     }
 
@@ -119,13 +127,16 @@ impl Qcow2ImageAsync {
         let data_backend = unsafe { std::ptr::read(&me.data_backend) };
         let crypt_context = unsafe { std::ptr::read(&me.crypt_context) };
         let compressor = unsafe { std::ptr::read(&me.compressor) };
+        let backing = unsafe { std::ptr::read(&me.backing) };
+
+        let backing_image = backing.map(|b| Box::new(b.into_image()));
 
         Qcow2Image::from_parts(
             meta,
             backend,
             data_backend,
             None, // backing_chain
-            None, // backing_image
+            backing_image,
             crypt_context,
             compressor,
         )
@@ -179,6 +190,7 @@ impl Qcow2ImageAsync {
         let mut meta = self.meta.lock().map_err(|_| poisoned_err())?;
         let meta_ref = &mut *meta;
 
+        let mut backing_adapter = self.backing.as_deref().map(AsyncBackingAdapter);
         let mut reader = Qcow2Reader::new(
             &meta_ref.mapper,
             self.backend.as_ref(),
@@ -189,7 +201,7 @@ impl Qcow2ImageAsync {
             meta_ref.header.compression_type,
             meta_ref.read_mode,
             &mut meta_ref.warnings,
-            None, // no backing image in async mode
+            backing_adapter.as_mut().map(|a| a as &mut dyn crate::io::BackingImage),
             self.crypt_context.as_ref(),
             &self.compressor,
         );
@@ -267,6 +279,7 @@ impl Qcow2ImageAsync {
             .as_mut()
             .expect("writable image must have refcount_manager");
 
+        let mut backing_adapter = self.backing.as_deref().map(AsyncBackingAdapter);
         let mut writer = Qcow2Writer::new(
             &mut meta_ref.mapper,
             meta_ref.header.l1_table_offset,
@@ -278,7 +291,7 @@ impl Qcow2ImageAsync {
             meta_ref.header.virtual_size,
             meta_ref.header.compression_type,
             raw_external,
-            None, // no backing image in async mode
+            backing_adapter.as_mut().map(|a| a as &mut dyn crate::io::BackingImage),
             self.crypt_context.as_ref(),
             &self.compressor,
         );
@@ -359,6 +372,7 @@ impl Qcow2ImageAsync {
             .as_mut()
             .expect("writable image must have refcount_manager");
 
+        let mut backing_adapter = self.backing.as_deref().map(AsyncBackingAdapter);
         let mut writer = Qcow2Writer::new(
             &mut meta_ref.mapper,
             meta_ref.header.l1_table_offset,
@@ -370,7 +384,7 @@ impl Qcow2ImageAsync {
             meta_ref.header.virtual_size,
             meta_ref.header.compression_type,
             false, // no external data file for compressed
-            None,  // no backing image in async mode
+            backing_adapter.as_mut().map(|a| a as &mut dyn crate::io::BackingImage),
             self.crypt_context.as_ref(),
             &self.compressor,
         );
