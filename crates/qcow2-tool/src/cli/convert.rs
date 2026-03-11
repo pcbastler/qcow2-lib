@@ -31,6 +31,7 @@ pub fn run(
     data_file: Option<String>,
     password: Option<&[u8]>,
     encryption: Option<qcow2::engine::image::EncryptionOptions>,
+    threads: usize,
 ) -> Result<()> {
     let input_format = detect_format(input)?;
 
@@ -55,10 +56,23 @@ pub fn run(
             );
         }
         (InputFormat::Raw, OutputFormat::Qcow2) => {
-            converter::convert_from_raw(input, output, compress, compression_type, data_file, encryption)?;
+            if threads > 1 {
+                converter::convert_from_raw_parallel(
+                    input, output, compress, compression_type, data_file, encryption, threads,
+                )?;
+            } else {
+                converter::convert_from_raw(
+                    input, output, compress, compression_type, data_file, encryption,
+                )?;
+            }
             let suffix = if compress { " (compressed)" } else { "" };
+            let thread_info = if threads > 1 {
+                format!(" [{threads} threads]")
+            } else {
+                String::new()
+            };
             println!(
-                "Converted {} (raw) -> {} (qcow2){suffix}",
+                "Converted {} (raw) -> {} (qcow2){suffix}{thread_info}",
                 input.display(),
                 output.display(),
             );

@@ -116,6 +116,9 @@ enum Command {
         /// Encryption password for the output image (requires --encrypt).
         #[arg(long)]
         encrypt_password: Option<String>,
+        /// Number of threads for parallel conversion (raw→qcow2 only, default: 1).
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
     },
 
     /// Compact/defragment a QCOW2 image into a new file.
@@ -304,6 +307,7 @@ fn main() {
             password,
             encrypt,
             encrypt_password,
+            threads,
         } => {
             let ct = compression_type.map(|ct| match ct {
                 CompressionType::Deflate => qcow2::format::constants::COMPRESSION_DEFLATE,
@@ -323,7 +327,7 @@ fn main() {
             } else {
                 None
             };
-            convert::run(&input, &output, &format, compress, ct, data_file, pw, enc)
+            convert::run(&input, &output, &format, compress, ct, data_file, pw, enc, threads)
         }
         Command::Compact {
             input,

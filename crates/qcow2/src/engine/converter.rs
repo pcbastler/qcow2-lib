@@ -6,8 +6,10 @@
 
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::engine::image::{CreateOptions, EncryptionOptions, Qcow2Image};
+use crate::engine::image_async::Qcow2ImageAsync;
 use crate::error::{Error, Result};
 use crate::io::sync_backend::SyncFileBackend;
 use crate::io::IoBackend;
@@ -152,6 +154,107 @@ pub fn convert_from_raw(
     Ok(())
 }
 
+/// Convert a raw disk image to a QCOW2 image using parallel writes.
+///
+/// Splits the input into L2-range-sized chunks and processes them in parallel
+/// using `thread::scope`. Each thread reads from the raw input (lock-free pread)
+/// and writes to the QCOW2 output via `Qcow2ImageAsync` (per-L2 locking).
+///
+/// Compressed writes are not supported in parallel mode (they require
+/// sequential cursor tracking). Falls back to single-threaded for `compress=true`.
+pub fn convert_from_raw_parallel(
+    input_path: &Path,
+    output_path: &Path,
+    compress: bool,
+    compression_type: Option<u8>,
+    data_file: Option<String>,
+    encryption: Option<EncryptionOptions>,
+    num_threads: usize,
+) -> Result<()> {
+    // Compressed writes require sequential cursor — fall back to single-threaded
+    if compress || num_threads <= 1 {
+        return convert_from_raw(input_path, output_path, compress, compression_type, data_file, encryption);
+    }
+
+    let input = File::open(input_path).map_err(|e| Error::ConversionFailed {
+        message: format!("failed to open raw input: {e}"),
+    })?;
+    let input_size = input
+        .metadata()
+        .map_err(|e| Error::ConversionFailed {
+            message: format!("failed to read raw file size: {e}"),
+        })?
+        .len();
+
+    let input_backend = Arc::new(SyncFileBackend::from_file(input));
+
+    let dest = Qcow2Image::create(
+        output_path,
+        CreateOptions {
+            virtual_size: input_size,
+            cluster_bits: None,
+            extended_l2: false,
+            compression_type,
+            data_file,
+            encryption,
+        },
+    )?;
+
+    let cluster_size = dest.cluster_size() as usize;
+    let dest_async = Arc::new(Qcow2ImageAsync::from_image(dest)?);
+
+    // Split work into chunks aligned to batch boundaries
+    let batch_clusters = 64usize; // 4 MB batches
+    let batch_size = batch_clusters * cluster_size;
+    let total_batches = (input_size as usize + batch_size - 1) / batch_size;
+    let batches_per_thread = (total_batches + num_threads - 1) / num_threads;
+
+    let result: Result<()> = std::thread::scope(|s| {
+        let mut handles = Vec::new();
+
+        for t in 0..num_threads {
+            let start_batch = t * batches_per_thread;
+            if start_batch >= total_batches {
+                break;
+            }
+            let end_batch = ((t + 1) * batches_per_thread).min(total_batches);
+            let start_offset = start_batch as u64 * batch_size as u64;
+            let end_offset = (end_batch as u64 * batch_size as u64).min(input_size);
+
+            let input_be = Arc::clone(&input_backend);
+            let dest = Arc::clone(&dest_async);
+
+            handles.push(s.spawn(move || {
+                process_raw_range(
+                    input_be.as_ref(), &dest, start_offset, end_offset,
+                    cluster_size, batch_size,
+                )
+            }));
+        }
+
+        // Collect results
+        for handle in handles {
+            handle.join().map_err(|_| Error::ConversionFailed {
+                message: "worker thread panicked".into(),
+            })??;
+        }
+
+        Ok(())
+    });
+
+    result?;
+    dest_async.flush()?;
+
+    // Convert back to sync image for proper Drop/cleanup
+    let _image = Arc::try_unwrap(dest_async)
+        .map_err(|_| Error::ConversionFailed {
+            message: "failed to unwrap Arc".into(),
+        })?
+        .into_image();
+
+    Ok(())
+}
+
 /// Convert (compact) a QCOW2 image to a fresh QCOW2 image.
 ///
 /// Reads all guest data from the source and writes non-zero clusters
@@ -237,6 +340,50 @@ pub fn convert_qcow2_to_qcow2(
     }
 
     dest.flush()?;
+    Ok(())
+}
+
+/// Process a range of batches: read from input, skip zeros, write non-zero runs to dest.
+fn process_raw_range(
+    input: &dyn IoBackend,
+    dest: &Qcow2ImageAsync,
+    start_offset: u64,
+    end_offset: u64,
+    cluster_size: usize,
+    batch_size: usize,
+) -> Result<()> {
+    let mut buf = vec![0u8; batch_size];
+    let mut offset = start_offset;
+
+    while offset < end_offset {
+        let read_size = batch_size.min((end_offset - offset) as usize);
+        buf[..read_size].fill(0);
+        input.read_exact_at(&mut buf[..read_size], offset)?;
+
+        let mut pos = 0usize;
+        while pos < read_size {
+            let chunk = cluster_size.min(read_size - pos);
+
+            if is_all_zeros(&buf[pos..pos + chunk]) {
+                pos += chunk;
+                continue;
+            }
+
+            let run_start = pos;
+            pos += chunk;
+            while pos < read_size {
+                let next_chunk = cluster_size.min(read_size - pos);
+                if is_all_zeros(&buf[pos..pos + next_chunk]) {
+                    break;
+                }
+                pos += next_chunk;
+            }
+
+            let run_offset = offset + run_start as u64;
+            dest.write_at(&buf[run_start..pos], run_offset)?;
+        }
+        offset += read_size as u64;
+    }
     Ok(())
 }
 
@@ -397,5 +544,83 @@ mod tests {
         assert!(is_all_zeros(&[0, 0, 0, 0]));
         assert!(!is_all_zeros(&[0, 0, 1, 0]));
         assert!(is_all_zeros(&[]));
+    }
+
+    #[test]
+    fn convert_raw_to_qcow2_parallel_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let raw_path = dir.path().join("input.raw");
+
+        let mut raw_data = vec![0u8; 1024 * 1024];
+        raw_data[..512].fill(0xBB);
+        raw_data[65536..65536 + 1024].fill(0xCC);
+        std::fs::write(&raw_path, &raw_data).unwrap();
+
+        let qcow2_path = dir.path().join("parallel.qcow2");
+        convert_from_raw_parallel(&raw_path, &qcow2_path, false, None, None, None, 4).unwrap();
+
+        let mut image = Qcow2Image::open(&qcow2_path).unwrap();
+        let mut buf = vec![0u8; 512];
+        image.read_at(&mut buf, 0).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xBB));
+
+        let mut buf2 = vec![0u8; 1024];
+        image.read_at(&mut buf2, 65536).unwrap();
+        assert!(buf2.iter().all(|&b| b == 0xCC));
+
+        // Zero area
+        let mut buf3 = vec![0u8; 512];
+        image.read_at(&mut buf3, 131072).unwrap();
+        assert!(buf3.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn convert_parallel_matches_sequential() {
+        let dir = TempDir::new().unwrap();
+        let raw_path = dir.path().join("input.raw");
+
+        // Create raw with scattered non-zero data
+        let mut raw_data = vec![0u8; 512 * 1024]; // 512 KB
+        for i in 0..8 {
+            let start = i * 65536;
+            raw_data[start..start + 4096].fill((i + 1) as u8);
+        }
+        std::fs::write(&raw_path, &raw_data).unwrap();
+
+        let seq_path = dir.path().join("sequential.qcow2");
+        let par_path = dir.path().join("parallel.qcow2");
+
+        convert_from_raw(&raw_path, &seq_path, false, None, None, None).unwrap();
+        convert_from_raw_parallel(&raw_path, &par_path, false, None, None, None, 4).unwrap();
+
+        // Both should produce identical guest-visible data
+        let mut seq_img = Qcow2Image::open(&seq_path).unwrap();
+        let mut par_img = Qcow2Image::open(&par_path).unwrap();
+
+        let mut seq_buf = vec![0u8; raw_data.len()];
+        let mut par_buf = vec![0u8; raw_data.len()];
+        seq_img.read_at(&mut seq_buf, 0).unwrap();
+        par_img.read_at(&mut par_buf, 0).unwrap();
+
+        assert_eq!(seq_buf, par_buf, "parallel and sequential conversions differ");
+    }
+
+    #[test]
+    fn convert_parallel_fallback_on_compress() {
+        let dir = TempDir::new().unwrap();
+        let raw_path = dir.path().join("input.raw");
+
+        let mut raw_data = vec![0u8; 256 * 1024];
+        raw_data[..4096].fill(0xAA);
+        std::fs::write(&raw_path, &raw_data).unwrap();
+
+        let qcow2_path = dir.path().join("compressed.qcow2");
+        // compress=true should fall back to sequential
+        convert_from_raw_parallel(&raw_path, &qcow2_path, true, None, None, None, 4).unwrap();
+
+        let mut image = Qcow2Image::open(&qcow2_path).unwrap();
+        let mut buf = vec![0u8; 4096];
+        image.read_at(&mut buf, 0).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAA));
     }
 }
