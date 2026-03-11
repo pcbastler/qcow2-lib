@@ -85,8 +85,7 @@ impl<'a> Qcow2Writer<'a> {
         let entry = L2Entry::Compressed(descriptor);
 
         // Handle the old L2 entry: decrement refcount if it was allocated.
-        let l2_table = self.load_l2_table(l2_table_offset)?;
-        let old_entry = l2_table.get(l2_index)?;
+        let old_entry = self.read_l2_entry(l2_table_offset, l2_index)?;
         match old_entry {
             L2Entry::Standard { host_offset, .. } => {
                 self.refcount_manager.decrement_refcount(

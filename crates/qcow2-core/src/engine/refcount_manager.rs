@@ -361,25 +361,6 @@ impl RefcountManager {
         (table_index, block_index)
     }
 
-    /// Load a refcount block from disk or cache (returns a clone).
-    ///
-    /// Prefer [`get_refcount`] for reading single values (no clone needed).
-    /// This method is used by [`set_refcount_internal`] in WriteThrough mode
-    /// where the block must be mutated and re-written.
-    fn load_refcount_block(
-        &self,
-        offset: ClusterOffset,
-        backend: &dyn IoBackend,
-        cache: &mut MetadataCache,
-    ) -> Result<RefcountBlock> {
-        if let Some(block) = cache.get_refcount_block(offset) {
-            return Ok(block.clone());
-        }
-
-        self.load_refcount_block_into_cache(offset, backend, cache)?;
-        Ok(cache.get_refcount_block(offset).expect("just inserted").clone())
-    }
-
     /// Load a refcount block from disk and insert into the cache.
     fn load_refcount_block_into_cache(
         &self,
@@ -441,17 +422,24 @@ impl RefcountManager {
             return Ok(());
         }
 
-        // Load from disk (or cache in WriteThrough where get_mut returns None)
-        let mut block = self.load_refcount_block(block_offset, backend, cache)?;
-        block.set(block_index, value)?;
+        // Load from disk into cache if not present
+        if cache.get_refcount_block(block_offset).is_none() {
+            self.load_refcount_block_into_cache(block_offset, backend, cache)?;
+        }
 
         if cache.is_write_back() {
-            // Insert as dirty — will be flushed later
-            cache.insert_refcount_block(block_offset, block, true);
+            // Modify in-place in cache (now guaranteed present)
+            let entry = cache.get_refcount_entry_mut(block_offset)
+                .expect("just loaded into cache");
+            entry.value.set(block_index, value)?;
+            entry.dirty = true;
             // Handle pending evictions
             self.flush_pending_refcount_evictions(backend, cache)?;
         } else {
-            // WriteThrough: write to disk immediately
+            // WriteThrough: clone, modify, write to disk
+            let mut block = cache.get_refcount_block(block_offset)
+                .expect("just loaded into cache").clone();
+            block.set(block_index, value)?;
             self.write_refcount_block(block_offset, &block, backend, cache)?;
         }
 

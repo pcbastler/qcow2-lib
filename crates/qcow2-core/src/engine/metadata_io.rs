@@ -69,6 +69,30 @@ pub fn write_incompatible_features(
     Ok(())
 }
 
+/// Write both `incompatible_features` (offset 72) and `autoclear_features`
+/// (offset 88) in a single I/O covering bytes 72..96 of the header.
+///
+/// This batches what would otherwise be 2-3 separate pwrite calls into one,
+/// reducing syscall overhead in mark_dirty/clear_dirty.
+pub fn write_dirty_header_fields(
+    backend: &dyn IoBackend,
+    incompatible: IncompatibleFeatures,
+    autoclear: AutoclearFeatures,
+) -> Result<()> {
+    // Header layout bytes 72..96:
+    //   72..80: incompatible_features (u64 BE)
+    //   80..88: compatible_features   (u64 BE) — preserved from disk
+    //   88..96: autoclear_features    (u64 BE)
+    let mut buf = [0u8; 24];
+    // Read existing compatible_features (offset 80) to preserve it
+    backend.read_exact_at(&mut buf[8..16], OFF_INCOMPATIBLE_FEATURES + 8)?;
+    BigEndian::write_u64(&mut buf[0..8], incompatible.bits());
+    // buf[8..16] already has compatible_features
+    BigEndian::write_u64(&mut buf[16..24], autoclear.bits());
+    backend.write_all_at(&buf, OFF_INCOMPATIBLE_FEATURES)?;
+    Ok(())
+}
+
 /// Flush all dirty metadata from cache to disk.
 ///
 /// Order: pending evictions first, then refcount blocks, then L2 tables.

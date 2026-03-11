@@ -764,9 +764,8 @@ impl Qcow2Image {
     /// bitmaps may be inconsistent while the image is dirty.
     fn mark_dirty(&mut self) -> Result<()> {
         self.header.incompatible_features |= IncompatibleFeatures::DIRTY;
-        self.write_incompatible_features()?;
 
-        // Clear BITMAPS autoclear bit while image is dirty
+        // Clear autoclear bits while image is dirty
         if self.has_auto_bitmaps
             && self
                 .header
@@ -774,10 +773,7 @@ impl Qcow2Image {
                 .contains(AutoclearFeatures::BITMAPS)
         {
             self.header.autoclear_features -= AutoclearFeatures::BITMAPS;
-            self.write_autoclear_features()?;
         }
-
-        // Clear BLAKE3_HASHES autoclear bit while image is dirty
         if self.has_hashes
             && self
                 .header
@@ -785,8 +781,14 @@ impl Qcow2Image {
                 .contains(AutoclearFeatures::BLAKE3_HASHES)
         {
             self.header.autoclear_features -= AutoclearFeatures::BLAKE3_HASHES;
-            self.write_autoclear_features()?;
         }
+
+        // Single batched I/O for both feature fields
+        qcow2_core::engine::metadata_io::write_dirty_header_fields(
+            self.backend.as_ref(),
+            self.header.incompatible_features,
+            self.header.autoclear_features,
+        )?;
 
         self.backend.flush()?;
         self.dirty = true;
@@ -798,9 +800,8 @@ impl Qcow2Image {
     /// Restores the BITMAPS autoclear bit if bitmaps exist.
     fn clear_dirty(&mut self) -> Result<()> {
         self.header.incompatible_features -= IncompatibleFeatures::DIRTY;
-        self.write_incompatible_features()?;
 
-        // Restore BITMAPS autoclear bit on clean close
+        // Restore autoclear bits on clean close
         if self.has_auto_bitmaps
             && !self
                 .header
@@ -808,10 +809,7 @@ impl Qcow2Image {
                 .contains(AutoclearFeatures::BITMAPS)
         {
             self.header.autoclear_features |= AutoclearFeatures::BITMAPS;
-            self.write_autoclear_features()?;
         }
-
-        // Restore BLAKE3_HASHES autoclear bit on clean close
         if self.has_hashes
             && !self
                 .header
@@ -819,29 +817,21 @@ impl Qcow2Image {
                 .contains(AutoclearFeatures::BLAKE3_HASHES)
         {
             self.header.autoclear_features |= AutoclearFeatures::BLAKE3_HASHES;
-            self.write_autoclear_features()?;
         }
+
+        // Single batched I/O for both feature fields
+        qcow2_core::engine::metadata_io::write_dirty_header_fields(
+            self.backend.as_ref(),
+            self.header.incompatible_features,
+            self.header.autoclear_features,
+        )?;
 
         self.backend.flush()?;
         self.dirty = false;
         Ok(())
     }
 
-    /// Write the autoclear_features field to the on-disk header (offset 88).
-    fn write_autoclear_features(&self) -> Result<()> {
-        qcow2_core::engine::metadata_io::write_autoclear_features(
-            self.backend.as_ref(),
-            self.header.autoclear_features,
-        )
-    }
 
-    /// Write the incompatible_features field to the on-disk header (offset 72).
-    fn write_incompatible_features(&self) -> Result<()> {
-        qcow2_core::engine::metadata_io::write_incompatible_features(
-            self.backend.as_ref(),
-            self.header.incompatible_features,
-        )
-    }
 
     // ---- Compressed write API ----
 

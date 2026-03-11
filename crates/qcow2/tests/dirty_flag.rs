@@ -8,6 +8,7 @@ mod common;
 use qcow2::engine::image::{CreateOptions, Qcow2Image};
 use qcow2::format::feature_flags::{AutoclearFeatures, IncompatibleFeatures};
 use qcow2::io::MemoryBackend;
+use byteorder::{BigEndian, ByteOrder};
 
 
 /// Helper: create a 1 MB in-memory image.
@@ -286,6 +287,143 @@ fn autoclear_hashes_restored_on_flush() {
             .contains(AutoclearFeatures::BLAKE3_HASHES),
         "BLAKE3_HASHES autoclear should be restored after flush"
     );
+}
+
+// ---- Batched header write preserves compatible_features ----
+
+#[test]
+fn batched_header_write_preserves_compatible_features() {
+    let mut image = mem_image();
+
+    // Set compatible_features to a non-zero value directly in raw header
+    // (offset 80 = compatible_features)
+    let compatible_value: u64 = 0x0000_0000_0000_0003; // arbitrary bits
+    let mut buf = [0u8; 8];
+    BigEndian::write_u64(&mut buf, compatible_value);
+    qcow2::io::IoBackend::write_all_at(image.backend(), &buf, 80).unwrap();
+
+    // Write triggers mark_dirty which uses write_dirty_header_fields
+    image.write_at(&[0xAA; 64], 0).unwrap();
+
+    // Read back compatible_features from raw header — must be preserved
+    let raw = extract_raw(&image);
+    let compat_on_disk = u64::from_be_bytes(raw[80..88].try_into().unwrap());
+    assert_eq!(
+        compat_on_disk, compatible_value,
+        "compatible_features must be preserved by batched header write"
+    );
+
+    // Flush triggers clear_dirty — compatible_features must still be preserved
+    image.flush().unwrap();
+    let raw = extract_raw(&image);
+    let compat_on_disk = u64::from_be_bytes(raw[80..88].try_into().unwrap());
+    assert_eq!(
+        compat_on_disk, compatible_value,
+        "compatible_features must survive both mark_dirty and clear_dirty"
+    );
+}
+
+#[test]
+fn batched_dirty_with_bitmaps_and_hashes() {
+    let mut image = mem_image();
+    image.bitmap_create("bm", None, true).unwrap();
+    image.hash_init(None, None).unwrap();
+
+    // Both autoclear bits should be set
+    assert!(image.header().autoclear_features.contains(AutoclearFeatures::BITMAPS));
+    assert!(image.header().autoclear_features.contains(AutoclearFeatures::BLAKE3_HASHES));
+
+    // Write → mark_dirty clears both in one batched I/O
+    image.write_at(&[0xBB; 64], 0).unwrap();
+
+    // Verify on-disk state
+    let raw = extract_raw(&image);
+    let autoclear = u64::from_be_bytes(raw[88..96].try_into().unwrap());
+    let incompat = u64::from_be_bytes(raw[72..80].try_into().unwrap());
+    assert_ne!(incompat & 1, 0, "DIRTY bit should be set");
+    assert_eq!(autoclear & AutoclearFeatures::BITMAPS.bits(), 0, "BITMAPS should be cleared");
+    assert_eq!(autoclear & AutoclearFeatures::BLAKE3_HASHES.bits(), 0, "HASHES should be cleared");
+
+    // Flush → clear_dirty restores both in one batched I/O
+    image.flush().unwrap();
+    let raw = extract_raw(&image);
+    let autoclear = u64::from_be_bytes(raw[88..96].try_into().unwrap());
+    let incompat = u64::from_be_bytes(raw[72..80].try_into().unwrap());
+    assert_eq!(incompat & 1, 0, "DIRTY bit should be cleared");
+    assert_ne!(autoclear & AutoclearFeatures::BITMAPS.bits(), 0, "BITMAPS should be restored");
+    assert_ne!(autoclear & AutoclearFeatures::BLAKE3_HASHES.bits(), 0, "HASHES should be restored");
+}
+
+// ---- Refcount in-place modification correctness ----
+
+#[test]
+fn refcount_correct_after_many_writes_and_flush() {
+    let mut image = mem_image();
+    let cluster_size = 1u64 << image.header().cluster_bits;
+
+    // Write to all clusters in the 1 MB image
+    let num_clusters = (1u64 << 20) / cluster_size;
+    let data = vec![0xCCu8; cluster_size as usize];
+    for i in 0..num_clusters {
+        image.write_at(&data, i * cluster_size).unwrap();
+    }
+    image.flush().unwrap();
+
+    // Verify data integrity by reading everything back
+    let mut buf = vec![0u8; cluster_size as usize];
+    for i in 0..num_clusters {
+        image.read_at(&mut buf, i * cluster_size).unwrap();
+        assert!(
+            buf.iter().all(|&b| b == 0xCC),
+            "cluster {} data corrupted", i
+        );
+    }
+}
+
+#[test]
+fn refcount_correct_after_overwrite_cycles() {
+    let mut image = mem_image();
+    let cluster_size = 1u64 << image.header().cluster_bits;
+
+    // Write → flush → overwrite → flush multiple cycles
+    for cycle in 0u8..5 {
+        let data = vec![cycle; cluster_size as usize];
+        image.write_at(&data, 0).unwrap();
+        image.write_at(&data, cluster_size).unwrap();
+        image.flush().unwrap();
+    }
+
+    // Final data should be from the last cycle
+    let mut buf = vec![0u8; cluster_size as usize];
+    image.read_at(&mut buf, 0).unwrap();
+    assert!(buf.iter().all(|&b| b == 4));
+}
+
+#[test]
+fn refcount_file_based_qemu_check() {
+    if !common::has_qemu_img() {
+        return;
+    }
+    let (mut image, path, dir) = file_image();
+    let cluster_size = 1u64 << image.header().cluster_bits;
+    let num_clusters = (1u64 << 20) / cluster_size;
+
+    // Write all clusters, flush, overwrite half, flush again
+    let data = vec![0xAAu8; cluster_size as usize];
+    for i in 0..num_clusters {
+        image.write_at(&data, i * cluster_size).unwrap();
+    }
+    image.flush().unwrap();
+
+    let data2 = vec![0xBBu8; cluster_size as usize];
+    for i in 0..num_clusters / 2 {
+        image.write_at(&data2, i * cluster_size).unwrap();
+    }
+    image.flush().unwrap();
+    drop(image);
+
+    let ti = common::TestImage::wrap(path, dir);
+    assert!(ti.qemu_check(), "qemu-img check should pass after refcount in-place optimizations");
 }
 
 // ---- QEMU interop ----

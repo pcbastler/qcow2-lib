@@ -344,16 +344,6 @@ impl<'a> Qcow2Writer<'a> {
         table.get(index).map_err(Into::into)
     }
 
-    /// Load an L2 table from disk into the cache. Returns a clone for callers
-    /// that need the full table (COW, compressed cluster handling).
-    pub(crate) fn load_l2_table(&mut self, offset: ClusterOffset) -> Result<L2Table> {
-        if let Some(table) = self.cache.get_l2_table(offset) {
-            return Ok(table.clone());
-        }
-        self.load_l2_table_into_cache(offset)?;
-        Ok(self.cache.get_l2_table(offset).expect("just inserted").clone())
-    }
-
     /// Load an L2 table from disk and insert it into the cache.
     fn load_l2_table_into_cache(&mut self, offset: ClusterOffset) -> Result<()> {
         let cluster_size = 1usize << self.cluster_bits;
