@@ -124,8 +124,11 @@ pub(crate) mod test_helpers {
 
 mod unit_tests {
     use super::super::*;
+    use crate::engine::cache::CacheMode;
     use crate::engine::read_mode::ReadMode;
+    use crate::error::Error;
     use crate::format::constants::*;
+    use crate::format::types::ClusterOffset;
     use crate::io::MemoryBackend;
     use byteorder::{BigEndian, ByteOrder};
     use super::test_helpers::*;
