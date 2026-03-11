@@ -541,3 +541,238 @@ fn zero_length_write_does_not_panic_with_hashes() {
     let mismatches = image.hash_verify().unwrap();
     assert!(mismatches.is_empty());
 }
+
+// ---- Hash verification mismatch detection ----
+
+#[test]
+fn verify_detects_corrupted_data() {
+    let mut image = create_test_image(1 << 20);
+    image.hash_init(None, None).unwrap();
+
+    // Write data so hashes get computed
+    image.write_at(&[0xAA; 65536], 0).unwrap();
+    image.flush().unwrap();
+
+    // Verify should be clean before corruption
+    let mismatches = image.hash_verify().unwrap();
+    assert!(mismatches.is_empty());
+
+    // Read guest offset 0 to find the host cluster holding the data,
+    // then corrupt it directly via the backend.
+    let mut buf = vec![0u8; 512];
+    image.read_at(&mut buf, 0).unwrap();
+    assert_eq!(buf[0], 0xAA); // sanity check
+
+    // Find the host offset for guest offset 0 by reading a byte, then
+    // resolve indirectly: we know the data cluster offset is stored in L2.
+    // Simplest approach: corrupt via a write-through to the guest address
+    // bypassing the hash update. We can do that by writing directly to the
+    // backend at the same host offset the data lives.
+    // Instead, we use the backend to scan for our 0xAA pattern past the
+    // header/metadata area.
+    let file_size = image.backend().file_size().unwrap() as usize;
+    let mut raw = vec![0u8; file_size];
+    image.backend().read_exact_at(&mut raw, 0).unwrap();
+
+    // Find a cluster-sized run of 0xAA (the data cluster)
+    let cluster_size = 65536usize;
+    let mut data_host_offset = None;
+    for off in (cluster_size..raw.len()).step_by(cluster_size) {
+        if off + cluster_size <= raw.len()
+            && raw[off..off + cluster_size].iter().all(|&b| b == 0xAA)
+        {
+            data_host_offset = Some(off as u64);
+            break;
+        }
+    }
+    let data_host_offset = data_host_offset.expect("could not find data cluster in raw image");
+
+    // Corrupt one byte in the data cluster
+    image
+        .backend()
+        .write_all_at(&[0xFF], data_host_offset + 100)
+        .unwrap();
+
+    // Verify should now report exactly one mismatch at hash chunk 0
+    let mismatches = image.hash_verify().unwrap();
+    assert_eq!(mismatches.len(), 1, "expected exactly 1 mismatch after corruption");
+    assert_eq!(mismatches[0].hash_chunk_index, 0);
+    assert_eq!(mismatches[0].guest_offset, 0);
+    assert_ne!(mismatches[0].expected, mismatches[0].actual);
+}
+
+#[test]
+fn verify_detects_corruption_in_second_hash_chunk() {
+    // Use 4KB hash chunks so we can have many hash chunks within one cluster
+    let mut image = create_test_image(1 << 20);
+    image.hash_init(None, Some(12)).unwrap(); // 4KB hash chunks
+
+    // Write 8KB of data → hash chunks 0 and 1
+    image.write_at(&[0xCC; 8192], 0).unwrap();
+    image.flush().unwrap();
+
+    let mismatches = image.hash_verify().unwrap();
+    assert!(mismatches.is_empty());
+
+    // Find the data cluster and corrupt bytes in the second 4KB region (offset 4096..8192)
+    let file_size = image.backend().file_size().unwrap() as usize;
+    let mut raw = vec![0u8; file_size];
+    image.backend().read_exact_at(&mut raw, 0).unwrap();
+
+    let cluster_size = 65536usize;
+    let mut data_host_offset = None;
+    for off in (cluster_size..raw.len()).step_by(cluster_size) {
+        if off + 8192 <= raw.len()
+            && raw[off..off + 8192].iter().all(|&b| b == 0xCC)
+        {
+            data_host_offset = Some(off as u64);
+            break;
+        }
+    }
+    let data_host_offset = data_host_offset.expect("could not find data cluster");
+
+    // Corrupt in the second 4KB region → hash chunk index 1
+    image
+        .backend()
+        .write_all_at(&[0x00; 16], data_host_offset + 4096 + 50)
+        .unwrap();
+
+    let mismatches = image.hash_verify().unwrap();
+    assert!(
+        mismatches.iter().any(|m| m.hash_chunk_index == 1),
+        "expected mismatch at hash chunk 1, got: {:?}",
+        mismatches.iter().map(|m| m.hash_chunk_index).collect::<Vec<_>>()
+    );
+}
+
+// ---- Remove hashes with actual hash data ----
+
+#[test]
+fn hash_remove_frees_hash_data_clusters() {
+    let mut image = create_test_image(1 << 20);
+    image.hash_init(None, None).unwrap();
+
+    // Write data so hash data clusters get allocated
+    image.write_at(&[0xAA; 65536], 0).unwrap();
+    image.write_at(&[0xBB; 65536], 65536).unwrap();
+    image.flush().unwrap();
+
+    // Verify hashes exist
+    assert!(image.has_hashes());
+    assert!(image.hash_get(0).unwrap().is_some());
+    assert!(image.hash_get(1).unwrap().is_some());
+
+    // Remove hashes
+    image.hash_remove().unwrap();
+    image.flush().unwrap();
+
+    // Extension should be gone
+    assert!(!image.has_hashes());
+    assert!(image.hash_info().is_none());
+
+    // Data should still be readable (hash removal must not affect guest data)
+    let mut buf = vec![0u8; 65536];
+    image.read_at(&mut buf, 0).unwrap();
+    assert!(buf.iter().all(|&b| b == 0xAA));
+    image.read_at(&mut buf, 65536).unwrap();
+    assert!(buf.iter().all(|&b| b == 0xBB));
+
+    // Integrity should be clean after removal
+    let report = check_integrity(image.backend(), image.header()).unwrap();
+    assert!(
+        report.is_clean(),
+        "integrity should be clean after removing hashes with data: {:?}",
+        report,
+    );
+}
+
+#[test]
+fn hash_remove_then_reinit() {
+    let mut image = create_test_image(1 << 20);
+    image.hash_init(None, None).unwrap();
+    image.write_at(&[0xAA; 65536], 0).unwrap();
+    image.flush().unwrap();
+
+    let hash_before = image.hash_get(0).unwrap().unwrap();
+
+    // Remove and reinit
+    image.hash_remove().unwrap();
+    image.hash_init(None, None).unwrap();
+
+    // No hashes stored yet (fresh init)
+    assert!(image.hash_get(0).unwrap().is_none());
+
+    // Rehash should recompute
+    let count = image.hash_rehash().unwrap();
+    assert!(count >= 1);
+
+    let hash_after = image.hash_get(0).unwrap().unwrap();
+    // Same data → same hash
+    assert_eq!(hash_before, hash_after);
+}
+
+// ---- get_hash out-of-bounds / edge cases ----
+
+#[test]
+fn get_hash_beyond_table_returns_none() {
+    let mut image = create_test_image(1 << 20); // 1 MB with 64KB hash chunks → 16 hash chunks
+    image.hash_init(None, None).unwrap();
+
+    // Write data so at least one hash exists
+    image.write_at(&[0xAA; 65536], 0).unwrap();
+    image.flush().unwrap();
+
+    // Hash chunk index far beyond the virtual size should return None
+    let hash = image.hash_get(99999).unwrap();
+    assert!(hash.is_none(), "out-of-bounds hash_get should return None");
+}
+
+#[test]
+fn get_hash_at_last_valid_index() {
+    // 1MB image with 64KB hash chunks → 16 hash chunks (indices 0..15)
+    let mut image = create_test_image(1 << 20);
+    image.hash_init(None, None).unwrap();
+
+    // Write data at the last hash chunk
+    let last_chunk_offset = (1 << 20) - 65536; // offset of last 64KB chunk
+    image.write_at(&[0xEE; 65536], last_chunk_offset).unwrap();
+    image.flush().unwrap();
+
+    // Last valid index should have a hash
+    let last_idx = ((1u64 << 20) + 65535) / 65536 - 1; // = 15
+    let hash = image.hash_get(last_idx).unwrap();
+    assert!(hash.is_some(), "hash at last valid index should exist");
+
+    // One past the last valid index should return None
+    let hash = image.hash_get(last_idx + 1).unwrap();
+    assert!(hash.is_none(), "hash past last valid index should be None");
+}
+
+#[test]
+fn get_hash_without_init_returns_error() {
+    let mut image = create_test_image(1 << 20);
+    // No hash_init called
+    let result = image.hash_get(0);
+    assert!(result.is_err(), "hash_get without init should return error");
+}
+
+#[test]
+fn verify_without_init_returns_error() {
+    let mut image = create_test_image(1 << 20);
+    let result = image.hash_verify();
+    assert!(result.is_err(), "hash_verify without init should return error");
+}
+
+#[test]
+fn export_without_init_returns_error() {
+    let mut image = create_test_image(1 << 20);
+    let result = image.hash_export(None);
+    assert!(result.is_err(), "hash_export without init should return error");
+}
+
+#[test]
+fn rehash_without_init_returns_error() {
+    let mut image = create_test_image(1 << 20);
+    let result = image.hash_rehash();
+    assert!(result.is_err(), "hash_rehash without init should return error");
+}

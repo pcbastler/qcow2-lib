@@ -769,3 +769,122 @@ fn unallocated_within_backing_reads_data() {
         "should read 0xBB from backing"
     );
 }
+
+// ---- Encrypted read tests ----
+
+#[test]
+fn read_encrypted_full_cluster() {
+    use crate::engine::encryption::{CryptContext, CipherMode};
+
+    let data_cluster = 3;
+    let host_offset = data_cluster * CLUSTER_SIZE as u64;
+    let l2_raw = host_offset | L2_COPIED_FLAG;
+
+    let key = vec![0x42u8; 64]; // AES-256-XTS
+    let crypt = CryptContext::new(key, CipherMode::AesXtsPlain64);
+
+    // Write encrypted data to cluster 3
+    let plaintext = vec![0xAB; CLUSTER_SIZE];
+    let mut encrypted = plaintext.clone();
+    crypt.encrypt_cluster(host_offset, &mut encrypted).unwrap();
+
+    let (backend, mapper) =
+        build_test_setup(&[(0, l2_raw)], &[(data_cluster as usize, &encrypted)]);
+    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut warnings = vec![];
+
+    let mut reader = Qcow2Reader::new(
+        &mapper, &backend, &backend, &mut cache, CLUSTER_BITS,
+        1 << 30, COMPRESSION_DEFLATE, ReadMode::Strict, &mut warnings,
+        None, Some(&crypt), &StdCompressor,
+    );
+
+    // Full cluster read
+    let mut buf = vec![0u8; CLUSTER_SIZE];
+    reader.read_at(&mut buf, 0).unwrap();
+    assert_eq!(buf, plaintext, "decrypted data should match original");
+}
+
+#[test]
+fn read_encrypted_partial_cluster() {
+    use crate::engine::encryption::{CryptContext, CipherMode};
+
+    let data_cluster = 3;
+    let host_offset = data_cluster * CLUSTER_SIZE as u64;
+    let l2_raw = host_offset | L2_COPIED_FLAG;
+
+    let key = vec![0x42u8; 64];
+    let crypt = CryptContext::new(key, CipherMode::AesXtsPlain64);
+
+    let mut plaintext = vec![0u8; CLUSTER_SIZE];
+    plaintext[256..768].fill(0xCC);
+    let mut encrypted = plaintext.clone();
+    crypt.encrypt_cluster(host_offset, &mut encrypted).unwrap();
+
+    let (backend, mapper) =
+        build_test_setup(&[(0, l2_raw)], &[(data_cluster as usize, &encrypted)]);
+    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut warnings = vec![];
+
+    let mut reader = Qcow2Reader::new(
+        &mapper, &backend, &backend, &mut cache, CLUSTER_BITS,
+        1 << 30, COMPRESSION_DEFLATE, ReadMode::Strict, &mut warnings,
+        None, Some(&crypt), &StdCompressor,
+    );
+
+    // Partial read (triggers decrypt-full-cluster then copy slice path)
+    let mut buf = vec![0u8; 512];
+    reader.read_at(&mut buf, 256).unwrap();
+    assert_eq!(buf, plaintext[256..768]);
+}
+
+// ---- Lenient mode tests ----
+
+#[test]
+fn lenient_mode_returns_zeros_on_read_error() {
+    // Create an image where the L2 entry points to an offset beyond the file
+    let bogus_host = 999 * CLUSTER_SIZE as u64;
+    let l2_raw = bogus_host | L2_COPIED_FLAG;
+
+    let (backend, mapper) = build_test_setup(&[(0, l2_raw)], &[]);
+    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut warnings = vec![];
+
+    let mut reader = Qcow2Reader::new(
+        &mapper, &backend, &backend, &mut cache, CLUSTER_BITS,
+        1 << 30, COMPRESSION_DEFLATE, ReadMode::Lenient, &mut warnings,
+        None, None, &StdCompressor,
+    );
+
+    let mut buf = vec![0xFF; 512];
+    reader.read_at(&mut buf, 0).unwrap();
+    assert!(buf.iter().all(|&b| b == 0), "lenient mode should zero-fill on error");
+    assert_eq!(warnings.len(), 1, "should record one warning");
+}
+
+#[test]
+fn read_beyond_virtual_size_returns_error() {
+    let virtual_size = CLUSTER_SIZE as u64;
+    let (backend, mapper) = build_test_setup(&[], &[]);
+    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut warnings = vec![];
+
+    let mut reader = make_strict_reader(&mapper, &backend, &mut cache, virtual_size, &mut warnings);
+
+    let mut buf = vec![0u8; 512];
+    let result = reader.read_at(&mut buf, virtual_size);
+    assert!(matches!(result, Err(Error::OffsetBeyondDiskSize { .. })));
+}
+
+#[test]
+fn read_overflow_offset_returns_error() {
+    let (backend, mapper) = build_test_setup(&[], &[]);
+    let mut cache = MetadataCache::new(CacheConfig::default());
+    let mut warnings = vec![];
+
+    let mut reader = make_strict_reader(&mapper, &backend, &mut cache, u64::MAX, &mut warnings);
+
+    let mut buf = vec![0u8; 512];
+    let result = reader.read_at(&mut buf, u64::MAX - 10);
+    assert!(matches!(result, Err(Error::OffsetBeyondDiskSize { .. })));
+}

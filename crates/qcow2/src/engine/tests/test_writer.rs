@@ -1824,3 +1824,282 @@ fn write_compressed_overwrites_compressed_l2_entry() {
         other => panic!("expected Compressed, got {other:?}"),
     }
 }
+
+// ---- Backing image tests ----
+
+/// Simple backing image that returns a fixed byte pattern.
+struct MockBacking {
+    data: Vec<u8>,
+    virtual_size: u64,
+}
+
+impl MockBacking {
+    fn new(size: u64, fill: u8) -> Self {
+        Self {
+            data: vec![fill; size as usize],
+            virtual_size: size,
+        }
+    }
+}
+
+impl crate::io::BackingImage for MockBacking {
+    fn virtual_size(&self) -> u64 {
+        self.virtual_size
+    }
+
+    fn read_at(&mut self, buf: &mut [u8], guest_offset: u64) -> crate::error::Result<()> {
+        let start = guest_offset as usize;
+        let end = start + buf.len();
+        if end <= self.data.len() {
+            buf.copy_from_slice(&self.data[start..end]);
+        } else if start < self.data.len() {
+            let avail = self.data.len() - start;
+            buf[..avail].copy_from_slice(&self.data[start..]);
+            // rest stays as-is (caller initialized to zero)
+        }
+        Ok(())
+    }
+}
+
+fn make_writer_with_backing<'a>(
+    s: &'a mut TestSetup,
+    backing: &'a mut dyn crate::io::BackingImage,
+) -> Qcow2Writer<'a> {
+    Qcow2Writer::new(
+        &mut s.mapper,
+        s.l1_table_offset,
+        &s.backend,
+        &s.backend,
+        &mut s.cache,
+        &mut s.refcount_manager,
+        CLUSTER_BITS,
+        VIRTUAL_SIZE,
+        COMPRESSION_DEFLATE,
+        false,
+        Some(backing),
+        None,
+        &StdCompressor,
+    )
+}
+
+#[test]
+fn partial_write_reads_backing_data() {
+    let mut s = setup();
+    let mut backing = MockBacking::new(VIRTUAL_SIZE, 0xBB);
+
+    // Write 512 bytes at offset 256 within cluster 0
+    let write_data = vec![0xCC; 512];
+    make_writer_with_backing(&mut s, &mut backing)
+        .write_at(&write_data, 256)
+        .unwrap();
+
+    // Read back the entire cluster
+    let l1_entry = s.mapper.l1_entry(L1Index(0)).unwrap();
+    let l2_offset = l1_entry.l2_table_offset().unwrap();
+    let mut l2_buf = vec![0u8; CLUSTER_SIZE];
+    s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
+    let l2_table = L2Table::read_from(&l2_buf, GEO_STD).unwrap();
+    let entry = l2_table.get(L2Index(0)).unwrap();
+
+    if let L2Entry::Standard { host_offset, .. } = entry {
+        let mut cluster = vec![0u8; CLUSTER_SIZE];
+        s.backend.read_exact_at(&mut cluster, host_offset.0).unwrap();
+
+        // Bytes 0..256 should come from backing (0xBB)
+        assert!(cluster[..256].iter().all(|&b| b == 0xBB), "pre-write area should be backing data");
+        // Bytes 256..768 should be our write (0xCC)
+        assert!(cluster[256..768].iter().all(|&b| b == 0xCC), "write area should be our data");
+        // Bytes 768..cluster_size should be backing data (0xBB)
+        assert!(cluster[768..].iter().all(|&b| b == 0xBB), "post-write area should be backing data");
+    } else {
+        panic!("expected Standard entry, got {entry:?}");
+    }
+}
+
+#[test]
+fn partial_write_beyond_backing_size_zeros_rest() {
+    let mut s = setup();
+    // Backing is only 128 bytes — smaller than a cluster
+    let mut backing = MockBacking::new(128, 0xDD);
+
+    let write_data = vec![0xEE; 64];
+    make_writer_with_backing(&mut s, &mut backing)
+        .write_at(&write_data, 64)
+        .unwrap();
+
+    let l1_entry = s.mapper.l1_entry(L1Index(0)).unwrap();
+    let l2_offset = l1_entry.l2_table_offset().unwrap();
+    let mut l2_buf = vec![0u8; CLUSTER_SIZE];
+    s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
+    let l2_table = L2Table::read_from(&l2_buf, GEO_STD).unwrap();
+
+    if let L2Entry::Standard { host_offset, .. } = l2_table.get(L2Index(0)).unwrap() {
+        let mut cluster = vec![0u8; CLUSTER_SIZE];
+        s.backend.read_exact_at(&mut cluster, host_offset.0).unwrap();
+
+        // Bytes 0..64: from backing (0xDD)
+        assert!(cluster[..64].iter().all(|&b| b == 0xDD), "should read from backing");
+        // Bytes 64..128: our write (0xEE)
+        assert!(cluster[64..128].iter().all(|&b| b == 0xEE), "should be our write");
+        // Bytes 128+: zero (beyond backing)
+        assert!(cluster[128..256].iter().all(|&b| b == 0), "beyond backing should be zero");
+    } else {
+        panic!("expected Standard entry");
+    }
+}
+
+// ---- Encrypted write tests ----
+
+fn make_writer_encrypted<'a>(
+    s: &'a mut TestSetup,
+    crypt: &'a crate::engine::encryption::CryptContext,
+) -> Qcow2Writer<'a> {
+    Qcow2Writer::new(
+        &mut s.mapper,
+        s.l1_table_offset,
+        &s.backend,
+        &s.backend,
+        &mut s.cache,
+        &mut s.refcount_manager,
+        CLUSTER_BITS,
+        VIRTUAL_SIZE,
+        COMPRESSION_DEFLATE,
+        false,
+        None,
+        Some(crypt),
+        &StdCompressor,
+    )
+}
+
+#[test]
+fn encrypted_full_cluster_write_roundtrip() {
+    use crate::engine::encryption::{CryptContext, CipherMode};
+
+    let mut s = setup();
+    let key = vec![0x42u8; 64]; // 64 bytes for AES-256-XTS
+    let crypt = CryptContext::new(key, CipherMode::AesXtsPlain64);
+
+    let plaintext = vec![0xAB; CLUSTER_SIZE];
+    make_writer_encrypted(&mut s, &crypt)
+        .write_at(&plaintext, 0)
+        .unwrap();
+
+    // Read back the raw on-disk data — it should NOT be plaintext
+    let l1_entry = s.mapper.l1_entry(L1Index(0)).unwrap();
+    let l2_offset = l1_entry.l2_table_offset().unwrap();
+    let mut l2_buf = vec![0u8; CLUSTER_SIZE];
+    s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
+    let l2_table = L2Table::read_from(&l2_buf, GEO_STD).unwrap();
+
+    if let L2Entry::Standard { host_offset, .. } = l2_table.get(L2Index(0)).unwrap() {
+        let mut raw = vec![0u8; CLUSTER_SIZE];
+        s.backend.read_exact_at(&mut raw, host_offset.0).unwrap();
+        assert_ne!(raw, plaintext, "on-disk data should be encrypted");
+
+        // Decrypt and verify roundtrip
+        crypt.decrypt_cluster(host_offset.0, &mut raw).unwrap();
+        assert_eq!(raw, plaintext, "decrypted data should match original");
+    } else {
+        panic!("expected Standard entry");
+    }
+}
+
+#[test]
+fn encrypted_partial_write_in_place() {
+    use crate::engine::encryption::{CryptContext, CipherMode};
+
+    let mut s = setup();
+    let key = vec![0x42u8; 64];
+    let crypt = CryptContext::new(key, CipherMode::AesXtsPlain64);
+
+    // First: full cluster write to allocate
+    let initial = vec![0xAA; CLUSTER_SIZE];
+    make_writer_encrypted(&mut s, &crypt)
+        .write_at(&initial, 0)
+        .unwrap();
+
+    // Second: partial write (in-place update since copied=true, refcount=1)
+    let patch = vec![0xBB; 512];
+    make_writer_encrypted(&mut s, &crypt)
+        .write_at(&patch, 256)
+        .unwrap();
+
+    // Read back and decrypt
+    let l1_entry = s.mapper.l1_entry(L1Index(0)).unwrap();
+    let l2_offset = l1_entry.l2_table_offset().unwrap();
+    let mut l2_buf = vec![0u8; CLUSTER_SIZE];
+    s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
+    let l2_table = L2Table::read_from(&l2_buf, GEO_STD).unwrap();
+
+    if let L2Entry::Standard { host_offset, .. } = l2_table.get(L2Index(0)).unwrap() {
+        let mut raw = vec![0u8; CLUSTER_SIZE];
+        s.backend.read_exact_at(&mut raw, host_offset.0).unwrap();
+        crypt.decrypt_cluster(host_offset.0, &mut raw).unwrap();
+
+        // Verify: 0..256 = 0xAA, 256..768 = 0xBB, 768.. = 0xAA
+        assert!(raw[..256].iter().all(|&b| b == 0xAA));
+        assert!(raw[256..768].iter().all(|&b| b == 0xBB));
+        assert!(raw[768..].iter().all(|&b| b == 0xAA));
+    } else {
+        panic!("expected Standard entry");
+    }
+}
+
+#[test]
+fn encrypted_write_to_unallocated_partial() {
+    use crate::engine::encryption::{CryptContext, CipherMode};
+
+    let mut s = setup();
+    let key = vec![0x42u8; 64];
+    let crypt = CryptContext::new(key, CipherMode::AesXtsPlain64);
+
+    // Partial write to an unallocated cluster
+    let data = vec![0xCC; 1024];
+    make_writer_encrypted(&mut s, &crypt)
+        .write_at(&data, 512)
+        .unwrap();
+
+    // Decrypt and verify
+    let l1_entry = s.mapper.l1_entry(L1Index(0)).unwrap();
+    let l2_offset = l1_entry.l2_table_offset().unwrap();
+    let mut l2_buf = vec![0u8; CLUSTER_SIZE];
+    s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
+    let l2_table = L2Table::read_from(&l2_buf, GEO_STD).unwrap();
+
+    if let L2Entry::Standard { host_offset, .. } = l2_table.get(L2Index(0)).unwrap() {
+        let mut raw = vec![0u8; CLUSTER_SIZE];
+        s.backend.read_exact_at(&mut raw, host_offset.0).unwrap();
+        crypt.decrypt_cluster(host_offset.0, &mut raw).unwrap();
+
+        assert!(raw[..512].iter().all(|&b| b == 0), "pre-write should be zero");
+        assert!(raw[512..1536].iter().all(|&b| b == 0xCC), "write area should match");
+        assert!(raw[1536..].iter().all(|&b| b == 0), "post-write should be zero");
+    } else {
+        panic!("expected Standard entry");
+    }
+}
+
+#[test]
+fn write_to_compressed_cluster_with_encryption_returns_error() {
+    use crate::engine::compression;
+    use crate::engine::encryption::{CryptContext, CipherMode};
+
+    let mut s = setup();
+    let key = vec![0x42u8; 64];
+    let crypt = CryptContext::new(key, CipherMode::AesXtsPlain64);
+
+    // First write a compressed cluster (without encryption to set it up)
+    let comp_data = vec![0xAA; CLUSTER_SIZE];
+    let compressed = compression::compress_cluster(&comp_data, CLUSTER_SIZE, COMPRESSION_DEFLATE)
+        .unwrap()
+        .expect("should compress");
+    make_writer(&mut s).write_compressed_at(&compressed, 0).unwrap();
+
+    // Now try to write to it with encryption enabled — should get EncryptionWithCompression
+    let patch = vec![0xBB; 512];
+    let result = make_writer_encrypted(&mut s, &crypt).write_at(&patch, 0);
+    assert!(
+        matches!(result, Err(Error::EncryptionWithCompression)),
+        "expected EncryptionWithCompression error, got {result:?}"
+    );
+}

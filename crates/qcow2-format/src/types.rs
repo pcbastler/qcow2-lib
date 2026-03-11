@@ -463,6 +463,120 @@ mod tests {
         assert_eq!(intra, IntraClusterOffset((1u32 << 21) - 1));
     }
 
+    // ---- All Display/Debug impls ----
+
+    #[test]
+    fn cluster_offset_display_is_hex() {
+        assert_eq!(format!("{}", ClusterOffset(0xff00)), "0xff00");
+    }
+
+    #[test]
+    fn guest_offset_debug_is_hex() {
+        assert_eq!(format!("{:?}", GuestOffset(0xdead)), "GuestOffset(0xdead)");
+    }
+
+    #[test]
+    fn cluster_index_debug_and_display() {
+        assert_eq!(format!("{:?}", ClusterIndex(7)), "ClusterIndex(7)");
+        assert_eq!(format!("{}", ClusterIndex(7)), "7");
+    }
+
+    #[test]
+    fn l1_index_debug() {
+        assert_eq!(format!("{:?}", L1Index(3)), "L1Index(3)");
+    }
+
+    #[test]
+    fn l2_index_debug_and_display() {
+        assert_eq!(format!("{:?}", L2Index(99)), "L2Index(99)");
+        assert_eq!(format!("{}", L2Index(99)), "99");
+    }
+
+    #[test]
+    fn bitmap_index_debug_and_display() {
+        assert_eq!(format!("{:?}", BitmapIndex(5)), "BitmapIndex(5)");
+        assert_eq!(format!("{}", BitmapIndex(5)), "5");
+    }
+
+    #[test]
+    fn intra_cluster_offset_debug_and_display() {
+        assert_eq!(format!("{:?}", IntraClusterOffset(0x200)), "IntraClusterOffset(0x200)");
+        assert_eq!(format!("{}", IntraClusterOffset(0x200)), "0x200");
+    }
+
+    #[test]
+    fn subcluster_index_debug_and_display() {
+        assert_eq!(format!("{:?}", SubclusterIndex(31)), "SubclusterIndex(31)");
+        assert_eq!(format!("{}", SubclusterIndex(31)), "31");
+    }
+
+    #[test]
+    fn intra_subcluster_offset_debug_and_display() {
+        assert_eq!(format!("{:?}", IntraSubclusterOffset(0x7ff)), "IntraSubclusterOffset(0x7ff)");
+        assert_eq!(format!("{}", IntraSubclusterOffset(0x7ff)), "0x7ff");
+    }
+
+    // ---- From/Into conversions ----
+
+    #[test]
+    fn cluster_offset_from_u64_roundtrip() {
+        let offset = ClusterOffset::from(0x1_0000u64);
+        assert_eq!(offset, ClusterOffset(0x1_0000));
+        let raw: u64 = offset.into();
+        assert_eq!(raw, 0x1_0000);
+    }
+
+    #[test]
+    fn guest_offset_from_u64_roundtrip() {
+        let offset = GuestOffset::from(0xdead_beefu64);
+        assert_eq!(offset, GuestOffset(0xdead_beef));
+        let raw: u64 = offset.into();
+        assert_eq!(raw, 0xdead_beef);
+    }
+
+    #[test]
+    fn cluster_index_from_u64_roundtrip() {
+        let idx = ClusterIndex::from(42u64);
+        assert_eq!(idx, ClusterIndex(42));
+        let raw: u64 = idx.into();
+        assert_eq!(raw, 42);
+    }
+
+    // ---- ClusterGeometry methods ----
+
+    #[test]
+    fn cluster_geometry_standard_16() {
+        let geo = ClusterGeometry { cluster_bits: 16, extended_l2: false };
+        assert_eq!(geo.cluster_size(), 65536);
+        assert_eq!(geo.l2_entry_size(), 8);
+        assert_eq!(geo.l2_entry_shift(), 3);
+        assert_eq!(geo.l2_entries_per_table(), 65536 / 8);
+        assert_eq!(geo.subcluster_size(), 65536 / 32);
+    }
+
+    #[test]
+    fn cluster_geometry_extended_l2() {
+        let geo = ClusterGeometry { cluster_bits: 16, extended_l2: true };
+        assert_eq!(geo.l2_entry_size(), 16);
+        assert_eq!(geo.l2_entry_shift(), 4);
+        assert_eq!(geo.l2_entries_per_table(), 65536 / 16);
+    }
+
+    #[test]
+    fn cluster_geometry_min_cluster_bits() {
+        let geo = ClusterGeometry { cluster_bits: 9, extended_l2: false };
+        assert_eq!(geo.cluster_size(), 512);
+        assert_eq!(geo.l2_entries_per_table(), 512 / 8);
+        assert_eq!(geo.subcluster_size(), 512 / 32);
+    }
+
+    #[test]
+    fn cluster_geometry_max_cluster_bits() {
+        let geo = ClusterGeometry { cluster_bits: 21, extended_l2: false };
+        assert_eq!(geo.cluster_size(), 2 * 1024 * 1024);
+        assert_eq!(geo.l2_entries_per_table(), 2 * 1024 * 1024 / 8);
+    }
+
     #[test]
     fn cluster_alignment_various_bits() {
         // cluster_bits=9 (512 bytes)
