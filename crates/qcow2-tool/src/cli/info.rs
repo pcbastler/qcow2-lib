@@ -67,37 +67,48 @@ pub fn run(path: &Path) -> Result<()> {
     );
 
     if header.has_backing_file() {
-        if let Some(chain) = image.backing_chain() {
-            println!("  Backing chain:    {} file(s)", chain.depth());
-            for entry in chain.entries() {
-                println!("    - {}", entry.path.display());
-            }
-        } else {
-            println!("  Backing file:     (referenced but not resolved)");
-        }
+        print_backing_info(&image);
     }
 
     // Feature flags (v3)
     if header.version >= 3 {
-        if !header.incompatible_features.is_empty() {
-            println!("  Incompatible:     {:?}", header.incompatible_features);
-        }
-        if !header.compatible_features.is_empty() {
-            println!("  Compatible:       {:?}", header.compatible_features);
-        }
-        if !header.autoclear_features.is_empty() {
-            println!("  Autoclear:        {:?}", header.autoclear_features);
-        }
+        print_feature_flags(header);
     }
 
     // Header extensions
-    let extensions = image.extensions();
+    print_extensions(image.extensions());
+
+    Ok(())
+}
+
+fn print_backing_info(image: &Qcow2Image) {
+    if let Some(chain) = image.backing_chain() {
+        println!("  Backing chain:    {} file(s)", chain.depth());
+        for entry in chain.entries() {
+            println!("    - {}", entry.path.display());
+        }
+    } else {
+        println!("  Backing file:     (referenced but not resolved)");
+    }
+}
+
+fn print_feature_flags(header: &qcow2::format::header::Header) {
+    if !header.incompatible_features.is_empty() {
+        println!("  Incompatible:     {:?}", header.incompatible_features);
+    }
+    if !header.compatible_features.is_empty() {
+        println!("  Compatible:       {:?}", header.compatible_features);
+    }
+    if !header.autoclear_features.is_empty() {
+        println!("  Autoclear:        {:?}", header.autoclear_features);
+    }
+}
+
+fn print_extensions(extensions: &[qcow2::format::header_extension::HeaderExtension]) {
     if !extensions.is_empty() {
         println!("  Extensions:       {}", extensions.len());
         for ext in extensions {
             println!("    - {ext:?}");
         }
     }
-
-    Ok(())
 }

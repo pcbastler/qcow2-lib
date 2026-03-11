@@ -17,7 +17,74 @@ use crate::format::types::{ClusterGeometry, ClusterOffset};
 use crate::io::sync_backend::SyncFileBackend;
 use crate::io::IoBackend;
 
-use super::{CreateOptions, Qcow2Image};
+use super::{CreateOptions, EncryptionOptions, Qcow2Image};
+
+/// Validate create options and return resolved values.
+///
+/// Returns (cluster_bits, cluster_size, extended_l2, compression_type, data_file, encryption).
+fn validate_create_options(
+    options: &CreateOptions,
+) -> Result<(u32, u64, bool, u8, Option<String>, Option<EncryptionOptions>)> {
+    if options.virtual_size == 0 {
+        return Err(Error::InvalidVirtualSize { size: 0 });
+    }
+    if let Some(bits) = options.cluster_bits {
+        if bits < crate::format::constants::MIN_CLUSTER_BITS
+            || bits > crate::format::constants::MAX_CLUSTER_BITS
+        {
+            return Err(FormatError::InvalidClusterBits {
+                cluster_bits: bits,
+                min: crate::format::constants::MIN_CLUSTER_BITS,
+                max: crate::format::constants::MAX_CLUSTER_BITS,
+            }
+            .into());
+        }
+    }
+    if let Some(ct) = options.compression_type {
+        if ct != crate::format::constants::COMPRESSION_DEFLATE
+            && ct != crate::format::constants::COMPRESSION_ZSTD
+        {
+            return Err(FormatError::UnsupportedCompressionType {
+                compression_type: ct,
+            }
+            .into());
+        }
+    }
+
+    let cluster_bits = options.cluster_bits.unwrap_or(16);
+    let cluster_size = 1u64 << cluster_bits;
+    let extended_l2 = options.extended_l2;
+    let compression_type = options
+        .compression_type
+        .unwrap_or(crate::format::constants::COMPRESSION_DEFLATE);
+
+    if extended_l2 && cluster_bits < crate::format::constants::MIN_CLUSTER_BITS_EXTENDED_L2 {
+        return Err(FormatError::ExtendedL2ClusterBitsTooSmall {
+            cluster_bits,
+            min: crate::format::constants::MIN_CLUSTER_BITS_EXTENDED_L2,
+        }
+        .into());
+    }
+    if options.data_file.is_some()
+        && compression_type != crate::format::constants::COMPRESSION_DEFLATE
+    {
+        return Err(Error::CompressedWithExternalData);
+    }
+    if options.encryption.is_some()
+        && compression_type != crate::format::constants::COMPRESSION_DEFLATE
+    {
+        return Err(Error::EncryptionWithCompression);
+    }
+
+    Ok((
+        cluster_bits,
+        cluster_size,
+        extended_l2,
+        compression_type,
+        options.data_file.clone(),
+        options.encryption.clone(),
+    ))
+}
 
 /// Calculate the number of L1 table entries needed for a given virtual size.
 fn calculate_l1_entries(virtual_size: u64, cluster_size: u64, l2_entry_size: u64) -> u32 {
@@ -55,6 +122,58 @@ fn write_initial_layout(
     backend.write_all_at(&rb_buf, rb_offset)?;
 
     Ok(())
+}
+
+/// Generate a LUKS1 header and encryption context from encryption options.
+fn generate_luks_header(
+    encryption: &Option<EncryptionOptions>,
+) -> Result<(Option<Vec<u8>>, Option<crate::engine::encryption::CryptContext>)> {
+    let Some(enc) = encryption else {
+        return Ok((None, None));
+    };
+    let key_bytes = match enc.cipher {
+        crate::engine::encryption::CipherMode::AesXtsPlain64 => 64u32,
+        crate::engine::encryption::CipherMode::AesCbcEssiv => 32u32,
+    };
+    let (header_bytes, mk) = crate::engine::encryption::create::create_luks1_header(
+        &enc.password,
+        enc.cipher,
+        key_bytes,
+        enc.iter_time_ms.map(|ms| ms.max(1000)),
+    )?;
+    let ctx = crate::engine::encryption::CryptContext::new(mk, enc.cipher);
+    Ok((Some(header_bytes), Some(ctx)))
+}
+
+/// Build incompatible/autoclear feature flags and header_length from options.
+fn build_feature_flags(
+    extended_l2: bool,
+    compression_type: u8,
+    has_data_file: bool,
+) -> (IncompatibleFeatures, AutoclearFeatures, u32) {
+    let mut incompat = IncompatibleFeatures::empty();
+    if extended_l2 {
+        incompat |= IncompatibleFeatures::EXTENDED_L2;
+    }
+    if compression_type != crate::format::constants::COMPRESSION_DEFLATE {
+        incompat |= IncompatibleFeatures::COMPRESSION_TYPE;
+    }
+    if has_data_file {
+        incompat |= IncompatibleFeatures::EXTERNAL_DATA_FILE;
+    }
+
+    let mut autoclear = AutoclearFeatures::empty();
+    if has_data_file {
+        autoclear |= AutoclearFeatures::RAW_EXTERNAL;
+    }
+
+    let header_length = if compression_type != crate::format::constants::COMPRESSION_DEFLATE {
+        (crate::format::constants::HEADER_V3_MIN_LENGTH + 1) as u32
+    } else {
+        crate::format::constants::HEADER_V3_MIN_LENGTH as u32
+    };
+
+    (incompat, autoclear, header_length)
 }
 
 impl Qcow2Image {
@@ -110,92 +229,21 @@ impl Qcow2Image {
         backend: Box<dyn IoBackend>,
         options: CreateOptions,
     ) -> Result<Self> {
-        // Validate basic option constraints
-        if options.virtual_size == 0 {
-            return Err(Error::InvalidVirtualSize { size: 0 });
-        }
-        if let Some(bits) = options.cluster_bits {
-            if bits < crate::format::constants::MIN_CLUSTER_BITS
-                || bits > crate::format::constants::MAX_CLUSTER_BITS
-            {
-                return Err(FormatError::InvalidClusterBits {
-                    cluster_bits: bits,
-                    min: crate::format::constants::MIN_CLUSTER_BITS,
-                    max: crate::format::constants::MAX_CLUSTER_BITS,
-                }
-                .into());
-            }
-        }
-        if let Some(ct) = options.compression_type {
-            if ct != crate::format::constants::COMPRESSION_DEFLATE
-                && ct != crate::format::constants::COMPRESSION_ZSTD
-            {
-                return Err(FormatError::UnsupportedCompressionType {
-                    compression_type: ct,
-                }
-                .into());
-            }
-        }
+        let (cluster_bits, cluster_size, extended_l2, compression_type, data_file, encryption) =
+            validate_create_options(&options)?;
 
-        let cluster_bits = options.cluster_bits.unwrap_or(16);
-        let cluster_size = 1u64 << cluster_bits;
         let refcount_order = 4u32; // 16-bit refcounts
-        let extended_l2 = options.extended_l2;
-        let compression_type = options.compression_type.unwrap_or(crate::format::constants::COMPRESSION_DEFLATE);
-        let data_file = options.data_file;
-        let encryption = options.encryption;
-
-        // Validate extended L2 requirements
-        if extended_l2 && cluster_bits < crate::format::constants::MIN_CLUSTER_BITS_EXTENDED_L2 {
-            return Err(FormatError::ExtendedL2ClusterBitsTooSmall {
-                cluster_bits,
-                min: crate::format::constants::MIN_CLUSTER_BITS_EXTENDED_L2,
-            }
-            .into());
-        }
-
-        // Compressed clusters are not supported with external data files
-        if data_file.is_some()
-            && compression_type != crate::format::constants::COMPRESSION_DEFLATE
-        {
-            return Err(Error::CompressedWithExternalData);
-        }
-
-        // Encryption + compression are mutually exclusive
-        if encryption.is_some()
-            && compression_type != crate::format::constants::COMPRESSION_DEFLATE
-        {
-            return Err(Error::EncryptionWithCompression);
-        }
 
         // Calculate L1 table size
         let l2_entry_size = if extended_l2 { 16u64 } else { 8u64 };
         let l1_entries = calculate_l1_entries(options.virtual_size, cluster_size, l2_entry_size);
 
         // Generate LUKS header if encryption is requested
-        let (luks_header_data, crypt_context) = if let Some(ref enc) = encryption {
-            let key_bytes = match enc.cipher {
-                crate::engine::encryption::CipherMode::AesXtsPlain64 => 64u32,
-                crate::engine::encryption::CipherMode::AesCbcEssiv => 32u32,
-            };
-            let (header_bytes, mk) = crate::engine::encryption::create::create_luks1_header(
-                &enc.password,
-                enc.cipher,
-                key_bytes,
-                enc.iter_time_ms.map(|ms| ms.max(1000)),
-            )?;
-            let ctx = crate::engine::encryption::CryptContext::new(mk, enc.cipher);
-            (Some(header_bytes), Some(ctx))
-        } else {
-            (None, None)
-        };
-
-        // Calculate how many clusters the LUKS header needs
-        let luks_clusters = if let Some(ref data) = luks_header_data {
-            ((data.len() as u64) + cluster_size - 1) / cluster_size
-        } else {
-            0
-        };
+        let (luks_header_data, crypt_context) = generate_luks_header(&encryption)?;
+        let luks_clusters = luks_header_data
+            .as_ref()
+            .map(|d| (d.len() as u64 + cluster_size - 1) / cluster_size)
+            .unwrap_or(0);
 
         // Layout: header(0), L1(1), reftable(2), refblock(3), [luks(4..)]
         let l1_offset = cluster_size;
@@ -204,30 +252,8 @@ impl Qcow2Image {
         let luks_offset = 4 * cluster_size;
         let initial_clusters = 4u64 + luks_clusters;
 
-        // Build incompatible features
-        let mut incompat = IncompatibleFeatures::empty();
-        if extended_l2 {
-            incompat |= IncompatibleFeatures::EXTENDED_L2;
-        }
-        if compression_type != crate::format::constants::COMPRESSION_DEFLATE {
-            incompat |= IncompatibleFeatures::COMPRESSION_TYPE;
-        }
-        if data_file.is_some() {
-            incompat |= IncompatibleFeatures::EXTERNAL_DATA_FILE;
-        }
-
-        // Build autoclear features
-        let mut autoclear = AutoclearFeatures::empty();
-        if data_file.is_some() {
-            autoclear |= AutoclearFeatures::RAW_EXTERNAL;
-        }
-
-        // header_length must include compression_type byte when non-deflate
-        let header_length = if compression_type != crate::format::constants::COMPRESSION_DEFLATE {
-            (crate::format::constants::HEADER_V3_MIN_LENGTH + 1) as u32
-        } else {
-            crate::format::constants::HEADER_V3_MIN_LENGTH as u32
-        };
+        let (incompat, autoclear, header_length) =
+            build_feature_flags(extended_l2, compression_type, data_file.is_some());
 
         // Build header
         let header = Header {
