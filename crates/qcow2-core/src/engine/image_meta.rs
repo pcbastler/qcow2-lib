@@ -48,6 +48,10 @@ pub struct ImageMeta {
     pub read_mode: ReadMode,
     /// Warnings collected during image open (e.g., dirty flag, unknown features).
     pub warnings: Vec<ReadWarning>,
+    /// When true, `mark_dirty()` sets `dirty = true` in memory but skips
+    /// writing the DIRTY flag to the on-disk header. Used by streaming
+    /// backends where the header must remain clean (no patching).
+    pub skip_dirty_marking: bool,
 }
 
 /// Describes how a write should be executed after metadata resolution.

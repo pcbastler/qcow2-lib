@@ -5,9 +5,11 @@
 //! - [`SyncFileBackend`](sync_backend::SyncFileBackend) for file-based I/O
 //! - [`MemoryBackend`] for in-memory testing
 
+pub mod streaming;
 pub mod sync_backend;
 
 pub use qcow2_core::io::{BackingImage, Compressor, IoBackend};
+pub use streaming::StreamingBackend;
 
 use crate::error::{io_error, Result};
 
