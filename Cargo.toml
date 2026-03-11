@@ -8,6 +8,7 @@ members = [
     "crates/qcow2-rescue-e2e",
 ]
 resolver = "2"
+exclude = ["fuzz"]
 
 [workspace.lints.clippy]
 cognitive_complexity = "warn"
