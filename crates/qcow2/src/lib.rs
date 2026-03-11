@@ -1,6 +1,6 @@
 //! # qcow2
 //!
-//! A textbook-quality QCOW2 image format library for Rust.
+//! A QCOW2 image format library for Rust.
 //!
 //! Built on [`qcow2_core`] (a `no_std` + `alloc` crate), this library adds:
 //! - File-based and in-memory I/O backends

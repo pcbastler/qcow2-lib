@@ -2,7 +2,7 @@
 name = "qcow2"
 version = "0.1.0"
 edition = "2021"
-description = "A textbook-quality QCOW2 image format library for Rust"
+description = "A QCOW2 image format library for Rust"
 license-file = "../../LICENSE"
 rust-version = "1.70"
 
