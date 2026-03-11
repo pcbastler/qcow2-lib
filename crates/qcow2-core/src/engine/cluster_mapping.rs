@@ -90,11 +90,8 @@ impl ClusterMapper {
             None => return Ok(ClusterResolution::Unallocated),
         };
 
-        // Step 2: Load L2 table (cache-first)
-        let l2_table = self.load_l2_table(l2_offset, backend, cache)?;
-
-        // Step 3: L2 lookup
-        let l2_entry = l2_table.get(l2_index)?;
+        // Step 2+3: Load L2 entry directly (avoids cloning the full table)
+        let l2_entry = self.load_l2_entry(l2_offset, l2_index, backend, cache)?;
 
         // Step 4: Map L2Entry to ClusterResolution
         match l2_entry {
@@ -132,16 +129,20 @@ impl ClusterMapper {
         }
     }
 
-    /// Load an L2 table, checking the cache first.
-    fn load_l2_table(
+    /// Load a single L2 entry, checking the cache first.
+    ///
+    /// This avoids cloning the entire L2 table on cache hits —
+    /// only the requested entry (a small Copy type) is returned.
+    fn load_l2_entry(
         &self,
         offset: ClusterOffset,
+        index: L2Index,
         backend: &dyn IoBackend,
         cache: &mut MetadataCache,
-    ) -> Result<L2Table> {
-        // Check cache first
+    ) -> Result<L2Entry> {
+        // Check cache first — read entry directly from the cached reference
         if let Some(table) = cache.get_l2_table(offset) {
-            return Ok(table.clone());
+            return table.get(index).map_err(Into::into);
         }
 
         // Validate L2 table offset against file size.
@@ -160,14 +161,14 @@ impl ClusterMapper {
             .into());
         }
 
-        // Cache miss: read from backend
+        // Cache miss: read from backend, insert into cache
         let mut buf = vec![0u8; cluster_size as usize];
         backend.read_exact_at(&mut buf, offset.0)?;
         let table = L2Table::read_from(&buf, self.geometry)?;
+        let entry = table.get(index)?;
 
-        // Insert into cache
-        cache.insert_l2_table(offset, table.clone(), false);
-        Ok(table)
+        cache.insert_l2_table(offset, table, false);
+        Ok(entry)
     }
 
     /// Access the L1 table (for inspection/diagnostics).
