@@ -950,7 +950,7 @@ impl Qcow2Image {
     // ---- Internal helpers ----
 
     /// Detect whether any bitmap has the AUTO flag set.
-    fn detect_auto_bitmaps(
+    pub(crate) fn detect_auto_bitmaps(
         backend: &dyn IoBackend,
         extensions: &[HeaderExtension],
     ) -> bool {
