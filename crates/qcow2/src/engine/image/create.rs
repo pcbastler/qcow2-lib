@@ -92,6 +92,28 @@ pub(crate) fn calculate_l1_entries(virtual_size: u64, cluster_size: u64, l2_entr
     ((virtual_size + bytes_per_l1_entry - 1) / bytes_per_l1_entry) as u32
 }
 
+/// Debug-assert that the initial image layout has no overlapping metadata regions.
+#[inline]
+fn debug_assert_layout_no_overlap(
+    l1_offset: u64,
+    l1_clusters: u64,
+    cluster_size: u64,
+    rt_offset: u64,
+    rb_offset: u64,
+) {
+    let l1_end = l1_offset + l1_clusters * cluster_size;
+    debug_assert!(
+        l1_end <= rt_offset,
+        "L1 table ({:#x}..{:#x}) overlaps refcount table at {:#x}",
+        l1_offset, l1_end, rt_offset
+    );
+    debug_assert!(
+        rt_offset + cluster_size <= rb_offset,
+        "refcount table ({:#x}) overlaps refcount block at {:#x}",
+        rt_offset, rb_offset
+    );
+}
+
 /// Write the initial on-disk layout: zeroed clusters, refcount table, and refcount block.
 ///
 /// This is shared between `create_on_backend` and `create_overlay_on_backend`.
@@ -268,9 +290,9 @@ impl Qcow2Image {
     /// created with a minimal on-disk layout:
     ///
     /// - Cluster 0: header
-    /// - Cluster 1: L1 table
-    /// - Cluster 2: refcount table (1 cluster)
-    /// - Cluster 3: refcount block 0
+    /// - Clusters 1..N: L1 table (N depends on virtual size)
+    /// - Cluster N+1: refcount table (1 cluster)
+    /// - Cluster N+2: refcount block 0
     pub fn create<P: AsRef<Path>>(path: P, options: CreateOptions) -> Result<Self> {
         let path = path.as_ref();
         let data_file_name = options.data_file.clone();
@@ -327,11 +349,14 @@ impl Qcow2Image {
             .map(|d| (d.len() as u64 + cluster_size - 1) / cluster_size)
             .unwrap_or(0);
 
+        let l1_clusters = ((l1_entries as u64 * 8) + cluster_size - 1) / cluster_size;
         let l1_offset = cluster_size;
-        let rt_offset = 2 * cluster_size;
-        let rb_offset = 3 * cluster_size;
-        let luks_offset = 4 * cluster_size;
-        let initial_clusters = 4u64 + luks_clusters;
+        let rt_offset = (1 + l1_clusters) * cluster_size;
+        let rb_offset = (2 + l1_clusters) * cluster_size;
+        let luks_offset = (3 + l1_clusters) * cluster_size;
+        let initial_clusters = 3 + l1_clusters + luks_clusters;
+
+        debug_assert_layout_no_overlap(l1_offset, l1_clusters, cluster_size, rt_offset, rb_offset);
 
         let (incompat, autoclear, header_length) =
             build_feature_flags(extended_l2, compression_type, data_file.is_some());
@@ -411,11 +436,14 @@ impl Qcow2Image {
         // Calculate L1 table size
         let l1_entries = calculate_l1_entries(virtual_size, cluster_size, 8);
 
-        // Layout: header(0), L1(1), reftable(2), refblock(3)
+        // Layout: header(0), L1(1..N), reftable(N+1), refblock(N+2)
+        let l1_clusters = ((l1_entries as u64 * 8) + cluster_size - 1) / cluster_size;
         let l1_offset = cluster_size;
-        let rt_offset = 2 * cluster_size;
-        let rb_offset = 3 * cluster_size;
-        let initial_clusters = 4u64;
+        let rt_offset = (1 + l1_clusters) * cluster_size;
+        let rb_offset = (2 + l1_clusters) * cluster_size;
+        let initial_clusters = 3 + l1_clusters;
+
+        debug_assert_layout_no_overlap(l1_offset, l1_clusters, cluster_size, rt_offset, rb_offset);
 
         // Header extension area starts at header_length (byte 104).
         // Write an end-of-extensions marker (type=0, length=0 → 8 zero bytes)
@@ -993,5 +1021,137 @@ mod tests {
         let mut buf2 = vec![0u8; 512];
         overlay.read_at(&mut buf2, CLUSTER_SIZE as u64).unwrap();
         assert!(buf2.iter().all(|&b| b == 0xBB), "cluster 1: backing data");
+    }
+
+    // ---- Large image layout regression tests ----
+
+    #[test]
+    fn create_on_backend_13t_layout_no_overlap() {
+        // 13 TiB with 64 KiB clusters: L1 needs ~3.25 clusters (4 after rounding)
+        let virtual_size = 13u64 * 1024 * 1024 * 1024 * 1024;
+        let backend = MemoryBackend::zeroed(0);
+        let image = Qcow2Image::create_on_backend(
+            Box::new(backend),
+            CreateOptions {
+                virtual_size,
+                cluster_bits: Some(16),
+                extended_l2: false,
+                compression_type: None,
+                data_file: None,
+                encryption: None,
+            },
+        )
+        .unwrap();
+
+        let cluster_size = image.cluster_size();
+        let l1_offset = image.header().l1_table_offset.0;
+        let rt_offset = image.header().refcount_table_offset.0;
+        let l1_bytes = image.header().l1_table_entries as u64 * 8;
+        let l1_end = l1_offset + ((l1_bytes + cluster_size - 1) / cluster_size) * cluster_size;
+
+        // L1 table must not overlap refcount table
+        assert!(
+            l1_end <= rt_offset,
+            "L1 end ({:#x}) must not exceed refcount table offset ({:#x})",
+            l1_end, rt_offset
+        );
+    }
+
+    #[test]
+    fn create_on_backend_13t_refcounts_correct() {
+        let virtual_size = 13u64 * 1024 * 1024 * 1024 * 1024;
+        let backend = MemoryBackend::zeroed(0);
+        let image = Qcow2Image::create_on_backend(
+            Box::new(backend),
+            CreateOptions {
+                virtual_size,
+                cluster_bits: Some(16),
+                extended_l2: false,
+                compression_type: None,
+                data_file: None,
+                encryption: None,
+            },
+        )
+        .unwrap();
+
+        let refcount_manager = image.meta.refcount_manager.as_ref().unwrap();
+        let cache = &mut MetadataCache::new(CacheConfig::default());
+        let cluster_size = image.cluster_size();
+        let l1_bytes = image.header().l1_table_entries as u64 * 8;
+        let l1_clusters = (l1_bytes + cluster_size - 1) / cluster_size;
+        let initial_clusters = 3 + l1_clusters; // header + L1 + RT + RB
+
+        for i in 0..initial_clusters {
+            let rc = refcount_manager
+                .get_refcount(i * cluster_size, image.backend(), cache)
+                .unwrap();
+            assert_eq!(rc, 1, "cluster {} should have refcount 1", i);
+        }
+    }
+
+    #[test]
+    fn create_on_backend_boundary_l1_size() {
+        let cluster_size = 65536u64;
+        let l2_entries = cluster_size / 8;
+        let bytes_per_l1 = l2_entries * cluster_size;
+
+        // Exactly fills 1 L1 cluster (8192 entries × 8 bytes = 65536)
+        let max_one_cluster = (cluster_size / 8) * bytes_per_l1;
+        // One more L1 entry requires 2 L1 clusters
+        let needs_two_clusters = max_one_cluster + bytes_per_l1;
+
+        for &vsize in &[max_one_cluster, needs_two_clusters] {
+            let backend = MemoryBackend::zeroed(0);
+            let image = Qcow2Image::create_on_backend(
+                Box::new(backend),
+                CreateOptions {
+                    virtual_size: vsize,
+                    cluster_bits: Some(16),
+                    extended_l2: false,
+                    compression_type: None,
+                    data_file: None,
+                    encryption: None,
+                },
+            )
+            .unwrap();
+
+            let l1_offset = image.header().l1_table_offset.0;
+            let rt_offset = image.header().refcount_table_offset.0;
+            let l1_bytes = image.header().l1_table_entries as u64 * 8;
+            let l1_end = l1_offset + ((l1_bytes + cluster_size - 1) / cluster_size) * cluster_size;
+
+            assert!(
+                l1_end <= rt_offset,
+                "L1 must not overlap RT for vsize={:#x}: l1_end={:#x} rt={:#x}",
+                vsize, l1_end, rt_offset
+            );
+        }
+    }
+
+    #[test]
+    fn create_on_backend_8t_integrity_clean() {
+        let virtual_size = 8u64 * 1024 * 1024 * 1024 * 1024;
+        let backend = MemoryBackend::zeroed(0);
+        let mut image = Qcow2Image::create_on_backend(
+            Box::new(backend),
+            CreateOptions {
+                virtual_size,
+                cluster_bits: Some(16),
+                extended_l2: false,
+                compression_type: None,
+                data_file: None,
+                encryption: None,
+            },
+        )
+        .unwrap();
+
+        let report = image.check_integrity().unwrap();
+        assert!(
+            report.is_clean(),
+            "8 TiB image should be clean: {} mismatches, {} leaks, {} overlaps",
+            report.mismatches.len(),
+            report.leaks.len(),
+            report.overlaps.len()
+        );
     }
 }

@@ -88,6 +88,22 @@ pub fn run(path: &Path, repair: bool) -> Result<()> {
             }
         }
 
+        if !report.overlaps.is_empty() {
+            println!(
+                "Overlaps: {} metadata regions overlap",
+                report.overlaps.len()
+            );
+            for o in report.overlaps.iter().take(10) {
+                eprintln!(
+                    "  cluster {}: {} overlaps {}",
+                    o.cluster_index, o.region_a, o.region_b
+                );
+            }
+            if report.overlaps.len() > 10 {
+                eprintln!("  ... and {} more", report.overlaps.len() - 10);
+            }
+        }
+
         if !repair {
             println!();
             println!("Hint: use --repair to fix these issues.");

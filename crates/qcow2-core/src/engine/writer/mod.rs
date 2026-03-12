@@ -288,6 +288,12 @@ impl<'a> Qcow2Writer<'a> {
 
     /// Write a single L1 entry to disk (write-through).
     fn write_l1_entry(&self, index: L1Index, entry: L1Entry) -> Result<()> {
+        debug_assert!(
+            index.0 < self.mapper.l1_table().len(),
+            "L1 index {} exceeds L1 table size {}",
+            index.0,
+            self.mapper.l1_table().len()
+        );
         let offset = self.l1_table_offset.0 + (index.0 as u64 * 8);
         let mut buf = [0u8; 8];
         BigEndian::write_u64(&mut buf, entry.raw());

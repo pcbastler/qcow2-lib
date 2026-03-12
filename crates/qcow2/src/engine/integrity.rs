@@ -57,6 +57,17 @@ pub struct LeakedCluster {
     pub stored_refcount: u64,
 }
 
+/// Two metadata regions that occupy the same host cluster.
+#[derive(Debug, Clone)]
+pub struct MetadataOverlap {
+    /// The cluster index where the overlap occurs.
+    pub cluster_index: u64,
+    /// First overlapping region.
+    pub region_a: &'static str,
+    /// Second overlapping region.
+    pub region_b: &'static str,
+}
+
 /// Complete report from an integrity check.
 #[derive(Debug, Clone)]
 pub struct IntegrityReport {
@@ -66,19 +77,21 @@ pub struct IntegrityReport {
     pub mismatches: Vec<RefcountMismatch>,
     /// Clusters with stored refcount > 0 but no references.
     pub leaks: Vec<LeakedCluster>,
+    /// Metadata regions that occupy the same host cluster.
+    pub overlaps: Vec<MetadataOverlap>,
     /// The full reference map (cluster_index → expected_refcount).
     pub reference_map: HashMap<u64, u64>,
 }
 
 impl IntegrityReport {
-    /// Returns `true` if no mismatches or leaks were found.
+    /// Returns `true` if no mismatches, leaks, or overlaps were found.
     pub fn is_clean(&self) -> bool {
-        self.mismatches.is_empty() && self.leaks.is_empty()
+        self.mismatches.is_empty() && self.leaks.is_empty() && self.overlaps.is_empty()
     }
 
     /// Total number of issues found.
     pub fn total_errors(&self) -> usize {
-        self.mismatches.len() + self.leaks.len()
+        self.mismatches.len() + self.leaks.len() + self.overlaps.len()
     }
 }
 
@@ -252,6 +265,107 @@ fn read_snapshots_if_any(
     }
 }
 
+/// Detect overlapping metadata regions from the header.
+///
+/// Builds a list of metadata cluster ranges (header, L1 table, refcount table,
+/// refcount blocks, snapshot table, LUKS header) and checks for pairwise
+/// intersections.
+fn detect_metadata_overlaps(
+    backend: &dyn IoBackend,
+    header: &Header,
+) -> Result<Vec<MetadataOverlap>> {
+    let cluster_size = header.cluster_size();
+    // Collect (name, start_cluster_idx, end_cluster_idx_exclusive) tuples
+    let mut regions: Vec<(&'static str, u64, u64)> = Vec::new();
+
+    // Header cluster
+    regions.push(("header", 0, 1));
+
+    // L1 table
+    let l1_start = header.l1_table_offset.0 / cluster_size;
+    let l1_bytes = header.l1_table_entries as u64 * L1_ENTRY_SIZE as u64;
+    let l1_clusters = (l1_bytes + cluster_size - 1) / cluster_size;
+    if l1_clusters > 0 {
+        regions.push(("L1 table", l1_start, l1_start + l1_clusters));
+    }
+
+    // Refcount table
+    let rt_start = header.refcount_table_offset.0 / cluster_size;
+    let rt_clusters = header.refcount_table_clusters as u64;
+    if rt_clusters > 0 {
+        regions.push(("refcount table", rt_start, rt_start + rt_clusters));
+    }
+
+    // Refcount blocks (read from refcount table)
+    let rt_byte_size = rt_clusters * cluster_size;
+    if rt_byte_size > 0 {
+        let mut rt_buf = vec![0u8; rt_byte_size as usize];
+        backend.read_exact_at(&mut rt_buf, header.refcount_table_offset.0)?;
+        let entry_count = rt_byte_size as usize / REFCOUNT_TABLE_ENTRY_SIZE;
+        for i in 0..entry_count {
+            let raw = BigEndian::read_u64(&rt_buf[i * REFCOUNT_TABLE_ENTRY_SIZE..]);
+            let entry = RefcountTableEntry::from_raw(raw);
+            if let Some(block_offset) = entry.block_offset() {
+                let idx = block_offset.0 / cluster_size;
+                regions.push(("refcount block", idx, idx + 1));
+            }
+        }
+    }
+
+    // Snapshot table
+    if header.snapshot_count > 0 && header.snapshots_offset.0 > 0 {
+        let snap_start = header.snapshots_offset.0 / cluster_size;
+        // Estimate snapshot table size (at least 1 cluster)
+        regions.push(("snapshot table", snap_start, snap_start + 1));
+    }
+
+    // LUKS header (from extensions)
+    if header.crypt_method >= 2 {
+        let ext_start = header.header_length as u64;
+        let ext_end = cluster_size.min(backend.file_size()?);
+        if ext_start < ext_end {
+            let mut ext_buf = vec![0u8; (ext_end - ext_start) as usize];
+            backend.read_exact_at(&mut ext_buf, ext_start)?;
+            let extensions = HeaderExtension::read_all(&ext_buf).unwrap_or_default();
+            if let Some((offset, length)) = extensions.iter().find_map(|e| match e {
+                HeaderExtension::FullDiskEncryption { offset, length } => Some((*offset, *length)),
+                _ => None,
+            }) {
+                let luks_start = offset / cluster_size;
+                let luks_clusters = (length + cluster_size - 1) / cluster_size;
+                regions.push(("LUKS header", luks_start, luks_start + luks_clusters));
+            }
+        }
+    }
+
+    // Sort by start cluster and detect overlaps
+    regions.sort_by_key(|&(_, start, _)| start);
+
+    let mut overlaps = Vec::new();
+    for i in 0..regions.len() {
+        for j in (i + 1)..regions.len() {
+            let (name_a, start_a, end_a) = regions[i];
+            let (name_b, start_b, end_b) = regions[j];
+            // Since sorted by start, start_b >= start_a
+            if start_b >= end_a {
+                break; // No more overlaps possible for region i
+            }
+            // Overlap: report each overlapping cluster
+            let overlap_start = start_b;
+            let overlap_end = end_a.min(end_b);
+            for cluster_index in overlap_start..overlap_end {
+                overlaps.push(MetadataOverlap {
+                    cluster_index,
+                    region_a: name_a,
+                    region_b: name_b,
+                });
+            }
+        }
+    }
+
+    Ok(overlaps)
+}
+
 /// Check integrity: build reference map and compare with stored refcounts.
 pub fn check_integrity(
     backend: &dyn IoBackend,
@@ -310,10 +424,14 @@ pub fn check_integrity(
         }
     }
 
+    // Detect metadata region overlaps
+    let overlaps = detect_metadata_overlaps(backend, header)?;
+
     Ok(IntegrityReport {
         stats,
         mismatches,
         leaks,
+        overlaps,
         reference_map,
     })
 }
@@ -945,6 +1063,7 @@ mod tests {
             stats: ClusterStats::default(),
             mismatches: vec![],
             leaks: vec![],
+            overlaps: vec![],
             reference_map: HashMap::new(),
         };
         assert!(report.is_clean());
@@ -961,6 +1080,7 @@ mod tests {
                 cluster_index: 10,
                 stored_refcount: 1,
             }],
+            overlaps: vec![],
             reference_map: HashMap::new(),
         };
         assert!(!report2.is_clean());
@@ -1309,5 +1429,88 @@ mod tests {
             }
             _ => panic!("expected Standard entry after repair"),
         }
+    }
+
+    #[test]
+    fn detect_overlaps_on_clean_image() {
+        let backend = crate::io::MemoryBackend::zeroed(0);
+        let mut image = Qcow2Image::create_on_backend(
+            Box::new(backend),
+            CreateOptions {
+                virtual_size: 1 << 30,
+                cluster_bits: None,
+                extended_l2: false,
+                compression_type: None,
+                data_file: None,
+                encryption: None,
+            },
+        )
+        .unwrap();
+        let report = image.check_integrity().unwrap();
+        assert!(report.overlaps.is_empty(), "clean image should have no overlaps");
+    }
+
+    #[test]
+    fn detect_overlaps_on_large_clean_image() {
+        let backend = crate::io::MemoryBackend::zeroed(0);
+        let mut image = Qcow2Image::create_on_backend(
+            Box::new(backend),
+            CreateOptions {
+                virtual_size: 13u64 * 1024 * 1024 * 1024 * 1024, // 13 TiB
+                cluster_bits: Some(16),
+                extended_l2: false,
+                compression_type: None,
+                data_file: None,
+                encryption: None,
+            },
+        )
+        .unwrap();
+        let report = image.check_integrity().unwrap();
+        assert!(report.overlaps.is_empty(), "13 TiB image should have no overlaps");
+        assert!(report.is_clean(), "13 TiB image should be fully clean");
+    }
+
+    #[test]
+    fn detect_overlaps_finds_corrupted_layout() {
+        use byteorder::{BigEndian, ByteOrder};
+
+        // Create a valid 1 GB image
+        let backend = crate::io::MemoryBackend::zeroed(0);
+        let image = Qcow2Image::create_on_backend(
+            Box::new(backend),
+            CreateOptions {
+                virtual_size: 1 << 30,
+                cluster_bits: None,
+                extended_l2: false,
+                compression_type: None,
+                data_file: None,
+                encryption: None,
+            },
+        )
+        .unwrap();
+
+        // Corrupt the header: move refcount table offset to overlap with L1 table
+        // L1 is at cluster 1, so point RT to cluster 1 as well
+        let cluster_size = image.cluster_size();
+        let rt_field_offset = 48u64; // refcount_table_offset field in header
+        let mut buf = [0u8; 8];
+        BigEndian::write_u64(&mut buf, cluster_size); // cluster 1 = same as L1
+        image.backend().write_all_at(&buf, rt_field_offset).unwrap();
+
+        // Re-open from corrupted data
+        let raw_size = image.backend().file_size().unwrap() as usize;
+        let mut raw = vec![0u8; raw_size];
+        image.backend().read_exact_at(&mut raw, 0).unwrap();
+        drop(image);
+
+        let backend2 = crate::io::MemoryBackend::new(raw);
+        let image2 = Qcow2Image::from_backend(Box::new(backend2)).unwrap();
+        let report = check_integrity(image2.backend(), image2.header()).unwrap();
+
+        assert!(
+            !report.overlaps.is_empty(),
+            "should detect overlap when RT points to same cluster as L1"
+        );
+        assert_eq!(report.overlaps[0].cluster_index, 1);
     }
 }
