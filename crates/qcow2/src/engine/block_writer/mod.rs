@@ -23,6 +23,7 @@
 //!     },
 //!     compress: false,
 //!     memory_limit: None,
+//!     hash_size: None,
 //! }).unwrap();
 //!
 //! // Write like a file:

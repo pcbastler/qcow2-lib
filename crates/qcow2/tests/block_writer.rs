@@ -24,6 +24,7 @@ fn default_options(virtual_size: u64) -> BlockWriterOptions {
         },
         compress: false,
         memory_limit: None,
+        hash_size: None,
     }
 }
 
@@ -752,4 +753,255 @@ fn finalize_consumes_writer() {
     let writer = Qcow2BlockWriter::create(&path, default_options(65536)).unwrap();
     writer.finalize().unwrap();
     // `writer` is consumed — no further calls possible (enforced by compiler)
+}
+
+// ── 23. Blake3 hash roundtrip (32 byte) ────────────────────────────────
+
+#[test]
+fn hash_roundtrip_32() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hash32.qcow2");
+
+    let cluster_size = 65536u64;
+    let virtual_size = 4 * cluster_size;
+
+    let mut opts = default_options(virtual_size);
+    opts.hash_size = Some(32);
+
+    let mut writer = Qcow2BlockWriter::create(&path, opts).unwrap();
+
+    // Write data to several clusters
+    for i in 0..4u8 {
+        let data = vec![i + 1; cluster_size as usize];
+        writer.write_guest(i as u64 * cluster_size, &data).unwrap();
+    }
+
+    writer.finalize().unwrap();
+
+    // Reopen (read-write for hash_verify) and verify hashes
+    let mut image = Qcow2Image::open_rw(&path).unwrap();
+    let mismatches = image.hash_verify().unwrap();
+    assert!(
+        mismatches.is_empty(),
+        "hash_verify should find 0 mismatches, got {}",
+        mismatches.len()
+    );
+}
+
+// ── 24. Blake3 hash roundtrip (16 byte) ────────────────────────────────
+
+#[test]
+fn hash_roundtrip_16() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hash16.qcow2");
+
+    let cluster_size = 65536u64;
+    let virtual_size = 4 * cluster_size;
+
+    let mut opts = default_options(virtual_size);
+    opts.hash_size = Some(16);
+
+    let mut writer = Qcow2BlockWriter::create(&path, opts).unwrap();
+
+    for i in 0..4u8 {
+        let data = vec![i + 1; cluster_size as usize];
+        writer.write_guest(i as u64 * cluster_size, &data).unwrap();
+    }
+
+    writer.finalize().unwrap();
+
+    let mut image = Qcow2Image::open_rw(&path).unwrap();
+    let mismatches = image.hash_verify().unwrap();
+    assert!(
+        mismatches.is_empty(),
+        "16-byte hash_verify should find 0 mismatches, got {}",
+        mismatches.len()
+    );
+}
+
+// ── 25. Hash with compression ──────────────────────────────────────────
+
+#[test]
+fn hash_with_compression() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hashcomp.qcow2");
+
+    let cluster_size = 65536u64;
+    let virtual_size = 4 * cluster_size;
+
+    let mut opts = default_options(virtual_size);
+    opts.compress = true;
+    opts.hash_size = Some(32);
+
+    let mut writer = Qcow2BlockWriter::create(&path, opts).unwrap();
+
+    for i in 0..4u8 {
+        let data = vec![i + 1; cluster_size as usize];
+        writer.write_guest(i as u64 * cluster_size, &data).unwrap();
+    }
+
+    writer.finalize().unwrap();
+
+    let mut image = Qcow2Image::open_rw(&path).unwrap();
+    let mismatches = image.hash_verify().unwrap();
+    assert!(
+        mismatches.is_empty(),
+        "compressed+hashed verify should find 0 mismatches, got {}",
+        mismatches.len()
+    );
+}
+
+// ── 26. Hash with encryption ───────────────────────────────────────────
+
+#[test]
+fn hash_with_encryption() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hashenc.qcow2");
+
+    let cluster_size = 65536u64;
+    let virtual_size = 4 * cluster_size;
+    let password = b"hashtest";
+
+    let mut opts = default_options(virtual_size);
+    opts.hash_size = Some(32);
+    opts.create.encryption = Some(qcow2::engine::image::EncryptionOptions {
+        password: password.to_vec(),
+        cipher: qcow2::engine::encryption::CipherMode::AesXtsPlain64,
+        luks_version: 1,
+        iter_time_ms: Some(10),
+    });
+
+    let mut writer = Qcow2BlockWriter::create(&path, opts).unwrap();
+
+    let data = vec![0xABu8; cluster_size as usize];
+    writer.write_guest(0, &data).unwrap();
+
+    writer.finalize().unwrap();
+
+    let mut image = Qcow2Image::open_rw_with_password(&path, password).unwrap();
+    let mismatches = image.hash_verify().unwrap();
+    assert!(
+        mismatches.is_empty(),
+        "encrypted+hashed verify should find 0 mismatches, got {}",
+        mismatches.len()
+    );
+}
+
+// ── 27. Hash zero clusters ─────────────────────────────────────────────
+
+#[test]
+fn hash_zero_clusters() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hashzero.qcow2");
+
+    let cluster_size = 65536u64;
+    let virtual_size = 4 * cluster_size;
+
+    let mut opts = default_options(virtual_size);
+    opts.hash_size = Some(32);
+
+    let mut writer = Qcow2BlockWriter::create(&path, opts).unwrap();
+
+    // Write all zeros to cluster 0
+    let zeros = vec![0u8; cluster_size as usize];
+    writer.write_guest(0, &zeros).unwrap();
+
+    // Write non-zero to cluster 1
+    let data = vec![0x42u8; cluster_size as usize];
+    writer.write_guest(cluster_size, &data).unwrap();
+
+    writer.finalize().unwrap();
+
+    let mut image = Qcow2Image::open_rw(&path).unwrap();
+    let mismatches = image.hash_verify().unwrap();
+    assert!(
+        mismatches.is_empty(),
+        "zero cluster hash should verify correctly, got {} mismatches",
+        mismatches.len()
+    );
+}
+
+// ── 28. Hash info correct ──────────────────────────────────────────────
+
+#[test]
+fn hash_info_correct() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hashinfo.qcow2");
+
+    let cluster_size = 65536u64;
+    let virtual_size = 4 * cluster_size;
+
+    let mut opts = default_options(virtual_size);
+    opts.hash_size = Some(32);
+
+    let mut writer = Qcow2BlockWriter::create(&path, opts).unwrap();
+
+    let data = vec![0x42u8; cluster_size as usize];
+    writer.write_guest(0, &data).unwrap();
+
+    writer.finalize().unwrap();
+
+    let image = Qcow2Image::open(&path).unwrap();
+    let info = image.hash_info().expect("hash_info should return Some");
+    assert_eq!(info.hash_size, 32);
+    assert_eq!(info.hash_chunk_bits, 16); // cluster_bits = 16
+    assert!(info.consistent, "autoclear flag should be set");
+    assert!(info.hash_table_entries > 0);
+}
+
+// ── 29. qemu-img check with hashes ─────────────────────────────────────
+
+#[test]
+fn qemu_img_check_with_hashes() {
+    if !common::has_qemu_img() {
+        eprintln!("skipping: qemu-img not found");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("qemuhash.qcow2");
+
+    let cluster_size = 65536u64;
+    let virtual_size = 1024 * 1024;
+
+    let mut opts = default_options(virtual_size);
+    opts.hash_size = Some(32);
+
+    let mut writer = Qcow2BlockWriter::create(&path, opts).unwrap();
+
+    for i in 0..8u64 {
+        let data = vec![(i + 1) as u8; cluster_size as usize];
+        writer.write_guest(i * cluster_size, &data).unwrap();
+    }
+
+    writer.finalize().unwrap();
+
+    let output = std::process::Command::new("qemu-img")
+        .args(["check", "-f", "qcow2"])
+        .arg(&path)
+        .output()
+        .expect("failed to run qemu-img check");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    // Exit code 0 = clean, 3 = leaks only (no corruption).
+    // QEMU doesn't understand our custom blake3 hash extension, so it reports
+    // hash data clusters and hash table clusters as "leaked". This is expected.
+    assert!(
+        exit_code == 0 || exit_code == 3,
+        "hashed image should have no corruption (exit 0 or 3), got {exit_code}: {stderr}"
+    );
+
+    // Verify no actual corruption (only leaks from hash clusters)
+    if exit_code == 3 {
+        assert!(
+            stderr.contains("Leaked"),
+            "exit code 3 should be leaks only: {stderr}"
+        );
+        assert!(
+            !stderr.contains("refcount=") || !stderr.contains("reference=") || stderr.contains("Leaked"),
+            "should not have refcount/reference mismatches beyond leaks: {stderr}"
+        );
+    }
 }

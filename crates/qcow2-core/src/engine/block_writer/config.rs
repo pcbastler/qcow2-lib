@@ -19,6 +19,8 @@ pub struct BlockWriterConfig {
     pub memory_limit: u64,
     /// Refcount order (log2 of refcount bits). Default: 4 (16-bit).
     pub refcount_order: u32,
+    /// Blake3 hash size: None = no hashing, Some(16) or Some(32).
+    pub hash_size: Option<u8>,
 }
 
 /// Default memory limit: 4 GiB.
@@ -35,6 +37,7 @@ impl Default for BlockWriterConfig {
             encrypted: false,
             memory_limit: DEFAULT_MEMORY_LIMIT,
             refcount_order: 4,
+            hash_size: None,
         }
     }
 }

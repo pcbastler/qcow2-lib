@@ -24,6 +24,8 @@ pub struct BlockWriterOptions {
     pub compress: bool,
     /// Maximum memory for the block buffer in bytes. Default: 4 GiB.
     pub memory_limit: Option<u64>,
+    /// Blake3 hash size: None (default, no hashing), Some(16), or Some(32).
+    pub hash_size: Option<u8>,
 }
 
 impl Qcow2BlockWriter {
@@ -78,6 +80,7 @@ impl Qcow2BlockWriter {
             encrypted: encryption.is_some(),
             memory_limit: options.memory_limit.unwrap_or(4 * 1024 * 1024 * 1024),
             refcount_order,
+            hash_size: options.hash_size,
         };
 
         let engine = qcow2_core::engine::block_writer::BlockWriterEngine::new(

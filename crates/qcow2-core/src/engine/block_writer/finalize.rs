@@ -15,6 +15,7 @@ use crate::format::constants::{COMPRESSION_DEFLATE, CRYPT_LUKS, HEADER_V3_MIN_LE
 use crate::format::feature_flags::{
     AutoclearFeatures, CompatibleFeatures, IncompatibleFeatures,
 };
+use crate::format::hash::{Blake3Extension, HashTable, HashTableEntry, compute_hash_table_entries};
 use crate::format::header::Header;
 use crate::format::header_extension::HeaderExtension;
 use crate::format::refcount::RefcountTableEntry;
@@ -28,11 +29,12 @@ impl BlockWriterEngine {
     ///
     /// This method:
     /// 1. Flushes all remaining buffered clusters
-    /// 2. Writes L2 tables to disk
-    /// 3. Writes L1 table to disk
-    /// 4. Builds and writes refcount structures (with convergence loop)
-    /// 5. Writes the header at offset 0
-    /// 6. Writes LUKS header data (if encrypted)
+    /// 2. Writes hash structures (if blake3 hashing enabled)
+    /// 3. Writes L2 tables to disk
+    /// 4. Writes L1 table to disk
+    /// 5. Builds and writes refcount structures (with convergence loop)
+    /// 6. Writes the header at offset 0
+    /// 7. Writes LUKS header data (if encrypted)
     ///
     /// After this call, the image is a valid, self-contained QCOW2 file.
     pub fn finalize(
@@ -48,19 +50,22 @@ impl BlockWriterEngine {
         // 1. Flush all remaining buffered clusters
         self.flush_all_remaining(backend, compressor, crypt_context)?;
 
-        // 2. Write L2 tables, collect their host offsets
+        // 2. Write hash structures (before other metadata for refcount coverage)
+        self.write_hash_structures(backend)?;
+
+        // 3. Write L2 tables, collect their host offsets
         let l2_offsets = self.write_l2_tables(backend)?;
 
-        // 3. Build and write L1 table
+        // 4. Build and write L1 table
         let (l1_offset, _l1_clusters) = self.write_l1_table(backend, &l2_offsets)?;
 
-        // 4. Build and write refcount structures (iterative convergence)
+        // 5. Build and write refcount structures (iterative convergence)
         let (rt_offset, rt_clusters) = self.write_refcount_structures(backend)?;
 
-        // 5. Write header at offset 0
+        // 6. Write header at offset 0
         self.write_header(backend, l1_offset, rt_offset, rt_clusters)?;
 
-        // 6. Write LUKS header data
+        // 7. Write LUKS header data
         if let Some(ref luks_data) = self.luks_header_data {
             let padded_len = self.luks_clusters as usize * self.cluster_size as usize;
             let mut padded = vec![0u8; padded_len];
@@ -71,6 +76,97 @@ impl BlockWriterEngine {
 
         backend.flush()?;
         self.finalized = true;
+        Ok(())
+    }
+
+    /// Write blake3 hash structures to disk (hash data clusters + hash table).
+    ///
+    /// Skips if hashing is not enabled. Must be called before L2/L1/refcount
+    /// writes so that hash clusters get proper refcount coverage.
+    fn write_hash_structures(&mut self, backend: &dyn IoBackend) -> Result<()> {
+        let hash_size = match self.config.hash_size {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let cluster_size = self.cluster_size;
+        let hashes_per_data_cluster = cluster_size / hash_size as u64;
+
+        // hash_chunk_bits = cluster_bits (1 hash per cluster for block writer)
+        let hash_chunk_size = cluster_size;
+        let hash_table_entries = compute_hash_table_entries(
+            self.config.virtual_size,
+            cluster_size,
+            hash_size,
+            hash_chunk_size,
+        );
+
+        if hash_table_entries == 0 {
+            return Ok(());
+        }
+
+        let mut hash_table = HashTable::new_empty(hash_table_entries);
+
+        // Write hash data clusters
+        for ht_idx in 0..hash_table_entries {
+            let start_chunk = ht_idx as u64 * hashes_per_data_cluster;
+            let end_chunk = start_chunk + hashes_per_data_cluster;
+
+            // Check if any hashes exist in this range
+            let has_any = self
+                .hashes
+                .range(start_chunk..end_chunk)
+                .next()
+                .is_some();
+
+            if !has_any {
+                continue;
+            }
+
+            // Build hash data cluster
+            let mut data_buf = vec![0u8; cluster_size as usize];
+            for (&chunk_idx, hash_bytes) in self.hashes.range(start_chunk..end_chunk) {
+                let slot = (chunk_idx - start_chunk) as usize;
+                let offset = slot * hash_size as usize;
+                let end = offset + hash_size as usize;
+                if end <= data_buf.len() {
+                    data_buf[offset..end].copy_from_slice(hash_bytes);
+                }
+            }
+
+            // Allocate, write, refcount
+            let host_offset = self.metadata.allocate_cluster();
+            backend.write_all_at(&data_buf, host_offset.0)?;
+            self.metadata.increment_refcount(host_offset.0);
+            hash_table.set(ht_idx, HashTableEntry::with_offset(host_offset.0));
+        }
+
+        // Write hash table
+        let ht_bytes = hash_table.write_to();
+        let ht_byte_size = ht_bytes.len() as u64;
+        let ht_clusters = (ht_byte_size + cluster_size - 1) / cluster_size;
+        let ht_clusters = ht_clusters.max(1);
+
+        let ht_offset = self.metadata.allocate_n_clusters(ht_clusters);
+        let mut ht_buf = vec![0u8; ht_clusters as usize * cluster_size as usize];
+        ht_buf[..ht_bytes.len()].copy_from_slice(&ht_bytes);
+        backend.write_all_at(&ht_buf, ht_offset.0)?;
+
+        for i in 0..ht_clusters {
+            self.metadata
+                .increment_refcount(ht_offset.0 + i * cluster_size);
+        }
+
+        // Add blake3 header extension
+        let ext = Blake3Extension {
+            hash_table_offset: ht_offset.0,
+            hash_table_entries,
+            hash_size,
+            hash_chunk_bits: self.config.cluster_bits as u8,
+        };
+        self.extensions
+            .push(HeaderExtension::Blake3Hashes(ext));
+
         Ok(())
     }
 
@@ -280,7 +376,11 @@ impl BlockWriterEngine {
             snapshots_offset: ClusterOffset(0),
             incompatible_features: incompat,
             compatible_features: CompatibleFeatures::empty(),
-            autoclear_features: AutoclearFeatures::empty(),
+            autoclear_features: if self.config.hash_size.is_some() {
+                AutoclearFeatures::BLAKE3_HASHES
+            } else {
+                AutoclearFeatures::empty()
+            },
             refcount_order: self.config.refcount_order,
             header_length,
             compression_type: self.config.compression_type,

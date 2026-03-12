@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -45,6 +46,8 @@ pub struct BlockWriterEngine {
     pub(super) luks_clusters: u64,
     /// Host offset where data clusters begin.
     pub(super) data_start_offset: u64,
+    /// Computed blake3 hashes: hash_chunk_index → hash bytes.
+    pub(super) hashes: BTreeMap<u64, Vec<u8>>,
 }
 
 impl BlockWriterEngine {
@@ -92,6 +95,7 @@ impl BlockWriterEngine {
             luks_header_data,
             luks_clusters,
             data_start_offset,
+            hashes: BTreeMap::new(),
         })
     }
 
@@ -173,6 +177,14 @@ impl BlockWriterEngine {
         crypt_context: Option<&CryptContext>,
     ) -> Result<()> {
         let (l1, l2, _) = GuestOffset(guest_cluster_offset).split(self.geometry);
+
+        // 0. Compute blake3 hash on plaintext data (before compression/encryption)
+        if let Some(hash_size) = self.config.hash_size {
+            let idx = guest_cluster_offset / self.cluster_size;
+            let hash = blake3::hash(cluster_data);
+            self.hashes
+                .insert(idx, hash.as_bytes()[..hash_size as usize].to_vec());
+        }
 
         // 1. Zero detection
         if is_all_zeros(cluster_data) {
