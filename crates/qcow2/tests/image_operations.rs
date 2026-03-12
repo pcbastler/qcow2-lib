@@ -18,6 +18,7 @@ fn create_mem(vs: u64) -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap()
@@ -74,6 +75,7 @@ fn opened_readonly_is_not_writable() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -97,6 +99,7 @@ fn write_to_readonly_fails() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap()
@@ -206,6 +209,7 @@ fn convert_to_raw() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();

@@ -50,6 +50,7 @@ pub(crate) fn write_qcow2(
             compression_type: None,
             data_file: None,
             encryption: None,
+            refcount_order: None,
         };
         qcow2::Qcow2Image::create(output, create_options)
             .map_err(RescueError::Qcow2)?

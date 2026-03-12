@@ -21,6 +21,7 @@ fn create_raw_image() -> Vec<u8> {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -131,6 +132,7 @@ fn qemu_rejects_corrupt_image() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
+                    refcount_order: None,
             },
         )
         .unwrap();

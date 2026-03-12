@@ -220,6 +220,17 @@ impl<'a> SnapshotManager<'a> {
             });
         }
 
+        // Structural refcount-overflow prevention: after `n` snapshots every cluster
+        // has refcount ≤ n+1. One more snapshot would bring it to n+2. Reject early
+        // before any metadata is modified, so no rollback is needed.
+        let max_rc = self.refcount_manager.max_refcount();
+        if existing.len() as u64 + 2 > max_rc {
+            return Err(Error::TooManySnapshots {
+                count: existing.len(),
+                max_refcount: max_rc,
+            });
+        }
+
         let next_id = self.next_snapshot_id(&existing);
         let cluster_size = 1usize << self.cluster_bits;
         let l1_entry_count = self.header.l1_table_entries;

@@ -20,6 +20,7 @@ fn create_file(dir: &tempfile::TempDir, name: &str, vs: u64) -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap()
@@ -179,6 +180,7 @@ fn bitmap_persists_after_reopen() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
+                    refcount_order: None,
             },
         )
         .unwrap();
@@ -292,6 +294,7 @@ fn qemu_check_image_with_bitmaps() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -333,6 +336,7 @@ fn qemu_sees_our_bitmaps() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();

@@ -45,6 +45,7 @@ fn create_base(dir: &Path, name: &str, size: u64, data: &[(u64, &[u8])]) -> std:
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();
@@ -425,6 +426,7 @@ fn commit_without_backing_fails() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();

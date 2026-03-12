@@ -20,6 +20,7 @@ fn create_file(dir: &tempfile::TempDir, name: &str, vs: u64) -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap()
@@ -291,6 +292,7 @@ fn snapshot_in_overlay() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -400,6 +402,7 @@ fn qemu_check_after_snapshot_operations() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -445,6 +448,7 @@ fn qemu_reads_our_snapshot_data() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();

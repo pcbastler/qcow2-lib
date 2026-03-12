@@ -13,6 +13,7 @@ fn create_test_image(virtual_size: u64) -> Qcow2Image {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
+            refcount_order: None,
         },
     )
     .unwrap()
@@ -81,6 +82,30 @@ fn create_snapshot_empty_name_rejected() {
     let mut image = create_test_image(1 << 20);
     let result = image.snapshot_create("");
     assert!(matches!(result, Err(Error::SnapshotNameEmpty)));
+}
+
+#[test]
+fn create_snapshot_too_many_rejected() {
+    // refcount_order=1 → 2-bit refcounts → max_refcount=3.
+    // Guard: existing.len() + 2 > max_rc → triggers at 2 snapshots (2+2=4 > 3).
+    let mut image = Qcow2Image::create_on_backend(
+        Box::new(MemoryBackend::zeroed(0)),
+        CreateOptions {
+            virtual_size: 1 << 20,
+            cluster_bits: None,
+            extended_l2: false,
+            compression_type: None,
+            data_file: None,
+            encryption: None,
+            refcount_order: Some(1),
+        },
+    )
+    .unwrap();
+
+    image.snapshot_create("snap-1").unwrap();
+    image.snapshot_create("snap-2").unwrap();
+    let result = image.snapshot_create("snap-3");
+    assert!(matches!(result, Err(Error::TooManySnapshots { count: 2, max_refcount: 3 })));
 }
 
 #[test]

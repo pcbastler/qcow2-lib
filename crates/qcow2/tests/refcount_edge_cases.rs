@@ -77,6 +77,7 @@ fn read_write_with_refcount_bits_16() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -166,6 +167,7 @@ fn snapshot_increments_refcount() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -198,6 +200,7 @@ fn snapshot_delete_decrements_refcount() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -226,6 +229,7 @@ fn multiple_snapshots_multiple_refcounts() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -270,6 +274,7 @@ fn cow_after_snapshot_correct_refcounts() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -308,6 +313,7 @@ fn many_clusters_correct_refcounts() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -342,6 +348,7 @@ fn writing_beyond_initial_refcount_table() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();
@@ -381,6 +388,7 @@ fn qemu_check_after_many_writes_and_snapshots() {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();

@@ -16,6 +16,7 @@ fn create_async_image(virtual_size: u64) -> Qcow2ImageAsync {
         compression_type: None,
         data_file: None,
         encryption: None,
+        refcount_order: None,
     };
     let image = Qcow2Image::create_on_backend(backend, opts).unwrap();
     Qcow2ImageAsync::from_image(image).unwrap()
@@ -222,6 +223,7 @@ fn create_overlay_with_backing(
         compression_type: None,
         data_file: None,
         encryption: None,
+        refcount_order: None,
     };
 
     // Create backing image with data

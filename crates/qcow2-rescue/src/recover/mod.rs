@@ -607,6 +607,7 @@ mod tests {
                     luks_version: 1,
                     iter_time_ms: Some(10), // fast for tests
                 }),
+                refcount_order: None,
             };
             let mut image = qcow2::Qcow2Image::create(&src_path, opts).unwrap();
             let data = vec![0x42u8; cluster_size as usize];
@@ -666,6 +667,7 @@ mod tests {
                     luks_version: 1,
                     iter_time_ms: Some(10),
                 }),
+                refcount_order: None,
             };
             let mut image = qcow2::Qcow2Image::create(&src_path, opts).unwrap();
             let data = vec![0x42u8; cluster_size as usize];
@@ -721,6 +723,7 @@ mod tests {
                 luks_version: 1,
                 iter_time_ms: Some(10),
             }),
+            refcount_order: None,
         };
         let image = qcow2::Qcow2Image::create(&src_path, opts).unwrap();
         drop(image);

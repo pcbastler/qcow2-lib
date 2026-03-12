@@ -650,6 +650,7 @@ fn make_backing_image(backing_vs: u64) -> crate::engine::image::Qcow2Image {
             cluster_bits: Some(CLUSTER_BITS),
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
+            refcount_order: None,
         },
     )
     .unwrap();
@@ -700,6 +701,7 @@ fn unallocated_partial_overlap_with_backing() {
             cluster_bits: Some(CLUSTER_BITS),
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
+            refcount_order: None,
         },
     )
     .unwrap();

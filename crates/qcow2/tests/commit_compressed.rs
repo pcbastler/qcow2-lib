@@ -22,6 +22,7 @@ fn create_base(dir: &std::path::Path, base_pattern: u8) -> std::path::PathBuf {
             compression_type: None,
             data_file: None,
             encryption: None,
+                refcount_order: None,
         },
     )
     .unwrap();

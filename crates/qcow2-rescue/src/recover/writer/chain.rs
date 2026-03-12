@@ -64,6 +64,7 @@ pub(crate) fn write_chain(
             compression_type: None,
             data_file: None,
             encryption: None,
+            refcount_order: None,
         };
 
         let mut image = qcow2::Qcow2Image::create(&layer_path, create_options)

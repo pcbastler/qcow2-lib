@@ -317,7 +317,7 @@ impl Qcow2Image {
         let (cluster_bits, cluster_size, extended_l2, compression_type, data_file, encryption) =
             validate_create_options(&options)?;
 
-        let refcount_order = 4u32; // 16-bit refcounts
+        let refcount_order = options.refcount_order.unwrap_or(4); // default: 16-bit
         let l2_entry_size = if extended_l2 { 16u64 } else { 8u64 };
         let l1_entries = calculate_l1_entries(options.virtual_size, cluster_size, l2_entry_size);
 
@@ -518,6 +518,7 @@ mod tests {
                 virtual_size: 1 << 30, // 1 GB
                 cluster_bits: None,
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         )
         .unwrap();
@@ -538,6 +539,7 @@ mod tests {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: Some(12), // 4 KB clusters
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         )
         .unwrap();
@@ -555,6 +557,7 @@ mod tests {
                 virtual_size: 512,
                 cluster_bits: None,
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         )
         .unwrap();
@@ -572,6 +575,7 @@ mod tests {
                 virtual_size: 1 << 30,
                 cluster_bits: None,
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         )
         .unwrap();
@@ -597,6 +601,7 @@ mod tests {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: None,
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         )
         .unwrap();
@@ -618,6 +623,7 @@ mod tests {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         )
         .unwrap();
@@ -638,6 +644,7 @@ mod tests {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         )
         .unwrap();
@@ -673,6 +680,7 @@ mod tests {
                 virtual_size,
                 cluster_bits: None,
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         )
         .unwrap();
@@ -695,6 +703,7 @@ mod tests {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         )
         .unwrap();
@@ -722,6 +731,7 @@ mod tests {
                     virtual_size: 1 << 20,
                     cluster_bits: None,
                     extended_l2: false, compression_type: None, data_file: None, encryption: None,
+     refcount_order: None,
                 },
             )
             .unwrap();
@@ -752,6 +762,7 @@ mod tests {
                 virtual_size: 1 << 20,
                 cluster_bits: None,
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         );
         assert!(result.is_err());
@@ -768,6 +779,7 @@ mod tests {
                 virtual_size: 1 << 20, // 1 MB
                 cluster_bits: None,
                 extended_l2: false, compression_type: None, data_file: None, encryption: None,
+                refcount_order: None,
             },
         )
         .unwrap();

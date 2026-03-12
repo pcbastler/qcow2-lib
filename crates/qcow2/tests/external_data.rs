@@ -25,6 +25,7 @@ fn create_external_data_sets_header_fields() {
             extended_l2: false,
             compression_type: None,
             data_file: Some("ext.raw".to_string()), encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();
@@ -65,6 +66,7 @@ fn create_external_data_creates_data_file() {
             extended_l2: false,
             compression_type: None,
             data_file: Some("ext.raw".to_string()), encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();
@@ -89,6 +91,7 @@ fn write_read_round_trip_with_memory_backends() {
             extended_l2: false,
             compression_type: None,
             data_file: Some("data.raw".to_string()), encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();
@@ -120,6 +123,7 @@ fn write_read_round_trip_file_based() {
                 extended_l2: false,
                 compression_type: None,
                 data_file: Some("ext.raw".to_string()), encryption: None,
+     refcount_order: None,
             },
         )
         .unwrap();
@@ -158,6 +162,7 @@ fn compressed_write_rejected_with_external_data() {
             extended_l2: false,
             compression_type: None,
             data_file: Some("ext.raw".to_string()), encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();
@@ -189,6 +194,7 @@ fn create_with_compression_and_external_data_fails() {
             extended_l2: false,
             compression_type: Some(qcow2::format::constants::COMPRESSION_ZSTD),
             data_file: Some("data.raw".to_string()), encryption: None,
+     refcount_order: None,
         },
     );
     assert!(result.is_err(), "zstd + external data should fail");
@@ -207,6 +213,7 @@ fn integrity_check_passes_with_external_data() {
             extended_l2: false,
             compression_type: None,
             data_file: Some("ext.raw".to_string()), encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();
@@ -274,6 +281,7 @@ fn data_offsets_are_identity_mapped() {
             extended_l2: false,
             compression_type: None,
             data_file: Some("ext.raw".to_string()), encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();
@@ -312,6 +320,7 @@ fn qemu_reads_our_external_data_image() {
             extended_l2: false,
             compression_type: None,
             data_file: Some(data_raw.display().to_string()), encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();
@@ -389,6 +398,7 @@ fn qemu_check_passes_on_our_image() {
             extended_l2: false,
             compression_type: None,
             data_file: Some(data_raw.display().to_string()), encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();

@@ -42,6 +42,7 @@ fn create_image_with_data(
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
+     refcount_order: None,
         },
     )
     .unwrap();
@@ -364,6 +365,7 @@ fn shrink_and_truncate_reduces_file_size() {
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
+     refcount_order: None,
             },
         )
         .unwrap();
