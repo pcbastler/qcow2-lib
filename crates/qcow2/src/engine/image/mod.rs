@@ -19,7 +19,7 @@
 mod accessors;
 mod backing_ops;
 mod bitmap;
-mod create;
+pub(crate) mod create;
 mod hash;
 mod integrity;
 mod open;

@@ -9,6 +9,7 @@
 //! and [`Compressor`](crate::io::Compressor) traits.
 
 pub mod bitmap_manager;
+pub mod block_writer;
 pub mod cache;
 pub mod cluster_mapping;
 pub mod encryption;
@@ -23,6 +24,7 @@ pub mod writer;
 
 // Re-exports for convenience
 pub use bitmap_manager::BitmapInfo;
+pub use block_writer::{BlockWriterConfig, BlockWriterEngine};
 pub use cache::{CacheConfig, CacheMode, CacheStats};
 pub use cluster_mapping::ClusterResolution;
 pub use hash_manager::{HashEntry, HashInfo, HashMismatch};

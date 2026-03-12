@@ -373,6 +373,33 @@ pub enum Error {
         /// Actual computed hash (hex string).
         actual: String,
     },
+
+    // ---- Block writer errors ----
+
+    /// A write was attempted to a guest cluster that was already flushed to disk.
+    ClusterAlreadyFlushed {
+        /// Guest offset of the cluster.
+        guest_offset: u64,
+        /// Host offset where the cluster was written.
+        host_offset: u64,
+    },
+
+    /// A read was attempted for a cluster that was already flushed from the buffer.
+    ClusterNotInBuffer {
+        /// Guest offset of the cluster.
+        guest_offset: u64,
+    },
+
+    /// The block writer memory limit was exceeded and no blocks could be evicted.
+    BlockWriterMemoryExceeded {
+        /// Current memory usage in bytes.
+        current: u64,
+        /// Configured limit in bytes.
+        limit: u64,
+    },
+
+    /// The block writer has already been finalized; no further writes are allowed.
+    BlockWriterFinalized,
 }
 
 impl From<qcow2_format::Error> for Error {
@@ -485,6 +512,14 @@ impl Error {
             Self::HashNotInitialized => write!(f, "hash extension not initialized"),
             Self::HashVerifyFailed { hash_chunk_index, guest_offset, expected, actual } =>
                 write!(f, "hash mismatch at hash chunk {hash_chunk_index} (0x{guest_offset:x}): expected {expected}, actual {actual}"),
+            Self::ClusterAlreadyFlushed { guest_offset, host_offset } =>
+                write!(f, "guest cluster at offset 0x{guest_offset:x} was already flushed to host offset 0x{host_offset:x}"),
+            Self::ClusterNotInBuffer { guest_offset } =>
+                write!(f, "guest cluster at offset 0x{guest_offset:x} is not in the write buffer (already flushed)"),
+            Self::BlockWriterMemoryExceeded { current, limit } =>
+                write!(f, "block writer memory limit exceeded: {current} bytes used, limit is {limit} bytes"),
+            Self::BlockWriterFinalized =>
+                write!(f, "block writer has already been finalized; no further writes are allowed"),
             _ => unreachable!(),
         }
     }
@@ -1101,6 +1136,51 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "offset 0x0 exceeds virtual disk size 0x0"
+        );
+    }
+
+    // ---- Block writer errors ----
+
+    #[test]
+    fn display_cluster_already_flushed() {
+        let err = Error::ClusterAlreadyFlushed {
+            guest_offset: 0x10000,
+            host_offset: 0x30000,
+        };
+        assert_eq!(
+            err.to_string(),
+            "guest cluster at offset 0x10000 was already flushed to host offset 0x30000"
+        );
+    }
+
+    #[test]
+    fn display_cluster_not_in_buffer() {
+        let err = Error::ClusterNotInBuffer {
+            guest_offset: 0x20000,
+        };
+        assert_eq!(
+            err.to_string(),
+            "guest cluster at offset 0x20000 is not in the write buffer (already flushed)"
+        );
+    }
+
+    #[test]
+    fn display_block_writer_memory_exceeded() {
+        let err = Error::BlockWriterMemoryExceeded {
+            current: 4_294_967_296,
+            limit: 4_294_967_296,
+        };
+        assert_eq!(
+            err.to_string(),
+            "block writer memory limit exceeded: 4294967296 bytes used, limit is 4294967296 bytes"
+        );
+    }
+
+    #[test]
+    fn display_block_writer_finalized() {
+        assert_eq!(
+            Error::BlockWriterFinalized.to_string(),
+            "block writer has already been finalized; no further writes are allowed"
         );
     }
 }

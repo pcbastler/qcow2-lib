@@ -23,7 +23,7 @@ use super::{CreateOptions, EncryptionOptions, Qcow2Image};
 ///
 /// Returns (cluster_bits, cluster_size, extended_l2, compression_type, data_file, encryption).
 #[allow(clippy::type_complexity)]
-fn validate_create_options(
+pub(crate) fn validate_create_options(
     options: &CreateOptions,
 ) -> Result<(u32, u64, bool, u8, Option<String>, Option<EncryptionOptions>)> {
     if options.virtual_size == 0 {
@@ -86,7 +86,7 @@ fn validate_create_options(
 }
 
 /// Calculate the number of L1 table entries needed for a given virtual size.
-fn calculate_l1_entries(virtual_size: u64, cluster_size: u64, l2_entry_size: u64) -> u32 {
+pub(crate) fn calculate_l1_entries(virtual_size: u64, cluster_size: u64, l2_entry_size: u64) -> u32 {
     let l2_entries = cluster_size / l2_entry_size;
     let bytes_per_l1_entry = l2_entries * cluster_size;
     ((virtual_size + bytes_per_l1_entry - 1) / bytes_per_l1_entry) as u32
@@ -124,7 +124,7 @@ fn write_initial_layout(
 }
 
 /// Generate a LUKS1 header and encryption context from encryption options.
-fn generate_luks_header(
+pub(crate) fn generate_luks_header(
     encryption: &Option<EncryptionOptions>,
 ) -> Result<(Option<Vec<u8>>, Option<crate::engine::encryption::CryptContext>)> {
     let Some(enc) = encryption else {
@@ -145,7 +145,7 @@ fn generate_luks_header(
 }
 
 /// Build incompatible/autoclear feature flags and header_length from options.
-fn build_feature_flags(
+pub(crate) fn build_feature_flags(
     extended_l2: bool,
     compression_type: u8,
     has_data_file: bool,
@@ -177,7 +177,7 @@ fn build_feature_flags(
 
 /// Build the Header struct for a new image.
 #[allow(clippy::too_many_arguments)]
-fn build_create_header(
+pub(crate) fn build_create_header(
     cluster_bits: u32, virtual_size: u64, encrypted: bool,
     l1_entries: u32, l1_offset: u64, rt_offset: u64,
     incompat: IncompatibleFeatures, autoclear: AutoclearFeatures,
@@ -206,7 +206,7 @@ fn build_create_header(
 }
 
 /// Build header extensions for a newly created image.
-fn build_create_extensions(
+pub(crate) fn build_create_extensions(
     luks_header_data: &Option<Vec<u8>>,
     luks_offset: u64,
     data_file: &Option<String>,

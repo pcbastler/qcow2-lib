@@ -25,6 +25,7 @@ pub mod error;
 pub mod format;
 pub mod io;
 
+pub use engine::block_writer::Qcow2BlockWriter;
 pub use engine::Qcow2Image;
 pub use engine::cache::CacheMode;
 pub use error::{Error, IoErrorKind, Result};

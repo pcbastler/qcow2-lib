@@ -15,6 +15,7 @@ pub use qcow2_core::engine::{
 
 // Std-only modules (encryption wraps core + adds LUKS header/create)
 pub mod backing;
+pub mod block_writer;
 pub mod compression;
 pub mod converter;
 pub mod encryption;
