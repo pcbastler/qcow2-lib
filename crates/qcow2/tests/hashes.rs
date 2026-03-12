@@ -11,7 +11,6 @@ fn create_test_image(virtual_size: u64) -> Qcow2Image {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap()
@@ -25,7 +24,6 @@ fn create_test_image_with_cluster_bits(virtual_size: u64, cluster_bits: u32) -> 
             cluster_bits: Some(cluster_bits),
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap()

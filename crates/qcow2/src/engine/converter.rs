@@ -91,7 +91,6 @@ pub fn convert_from_raw(
             virtual_size: input_size,
             cluster_bits: None,
             extended_l2: false, compression_type, data_file, encryption,
-            refcount_order: None,
         },
     )?;
 
@@ -198,7 +197,6 @@ pub fn convert_from_raw_parallel(
             compression_type,
             data_file,
             encryption,
-            refcount_order: None,
         },
     )?;
 
@@ -288,7 +286,6 @@ pub fn convert_qcow2_to_qcow2(
             extended_l2: source.header().has_extended_l2(),
             compression_type: Some(compression_type.unwrap_or(source.header().compression_type)),
             data_file, encryption,
-            refcount_order: None,
         },
     )?;
 
@@ -428,7 +425,6 @@ mod tests {
                 cluster_bits: None,
                 extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-            refcount_order: None,
             },
         )
         .unwrap();

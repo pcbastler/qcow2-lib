@@ -22,7 +22,6 @@ fn mem_image() -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -41,7 +40,6 @@ fn file_image() -> (Qcow2Image, std::path::PathBuf, tempfile::TempDir) {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();

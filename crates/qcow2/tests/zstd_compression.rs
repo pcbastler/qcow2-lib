@@ -22,7 +22,6 @@ fn create_zstd_image_sets_header_fields() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: Some(COMPRESSION_ZSTD), data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -50,7 +49,6 @@ fn create_deflate_image_has_default_header() {
             extended_l2: false,
             compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -76,7 +74,6 @@ fn zstd_write_read_round_trip() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: Some(COMPRESSION_ZSTD), data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -110,7 +107,6 @@ fn zstd_compressed_write_round_trip() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: Some(COMPRESSION_ZSTD), data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -138,7 +134,6 @@ fn zstd_compressed_cluster_cow() {
             cluster_bits: None,
             extended_l2: false,
             compression_type: Some(COMPRESSION_ZSTD), data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -173,7 +168,6 @@ fn zstd_reopen_round_trip() {
                 cluster_bits: None,
                 extended_l2: false,
                 compression_type: Some(COMPRESSION_ZSTD), data_file: None, encryption: None,
-     refcount_order: None,
             },
         )
         .unwrap();
@@ -266,7 +260,6 @@ fn qemu_reads_our_zstd_image() {
                 cluster_bits: None,
                 extended_l2: false,
                 compression_type: Some(COMPRESSION_ZSTD), data_file: None, encryption: None,
-     refcount_order: None,
             },
         )
         .unwrap();

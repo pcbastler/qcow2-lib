@@ -29,7 +29,6 @@ fn valid_magic_accepted() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -81,7 +80,6 @@ fn version_3_accepted() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -147,7 +145,6 @@ fn default_cluster_bits_is_16() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -167,7 +164,6 @@ fn cluster_bits_9_minimum() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -187,7 +183,6 @@ fn cluster_bits_21_maximum() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -207,7 +202,6 @@ fn cluster_bits_too_small_rejected() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     );
     assert!(result.is_err(), "cluster_bits=8 should be rejected");
@@ -225,7 +219,6 @@ fn cluster_bits_too_large_rejected() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     );
     assert!(result.is_err(), "cluster_bits=22 should be rejected");
@@ -245,7 +238,6 @@ fn various_cluster_sizes_roundtrip() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -279,7 +271,6 @@ fn extended_l2_sets_incompatible_feature_bit() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -298,7 +289,6 @@ fn compression_type_zstd_sets_feature_bit() {
             compression_type: Some(COMPRESSION_ZSTD),
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -319,7 +309,6 @@ fn deflate_is_default_compression() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -346,7 +335,6 @@ fn unknown_incompatible_feature_bit_rejected() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -382,7 +370,6 @@ fn no_backing_file_fields_zero() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -406,7 +393,6 @@ fn overlay_has_backing_file_set() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -435,7 +421,6 @@ fn fresh_v3_image_has_feature_name_table() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -459,7 +444,6 @@ fn external_data_file_extension_present() {
             compression_type: None,
             data_file: Some(data_path.to_string_lossy().to_string()),
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -484,7 +468,6 @@ fn default_refcount_order_is_4() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -537,7 +520,6 @@ fn virtual_size_zero_rejected() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     );
     assert!(result.is_err(), "virtual_size=0 should be rejected");
@@ -556,7 +538,6 @@ fn virtual_size_not_cluster_aligned() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -575,7 +556,6 @@ fn virtual_size_exactly_one_cluster() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -605,7 +585,6 @@ fn header_parse_roundtrip() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -636,7 +615,6 @@ fn header_parse_roundtrip_extended_l2_zstd() {
             compression_type: Some(COMPRESSION_ZSTD),
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -668,7 +646,6 @@ fn l1_table_entries_match_virtual_size() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -709,7 +686,6 @@ fn qemu_accepts_our_header() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();

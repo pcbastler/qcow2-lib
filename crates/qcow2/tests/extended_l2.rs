@@ -17,7 +17,6 @@ fn create_extended_l2_image(virtual_size: u64, cluster_bits: u32) -> Qcow2Image 
             cluster_bits: Some(cluster_bits),
             extended_l2: true, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap()
@@ -52,7 +51,6 @@ fn create_extended_l2_rejects_small_clusters() {
             cluster_bits: Some(12), // 4KB — too small for extended L2
             extended_l2: true, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     );
     assert!(result.is_err(), "should reject cluster_bits < 14 for extended L2");
@@ -295,7 +293,6 @@ mod qemu_interop {
                 cluster_bits: Some(16),
                 extended_l2: true, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
             },
         )
         .unwrap();
@@ -337,7 +334,6 @@ mod qemu_interop {
                 cluster_bits: Some(16),
                 extended_l2: true, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
             },
         )
         .unwrap();
@@ -433,7 +429,6 @@ mod qemu_interop {
                 cluster_bits: Some(16),
                 extended_l2: true, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
             },
         )
         .unwrap();

@@ -25,7 +25,6 @@ fn create_test_image(dir: &tempfile::TempDir, name: &str) -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -67,7 +66,6 @@ fn image_with_snapshots_passes_integrity() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -102,7 +100,6 @@ fn detect_refcount_too_low() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -157,7 +154,6 @@ fn detect_leaked_clusters() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -213,7 +209,6 @@ fn repair_leaked_clusters() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -266,7 +261,6 @@ fn repair_leaks_only_mode() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -321,7 +315,6 @@ fn qemu_check_passes_after_our_repair() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -379,7 +372,6 @@ fn integrity_report_counts_cluster_types() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -432,7 +424,6 @@ fn corrupted_l1_entry_detected() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -490,7 +481,6 @@ fn detect_double_referenced_cluster() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -550,7 +540,6 @@ fn repair_does_not_corrupt_good_data() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();

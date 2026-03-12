@@ -19,7 +19,6 @@ fn mem_image() -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -98,7 +97,6 @@ fn snapshot_table_growth() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();

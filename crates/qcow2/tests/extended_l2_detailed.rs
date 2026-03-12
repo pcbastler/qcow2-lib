@@ -23,7 +23,6 @@ fn create_ext_l2(vs: u64) -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -39,7 +38,6 @@ fn create_ext_l2_file(dir: &tempfile::TempDir, name: &str, vs: u64) -> Qcow2Imag
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -252,7 +250,6 @@ fn ext_l2_overlay_subcluster_cow() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -344,7 +341,6 @@ fn qemu_check_our_extended_l2_image() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -386,7 +382,6 @@ fn qemu_reads_our_subclusters() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();

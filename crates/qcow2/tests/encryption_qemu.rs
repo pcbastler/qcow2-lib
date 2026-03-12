@@ -77,7 +77,6 @@ fn qemu_reads_our_encrypted_image() {
                 compression_type: None,
                 data_file: None,
                 encryption: encryption_options(b"mypw"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -132,7 +131,6 @@ fn qemu_check_our_encrypted_image() {
                 compression_type: None,
                 data_file: None,
                 encryption: encryption_options(b"checkpw"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -185,7 +183,6 @@ fn round_trip_our_create_qemu_write_our_read() {
                 compression_type: None,
                 data_file: None,
                 encryption: encryption_options(b"rtpw"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -473,7 +470,6 @@ fn integrity_check_encrypted_image() {
                 compression_type: None,
                 data_file: None,
                 encryption: encryption_options(b"intpw"),
-                    refcount_order: None,
             },
         )
         .unwrap();

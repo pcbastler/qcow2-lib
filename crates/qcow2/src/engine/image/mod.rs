@@ -92,9 +92,6 @@ pub struct CreateOptions {
     pub data_file: Option<String>,
     /// Encryption options. When set, the image will be LUKS-encrypted.
     pub encryption: Option<EncryptionOptions>,
-    /// Refcount width as log2 of bits (0=1-bit, 1=2-bit, 4=16-bit).
-    /// Default: 4 (16-bit refcounts, compatible with QEMU default).
-    pub refcount_order: Option<u32>,
 }
 
 /// Options for creating an encrypted QCOW2 image.

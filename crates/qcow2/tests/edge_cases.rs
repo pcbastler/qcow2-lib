@@ -21,7 +21,6 @@ fn create_mem(vs: u64) -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()

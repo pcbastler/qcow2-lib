@@ -17,7 +17,6 @@ fn create_image_with_data(dir: &std::path::Path, name: &str, data: &[(u64, &[u8]
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();

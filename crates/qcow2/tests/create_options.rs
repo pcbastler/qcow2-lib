@@ -20,7 +20,6 @@ fn opts(vs: u64) -> CreateOptions {
         compression_type: None,
         data_file: None,
         encryption: None,
-            refcount_order: None,
     }
 }
 
@@ -190,7 +189,6 @@ fn create_with_data_file() {
             compression_type: None,
             data_file: Some(data.to_string_lossy().to_string()),
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -221,7 +219,6 @@ fn create_with_xts_encryption() {
                 luks_version: 1,
                 iter_time_ms: Some(10),
             }),
-            refcount_order: None,
         },
     )
     .unwrap();
@@ -249,7 +246,6 @@ fn create_with_cbc_encryption() {
                 luks_version: 1,
                 iter_time_ms: Some(10),
             }),
-            refcount_order: None,
         },
     )
     .unwrap();
@@ -307,7 +303,6 @@ fn encryption_with_extended_l2() {
                 luks_version: 1,
                 iter_time_ms: Some(10),
             }),
-            refcount_order: None,
         },
     )
     .unwrap();
@@ -345,7 +340,6 @@ fn create_on_disk_qemu_check() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();

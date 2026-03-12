@@ -23,7 +23,6 @@ fn create_image(dir: &tempfile::TempDir, name: &str, ct: Option<u8>) -> Qcow2Ima
             compression_type: ct,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -213,7 +212,6 @@ fn compressed_data_survives_snapshot_revert() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -244,7 +242,6 @@ fn compressed_survives_create_delete_cycle() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -300,7 +297,6 @@ fn integrity_passes_with_compressed() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -327,7 +323,6 @@ fn integrity_passes_zstd() {
             compression_type: Some(COMPRESSION_ZSTD),
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -359,7 +354,6 @@ fn reopen_compressed_image() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -401,7 +395,6 @@ fn qemu_reads_our_deflate_compressed() {
                 compression_type: None,
                 data_file: None,
                 encryption: None,
-                    refcount_order: None,
             },
         )
         .unwrap();

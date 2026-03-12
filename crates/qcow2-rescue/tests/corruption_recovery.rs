@@ -57,7 +57,6 @@ fn create_test_image(dir: &Path, cluster_size: u64, cluster_bits: u32) -> PathBu
             compression_type: None,
             data_file: None,
             encryption: None,
-            refcount_order: None,
         };
         let mut image = qcow2::Qcow2Image::create(&img_path, options).unwrap();
         for i in 0..NUM_DATA_CLUSTERS {

@@ -173,17 +173,6 @@ pub enum Error {
         name: String,
     },
 
-    /// Creating another snapshot would cause refcount overflow.
-    ///
-    /// After `count` snapshots, every cluster's refcount is at most `count + 1`.
-    /// One more snapshot would bring it to `count + 2`, exceeding `max_refcount`.
-    TooManySnapshots {
-        /// Number of snapshots currently in the image.
-        count: usize,
-        /// Maximum representable refcount value for the configured width.
-        max_refcount: u64,
-    },
-
     /// Image creation failed.
     CreateFailed {
         /// Description of the failure.
@@ -448,8 +437,6 @@ impl Error {
             Self::SnapshotNameEmpty => write!(f, "snapshot name must not be empty"),
             Self::SnapshotNameDuplicate { name } =>
                 write!(f, "snapshot with name {name:?} already exists"),
-            Self::TooManySnapshots { count, max_refcount } =>
-                write!(f, "cannot create snapshot: {count} snapshots already exist and refcount width only supports {max_refcount} references per cluster"),
             Self::CreateFailed { message, path } =>
                 write!(f, "failed to create image at {path}: {message}"),
             Self::WriteFailed { guest_offset, message } =>

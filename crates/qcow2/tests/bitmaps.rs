@@ -20,7 +20,6 @@ fn library_create_bitmap_qemu_reads() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -112,7 +111,6 @@ fn multiple_bitmaps_library_to_qemu() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -159,7 +157,6 @@ fn delete_bitmap_qemu_confirms() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -211,7 +208,6 @@ fn bitmap_image_integrity_clean() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -244,7 +240,6 @@ fn set_dirty_and_check() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -294,7 +289,6 @@ fn auto_tracking_sets_dirty_on_write() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -380,7 +374,6 @@ fn min_granularity_bitmap() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -420,7 +413,6 @@ fn large_granularity_bitmap() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -459,7 +451,6 @@ fn bitmap_lifecycle_integrity() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -518,7 +509,6 @@ fn dirty_bits_persist_across_reopen() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -551,7 +541,6 @@ fn cleared_bitmap_stays_clean_after_reopen() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -579,7 +568,6 @@ fn multiple_bitmaps_survive_reopen() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -619,7 +607,6 @@ fn auto_tracking_write_at_last_byte() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -652,7 +639,6 @@ fn auto_tracking_write_spanning_granules() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -687,7 +673,6 @@ fn auto_tracking_multiple_writes_accumulate() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -723,7 +708,6 @@ fn integrity_clean_after_writes_with_auto_bitmap() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -760,7 +744,6 @@ fn integrity_clean_with_multiple_dirty_bitmaps() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -796,7 +779,6 @@ fn integrity_clean_after_delete_recreate_cycle() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -856,7 +838,6 @@ fn bitmap_on_zero_size_image() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     );
     assert!(result.is_err(), "virtual_size=0 should be rejected");
@@ -875,7 +856,6 @@ fn bitmap_with_custom_cluster_size() {
             cluster_bits: Some(17), // 128K clusters
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -909,7 +889,6 @@ fn bitmap_survives_unrelated_flush() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -940,7 +919,6 @@ fn read_does_not_affect_bitmap() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -971,7 +949,6 @@ fn qemu_check_after_set_dirty() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -1014,7 +991,6 @@ fn qemu_check_min_granularity_with_dirty() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();
@@ -1052,7 +1028,6 @@ fn qemu_validates_auto_tracked_bitmap() {
             cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-     refcount_order: None,
         },
     )
     .unwrap();

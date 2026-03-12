@@ -22,7 +22,6 @@ fn create_mem_image(virtual_size: u64) -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -223,7 +222,6 @@ fn backing_data_hidden_by_zero_write() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -252,7 +250,6 @@ fn backing_data_partial_zero() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -283,7 +280,6 @@ fn extended_l2_zero_write_full_cluster() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -304,7 +300,6 @@ fn extended_l2_zero_single_subcluster() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -378,7 +373,6 @@ fn qemu_reads_our_zero_written_cluster() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -414,7 +408,6 @@ fn qemu_check_after_zero_overwrites() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();

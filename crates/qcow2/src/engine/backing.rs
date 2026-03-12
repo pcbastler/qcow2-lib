@@ -163,7 +163,6 @@ mod tests {
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-            refcount_order: None,
             },
         )
         .unwrap();
@@ -191,7 +190,6 @@ mod tests {
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-            refcount_order: None,
             },
         )
         .unwrap();
@@ -226,7 +224,6 @@ mod tests {
                 cluster_bits: None,
             extended_l2: false, compression_type: None,
             data_file: None, encryption: None,
-            refcount_order: None,
             },
         )
         .unwrap();

@@ -20,7 +20,6 @@ fn create_file(dir: &tempfile::TempDir, name: &str, vs: u64) -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -175,7 +174,6 @@ fn resize_overlay_grow() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -211,7 +209,6 @@ fn truncate_free_tail_shrinks_file() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -288,7 +285,6 @@ fn qemu_check_after_resize() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();

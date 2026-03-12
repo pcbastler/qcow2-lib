@@ -47,7 +47,6 @@ fn xts_write_read_roundtrip() {
             compression_type: None,
             data_file: None,
             encryption: xts_opts("testpass"),
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -74,7 +73,6 @@ fn cbc_write_read_roundtrip() {
             compression_type: None,
             data_file: None,
             encryption: cbc_opts("testpass"),
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -106,7 +104,6 @@ fn reopen_with_correct_password() {
                 compression_type: None,
                 data_file: None,
                 encryption: xts_opts("secret123"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -135,7 +132,6 @@ fn wrong_password_rejected() {
                 compression_type: None,
                 data_file: None,
                 encryption: xts_opts("correct"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -161,7 +157,6 @@ fn open_encrypted_without_password_fails() {
                 compression_type: None,
                 data_file: None,
                 encryption: xts_opts("secret"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -190,7 +185,6 @@ fn encrypted_multiple_clusters() {
             compression_type: None,
             data_file: None,
             encryption: xts_opts("pass"),
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -221,7 +215,6 @@ fn encrypted_partial_cluster_write() {
             compression_type: None,
             data_file: None,
             encryption: xts_opts("pass"),
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -251,7 +244,6 @@ fn encrypted_cross_cluster_write() {
             compression_type: None,
             data_file: None,
             encryption: xts_opts("pass"),
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -292,7 +284,6 @@ fn encrypted_image_has_crypt_method_luks() {
             compression_type: None,
             data_file: None,
             encryption: xts_opts("pass"),
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -319,7 +310,6 @@ fn encrypted_snapshot_roundtrip() {
             compression_type: None,
             data_file: None,
             encryption: xts_opts("pass"),
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -359,7 +349,6 @@ fn data_not_plaintext_on_disk() {
                 compression_type: None,
                 data_file: None,
                 encryption: xts_opts("pass"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -392,7 +381,6 @@ fn integrity_clean_with_encryption() {
             compression_type: None,
             data_file: None,
             encryption: xts_opts("pass"),
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -429,7 +417,6 @@ fn qemu_reads_our_encrypted_xts_image() {
                 compression_type: None,
                 data_file: None,
                 encryption: xts_opts("testpw"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -485,7 +472,6 @@ fn bidirectional_encrypted_rw() {
                 compression_type: None,
                 data_file: None,
                 encryption: xts_opts("shared"),
-                    refcount_order: None,
             },
         )
         .unwrap();

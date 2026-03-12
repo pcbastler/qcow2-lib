@@ -21,7 +21,6 @@ fn create_mem(vs: u64) -> Qcow2Image {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -38,7 +37,6 @@ fn create_file(dir: &tempfile::TempDir, name: &str, vs: u64) -> (std::path::Path
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -312,7 +310,6 @@ fn overlay_cow_preserves_base_data() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();
@@ -352,7 +349,6 @@ fn overlay_cow_unallocated_base_reads_zeros() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap()
@@ -427,7 +423,6 @@ fn integrity_clean_after_backing_cow() {
             compression_type: None,
             data_file: None,
             encryption: None,
-                refcount_order: None,
         },
     )
     .unwrap();

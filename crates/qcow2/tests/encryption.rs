@@ -26,7 +26,6 @@ fn create_encrypted_image(
                 luks_version: 1,
                 iter_time_ms: Some(1000),
             }),
-            refcount_order: None,
         },
     )
     .unwrap()
@@ -134,7 +133,6 @@ fn encrypted_reopen_round_trip() {
                 compression_type: None,
                 data_file: None,
                 encryption: encryption_options(b"mypassword"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -167,7 +165,6 @@ fn encrypted_wrong_password_fails() {
                 compression_type: None,
                 data_file: None,
                 encryption: encryption_options(b"correctpassword"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -194,7 +191,6 @@ fn encrypted_no_password_fails() {
                 compression_type: None,
                 data_file: None,
                 encryption: encryption_options(b"pw"),
-                    refcount_order: None,
             },
         )
         .unwrap();
@@ -227,7 +223,6 @@ fn encryption_with_compression_rejected() {
             compression_type: Some(qcow2::format::constants::COMPRESSION_ZSTD),
             data_file: None,
             encryption: encryption_options(b"pw"),
-                refcount_order: None,
         },
     );
     assert!(result.is_err());
@@ -266,7 +261,6 @@ fn encrypted_rw_round_trip() {
                 compression_type: None,
                 data_file: None,
                 encryption: encryption_options(b"testpw"),
-                    refcount_order: None,
             },
         )
         .unwrap();
