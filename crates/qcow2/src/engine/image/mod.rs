@@ -143,7 +143,6 @@ impl Qcow2Image {
                 has_hashes,
                 read_mode,
                 warnings,
-                skip_dirty_marking: false,
             },
             backend,
             data_backend,

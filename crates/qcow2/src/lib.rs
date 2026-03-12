@@ -28,5 +28,4 @@ pub mod io;
 pub use engine::Qcow2Image;
 pub use engine::cache::CacheMode;
 pub use error::{Error, IoErrorKind, Result};
-pub use io::StreamingBackend;
 pub use qcow2_core::io::{BackingImage, Compressor, IoBackend};

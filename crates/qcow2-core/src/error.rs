@@ -362,16 +362,6 @@ pub enum Error {
     /// Hash operations require an initialized hash extension.
     HashNotInitialized,
 
-    // ---- Streaming backend errors ----
-
-    /// A write was attempted below the drain watermark on a streaming backend.
-    WriteBelowDrain {
-        /// The offset of the write attempt.
-        write_offset: u64,
-        /// The current drain watermark (writes below this are rejected).
-        drained_up_to: u64,
-    },
-
     /// Hash verification detected a mismatch.
     HashVerifyFailed {
         /// Hash chunk index where the mismatch was found.
@@ -495,8 +485,6 @@ impl Error {
             Self::HashNotInitialized => write!(f, "hash extension not initialized"),
             Self::HashVerifyFailed { hash_chunk_index, guest_offset, expected, actual } =>
                 write!(f, "hash mismatch at hash chunk {hash_chunk_index} (0x{guest_offset:x}): expected {expected}, actual {actual}"),
-            Self::WriteBelowDrain { write_offset, drained_up_to } =>
-                write!(f, "write at offset 0x{write_offset:x} is below drain watermark 0x{drained_up_to:x}"),
             _ => unreachable!(),
         }
     }
@@ -1061,20 +1049,6 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "hash mismatch at hash chunk 3 (0x30000): expected aabbccdd, actual 11223344"
-        );
-    }
-
-    // ---- Streaming backend ----
-
-    #[test]
-    fn display_write_below_drain() {
-        let err = Error::WriteBelowDrain {
-            write_offset: 0x5000,
-            drained_up_to: 0x10000,
-        };
-        assert_eq!(
-            err.to_string(),
-            "write at offset 0x5000 is below drain watermark 0x10000"
         );
     }
 

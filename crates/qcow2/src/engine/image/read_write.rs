@@ -202,10 +202,6 @@ impl Qcow2Image {
     /// Also clears the BITMAPS autoclear bit if bitmaps exist, since
     /// bitmaps may be inconsistent while the image is dirty.
     pub(super) fn mark_dirty(&mut self) -> Result<()> {
-        if self.meta.skip_dirty_marking {
-            self.meta.dirty = true;
-            return Ok(());
-        }
         self.meta.header.incompatible_features |= IncompatibleFeatures::DIRTY;
 
         // Clear autoclear bits while image is dirty

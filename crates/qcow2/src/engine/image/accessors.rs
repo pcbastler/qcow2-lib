@@ -130,14 +130,4 @@ impl Qcow2Image {
     pub fn is_dirty(&self) -> bool {
         self.meta.dirty
     }
-
-    /// Enable or disable dirty flag suppression.
-    ///
-    /// When enabled, write operations set `dirty = true` in memory but do NOT
-    /// write the DIRTY incompatible feature flag to the on-disk header.
-    /// This is used with streaming backends where the header must remain
-    /// clean (no patching of already-written regions).
-    pub fn set_skip_dirty_marking(&mut self, skip: bool) {
-        self.meta.skip_dirty_marking = skip;
-    }
 }

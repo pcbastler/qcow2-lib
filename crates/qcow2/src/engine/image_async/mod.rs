@@ -163,10 +163,6 @@ impl Qcow2ImageAsync {
 
     /// Set DIRTY flag on the on-disk header.
     pub(crate) fn mark_dirty_inner(meta: &mut ImageMeta, backend: &dyn IoBackend) -> Result<()> {
-        if meta.skip_dirty_marking {
-            meta.dirty = true;
-            return Ok(());
-        }
         meta.header.incompatible_features |= IncompatibleFeatures::DIRTY;
 
         if meta.has_auto_bitmaps
