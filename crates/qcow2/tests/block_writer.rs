@@ -1005,3 +1005,140 @@ fn qemu_img_check_with_hashes() {
         );
     }
 }
+
+// ── 30. Compressed cluster boundary crossing (Bug 2 regression) ─────
+
+/// Regression test for Bug 2: compressed cluster packing corruption.
+///
+/// Writes 200+ compressed clusters that pack into host clusters. At exactly
+/// 128 compressed entries (128 × 512 = 65536 = one host cluster), the old
+/// `compressed_cursor` would overflow and subsequent allocations could
+/// overlap with metadata written during finalize.
+///
+/// This test writes enough compressed clusters to cross the boundary
+/// multiple times, then reads everything back to verify data integrity.
+#[test]
+fn compressed_cluster_boundary_crossing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bug2_regression.qcow2");
+
+    let cluster_size = 65536u64; // 64 KiB
+    // Need enough clusters to cross the 128-entry packing boundary multiple times.
+    // 300 clusters × 64 KiB = ~19 MiB virtual.
+    let num_clusters = 300u64;
+    let virtual_size = num_clusters * cluster_size;
+
+    let mut opts = default_options(virtual_size);
+    opts.compress = true;
+
+    let mut writer = Qcow2BlockWriter::create(&path, opts).unwrap();
+
+    // Write unique, compressible data to each cluster.
+    // Each cluster gets a repeating pattern that compresses well but is unique
+    // so we can verify correctness on read-back.
+    let mut expected: Vec<(u64, Vec<u8>)> = Vec::new();
+    for i in 0..num_clusters {
+        let offset = i * cluster_size;
+        let pattern = format!("CLUSTER-{i:06}-");
+        let data: Vec<u8> = pattern
+            .as_bytes()
+            .iter()
+            .copied()
+            .cycle()
+            .take(cluster_size as usize)
+            .collect();
+
+        writer.seek(SeekFrom::Start(offset)).unwrap();
+        writer.write_all(&data).unwrap();
+        expected.push((offset, data));
+    }
+
+    writer.finalize().unwrap();
+
+    // Read back and verify every cluster.
+    let mut img = Qcow2Image::open(&path).unwrap();
+    for (offset, data) in &expected {
+        let mut buf = vec![0u8; cluster_size as usize];
+        img.read_at(&mut buf, *offset).unwrap();
+        assert_eq!(
+            &buf, data,
+            "data mismatch at cluster offset {:#x} (cluster {})",
+            offset,
+            offset / cluster_size
+        );
+    }
+}
+
+// ── 31. Compressed + uncompressed interleaved (Bug 2 variant) ───────
+
+/// Verifies that interleaving compressed and uncompressed (zero/random)
+/// clusters does not cause allocation conflicts in the block writer.
+#[test]
+fn compressed_interleaved_with_zeros_and_uncompressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bug2_interleaved.qcow2");
+
+    let cluster_size = 65536u64;
+    let num_clusters = 200u64;
+    let virtual_size = num_clusters * cluster_size;
+
+    let mut opts = default_options(virtual_size);
+    opts.compress = true;
+
+    let mut writer = Qcow2BlockWriter::create(&path, opts).unwrap();
+
+    let mut expected: Vec<(u64, Vec<u8>)> = Vec::new();
+    for i in 0..num_clusters {
+        let offset = i * cluster_size;
+        let data: Vec<u8> = match i % 3 {
+            0 => {
+                // Compressible text
+                let pattern = format!("TEXT-{i:06}-");
+                pattern
+                    .as_bytes()
+                    .iter()
+                    .copied()
+                    .cycle()
+                    .take(cluster_size as usize)
+                    .collect()
+            }
+            1 => {
+                // All zeros — will be detected as zero cluster (no host allocation)
+                vec![0u8; cluster_size as usize]
+            }
+            _ => {
+                // Pseudo-random (incompressible) — will be stored uncompressed
+                let mut buf = vec![0u8; cluster_size as usize];
+                let mut state: u64 = 0xCAFE_0000 + i;
+                for chunk in buf.chunks_mut(8) {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let bytes = state.to_le_bytes();
+                    let len = chunk.len().min(8);
+                    chunk[..len].copy_from_slice(&bytes[..len]);
+                }
+                buf
+            }
+        };
+
+        writer.seek(SeekFrom::Start(offset)).unwrap();
+        writer.write_all(&data).unwrap();
+        expected.push((offset, data));
+    }
+
+    writer.finalize().unwrap();
+
+    // Read back and verify.
+    let mut img = Qcow2Image::open(&path).unwrap();
+    for (offset, data) in &expected {
+        let mut buf = vec![0u8; cluster_size as usize];
+        img.read_at(&mut buf, *offset).unwrap();
+        assert_eq!(
+            &buf, data,
+            "data mismatch at offset {:#x} (cluster {})",
+            offset,
+            offset / cluster_size
+        );
+    }
+}

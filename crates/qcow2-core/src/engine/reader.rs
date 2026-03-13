@@ -197,7 +197,18 @@ impl<'a> Qcow2Reader<'a> {
                         buf.copy_from_slice(&decompressed[intra..intra + buf.len()]);
                         Ok(())
                     }
-                    Err(e) => self.handle_read_error(buf, guest_offset, e),
+                    Err(e) => {
+                        // The Compressor trait doesn't carry guest_offset context,
+                        // so patch it into DecompressionFailed errors before reporting.
+                        let e: Error = e.into();
+                        let e = match e {
+                            Error::DecompressionFailed { kind, message, .. } => {
+                                Error::DecompressionFailed { kind, message, guest_offset }
+                            }
+                            other => other,
+                        };
+                        self.handle_read_error(buf, guest_offset, e)
+                    }
                 }
             }
         }

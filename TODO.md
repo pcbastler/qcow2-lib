@@ -2,7 +2,7 @@
 
 ## Bugs (kritisch)
 
-### Bug 1: Normal Writer — L1-Tabelle überschreibt Refcount-Strukturen
+### ~~Bug 1: Normal Writer — L1-Tabelle überschreibt Refcount-Strukturen~~ (FIXED)
 
 **Datei:** `crates/qcow2/src/engine/image/create.rs:330-334`
 
@@ -43,40 +43,66 @@ let initial_clusters = 3 + l1_clusters;
 
 ---
 
-### Bug 2: BlockWriter — Compressed Cluster Corruption bei hohen Offsets
+### ~~Bug 2: BlockWriter — Compressed Cluster Corruption bei hohen Offsets~~ (FIXED)
 
-**Symptome:**
-- `qemu-img check` meldet keine Fehler (Metadaten strukturell gültig)
-- `qemu-io read` und unsere Library scheitern ab ~9 TiB:
-  - `"unexpected end of file: failed to fill whole buffer"`
-  - `"invalid input: corrupt deflate stream"`
-- Nur bei `compress: true` mit verstreuten Writes über große Adressräume
+**Root Cause:** `allocate_compressed()` in `InMemoryMetadata` hatte einen
+Cursor-Overflow-Bug beim Compressed-Cluster-Packing. Wenn komprimierte Einträge
+einen Host-Cluster exakt füllten (128 × 512 = 65536 = cluster_size), rückte der
+`compressed_cursor` auf `next_host_offset` vor. Die Modulo-Prüfung
+`cursor % cluster_size == 0` sah das als freien Platz — nachfolgende Writes
+gingen in nicht-allokierten Speicher. Beim Finalize wurden Metadaten (L2-Tabellen)
+über die komprimierten Daten geschrieben.
 
-**Nicht betroffen:** Das L1-Layout ist korrekt — der BlockWriter berechnet die
-L1-Cluster-Anzahl dynamisch in `finalize.rs:204-209`.
+**Drei Unter-Bugs:**
+1. Cursor-Overflow ohne Interleaving → Fix: `compressed_cluster_end` Feld trackt
+   exakt das Ende des aktuellen Packing-Clusters
+2. Cursor nicht invalidiert wenn `allocate_cluster()` den Cursor-Bereich allokiert
+   → Fix: Invalidierung in `allocate_cluster()` und `allocate_n_clusters()`
+3. Reader-Fehlermeldung zeigte `guest_offset: 0x0` statt des echten Offsets
+   → Fix: `DecompressionFailed` Error im Reader mit korrektem guest_offset patchen
 
-**Verdachtsmomente (noch nicht definitiv isoliert):**
+**Dateien:**
+- `crates/qcow2-core/src/engine/block_writer/metadata.rs` (Fixes 1+2, 6 Unit-Tests)
+- `crates/qcow2-core/src/engine/reader.rs` (Fix 3)
+- `crates/qcow2/tests/block_writer.rs` (2 End-to-End-Regressionstests)
 
-1. **`CompressedClusterDescriptor::encode()`** (`crates/qcow2-format/src/compressed.rs:51-57`):
-   Maskiert `nb_sectors` mit `(1 << sector_bits) - 1` ohne Validierung. Bei
-   `cluster_bits=16` stehen nur 8 Bits zur Verfügung (max 255 Sektoren = 128 KiB).
-   Einzelne 64 KiB Cluster sollten nie >64 KiB komprimiert sein, aber `encode()`
-   prüft das nicht — stille Abschneidung bei Randfällen möglich.
+---
 
-2. **Compressed Packing** (`crates/qcow2-core/src/engine/block_writer/metadata.rs:103-126`):
-   `allocate_compressed()` verwaltet einen `compressed_cursor` für Cluster-Packing.
-   Mögliche Überlappung zwischen gepackten komprimierten Clustern bei bestimmten
-   Schreibmustern.
+## Metadaten-Überschreibungsschutz
 
-3. **Reader-Bug:** Fehlermeldung zeigt `"guest offset 0x0"` statt des tatsächlichen
-   Offsets (9 TiB), was auf eine falsche Offset-Berechnung im Lese-Pfad hindeutet.
+Aktuell existieren nur `debug_assert!`-basierte Checks (in Release komplett weg)
+und eine nachträgliche Overlap-Detection im Integrity Checker. Folgende
+Runtime-Schutzmechanismen fehlen:
 
-**Nächster Schritt:** Raw L2-Einträge bei 9 TiB und 12.8 TiB aus der
-BlockWriter-Datei auslesen und `CompressedClusterDescriptor` manuell dekodieren,
-um `host_offset` und `compressed_size` gegen die tatsächliche Dateigröße und
-die Daten auf Disk zu verifizieren.
+- [ ] **`debug_assert!` → Runtime-Check in `write_l1_entry()`** — Der bestehende
+  `debug_assert!(index.0 < self.mapper.l1_table().len())` in
+  `crates/qcow2-core/src/engine/writer/mod.rs:291` sollte ein echter
+  `Error`-Return werden. Ein L1-Index-Overflow ist ein fataler Logikfehler, der
+  sofort abgefangen werden muss — auch in Release. Kosten: 1 Vergleich pro
+  L1-Write (vernachlässigbar).
 
-**Reproduzierbar mit:** `cargo run --release --example generate_13t`
+- [ ] **`debug_assert_layout_no_overlap()` → Runtime-Check** — Die Funktion in
+  `crates/qcow2/src/engine/image/create.rs:95` verwendet `debug_assert!`. Da sie
+  nur bei Image-Erstellung (einmalig) aufgerufen wird, kann sie ohne
+  Performance-Einbußen zu einem echten `Error`-Return werden.
+
+- [ ] **`allocate_cluster()` Metadaten-Kollisionsprüfung** —
+  `RefcountManager::allocate_cluster()` in
+  `crates/qcow2-core/src/engine/refcount_manager.rs:121` prüft nicht, ob der
+  allokierte Offset mit bestehenden Metadaten-Regionen (Header, L1-Table,
+  Refcount-Table) kollidiert. Fix: Der RefcountManager kennt die Header-Offsets
+  bereits — ein Check `new_offset < data_start` bei Append-Mode wäre kostenlos.
+
+- [ ] **`write_l2_entry()` Offset-Validierung** — Schreibt an
+  `l2_table_offset + index * entry_size` ohne zu prüfen, ob der Ziel-Offset
+  tatsächlich ein allokierter L2-Cluster ist. Ein korrupter L1-Eintrag könnte
+  einen L2-Write in beliebige Metadaten-Bereiche umleiten.
+
+- [ ] **Zentrales Metadaten-Region-Registry** — Aktuell weiß kein Codepfad zur
+  Laufzeit, welche Byte-Bereiche zu welchen Strukturen gehören. Ein leichtgewichtiges
+  Registry (sortierte Liste von `(start, end, kind)`) im `Qcow2Image` würde
+  ermöglichen, jeden Write gegen bekannte Metadaten-Regionen zu validieren. Overhead:
+  einmalig bei `open()` aufbauen, O(log n) Lookup pro Allokation.
 
 ---
 

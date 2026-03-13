@@ -35,6 +35,11 @@ pub struct InMemoryMetadata {
     geometry: ClusterGeometry,
     /// Current offset for compressed cluster packing.
     compressed_cursor: u64,
+    /// End offset of the host cluster currently used for compressed packing.
+    /// When `compressed_cursor >= compressed_cluster_end`, a new host cluster
+    /// must be allocated. This prevents the cursor from advancing into host
+    /// clusters allocated by `allocate_cluster()` for uncompressed data.
+    compressed_cluster_end: u64,
     /// Cluster size cached for convenience.
     cluster_size: u64,
 }
@@ -56,6 +61,7 @@ impl InMemoryMetadata {
             refcount_order,
             geometry,
             compressed_cursor: 0,
+            compressed_cluster_end: 0,
             cluster_size,
         }
     }
@@ -64,6 +70,14 @@ impl InMemoryMetadata {
     pub fn allocate_cluster(&mut self) -> ClusterOffset {
         let offset = ClusterOffset(self.next_host_offset);
         self.next_host_offset += self.cluster_size;
+        // If the compressed cursor overlaps with the newly allocated cluster,
+        // invalidate it so the next compressed allocation starts fresh.
+        if self.compressed_cursor >= offset.0
+            && self.compressed_cursor < self.next_host_offset
+        {
+            self.compressed_cursor = 0;
+            self.compressed_cluster_end = 0;
+        }
         offset
     }
 
@@ -71,6 +85,12 @@ impl InMemoryMetadata {
     pub fn allocate_n_clusters(&mut self, n: u64) -> ClusterOffset {
         let offset = ClusterOffset(self.next_host_offset);
         self.next_host_offset += n * self.cluster_size;
+        if self.compressed_cursor >= offset.0
+            && self.compressed_cursor < self.next_host_offset
+        {
+            self.compressed_cursor = 0;
+            self.compressed_cluster_end = 0;
+        }
         offset
     }
 
@@ -109,12 +129,19 @@ impl InMemoryMetadata {
             ((compressed_size + COMPRESSED_SECTOR_SIZE - 1) / COMPRESSED_SECTOR_SIZE)
                 * COMPRESSED_SECTOR_SIZE;
 
-        // If cursor is 0 or would overflow the current host cluster, start a new one
+        // Allocate a new host cluster when:
+        // - cursor is 0 (initial state or invalidated by allocate_cluster)
+        // - cursor has reached or passed the end of the current packing cluster
+        //   (catches both exact-fill boundary and cursor advancing into
+        //   independently allocated clusters)
+        // - the entry would not fit in the remaining space of the current cluster
         let new_cluster = if self.compressed_cursor == 0
+            || self.compressed_cursor >= self.compressed_cluster_end
             || (self.compressed_cursor % self.cluster_size) + aligned_size > self.cluster_size
         {
             let host = self.allocate_cluster();
             self.compressed_cursor = host.0;
+            self.compressed_cluster_end = host.0 + self.cluster_size;
             true
         } else {
             false
@@ -329,5 +356,165 @@ mod tests {
 
         let indices = meta.populated_l1_indices();
         assert_eq!(indices, vec![0, 3]);
+    }
+
+    #[test]
+    fn allocate_compressed_packing() {
+        let mut meta = InMemoryMetadata::new(test_geometry(), 16, 4, 0x10000);
+        // First compressed: allocates a new host cluster
+        let (offset1, new1) = meta.allocate_compressed(400);
+        assert!(new1);
+        assert_eq!(offset1, 0x10000);
+
+        // Second compressed: packs into same host cluster (400→512 aligned)
+        let (offset2, new2) = meta.allocate_compressed(400);
+        assert!(!new2);
+        assert_eq!(offset2, 0x10000 + 512);
+    }
+
+    #[test]
+    fn allocate_compressed_exact_cluster_boundary() {
+        // Regression test for Bug 2: when compressed entries exactly fill a
+        // host cluster (128 × 512 = 65536), the 129th entry must allocate
+        // a new cluster instead of writing into unallocated space.
+        let mut meta = InMemoryMetadata::new(test_geometry(), 16, 4, 0x10000);
+        let cluster_size = 65536u64;
+
+        // Fill exactly one host cluster: 128 entries × 512 bytes each
+        let entries_per_cluster = cluster_size / 512;
+        for i in 0..entries_per_cluster {
+            let (offset, new) = meta.allocate_compressed(512);
+            if i == 0 {
+                assert!(new, "first entry should allocate a new cluster");
+                assert_eq!(offset, 0x10000);
+            } else {
+                assert!(!new, "entry {i} should pack into existing cluster");
+                assert_eq!(offset, 0x10000 + i * 512);
+            }
+        }
+
+        // next_host_offset should be right after the first host cluster
+        assert_eq!(meta.next_host_offset(), 0x10000 + cluster_size);
+
+        // Entry 129: MUST allocate a new cluster, not reuse the exhausted one
+        let (offset129, new129) = meta.allocate_compressed(512);
+        assert!(
+            new129,
+            "entry after exact cluster fill must allocate new cluster"
+        );
+        assert_eq!(
+            offset129,
+            0x10000 + cluster_size,
+            "new cluster should start at next_host_offset"
+        );
+        // next_host_offset advanced by one more cluster
+        assert_eq!(meta.next_host_offset(), 0x10000 + 2 * cluster_size);
+    }
+
+    #[test]
+    fn allocate_compressed_overflow_into_new_cluster() {
+        // When a compressed entry doesn't fit in the remaining space,
+        // a new cluster must be allocated.
+        let mut meta = InMemoryMetadata::new(test_geometry(), 16, 4, 0x10000);
+
+        // First entry: 512 bytes
+        let (_, new1) = meta.allocate_compressed(512);
+        assert!(new1);
+
+        // Fill up most of the cluster: write 126 more entries (127 total = 65024)
+        for _ in 1..127 {
+            let (_, new) = meta.allocate_compressed(512);
+            assert!(!new);
+        }
+
+        // 512 bytes left. Entry of 1024 bytes (aligned) doesn't fit.
+        let (offset, new) = meta.allocate_compressed(1024);
+        assert!(new, "should allocate new cluster when entry doesn't fit");
+        assert_eq!(offset, 0x10000 + 65536);
+    }
+
+    #[test]
+    fn allocate_compressed_interleaved_with_uncompressed() {
+        // Compressed allocation followed by uncompressed allocation must
+        // not produce overlapping ranges.
+        let mut meta = InMemoryMetadata::new(test_geometry(), 16, 4, 0x10000);
+
+        // Allocate 128 compressed entries (exactly fills one host cluster)
+        for _ in 0..128 {
+            meta.allocate_compressed(512);
+        }
+
+        // Allocate an uncompressed cluster — must not overlap
+        let uncompressed = meta.allocate_cluster();
+        assert!(
+            uncompressed.0 >= 0x10000 + 65536,
+            "uncompressed cluster must be beyond compressed data, got {:#x}",
+            uncompressed.0
+        );
+
+        // Allocate another compressed entry — must allocate a fresh cluster
+        let (offset, new) = meta.allocate_compressed(512);
+        assert!(new);
+        assert!(
+            offset >= uncompressed.0 + 65536,
+            "new compressed entry must be beyond uncompressed cluster"
+        );
+    }
+
+    #[test]
+    fn allocate_compressed_cursor_survives_non_overlapping_alloc() {
+        // Positive test: when compressed cursor is in the MIDDLE of a host
+        // cluster and allocate_cluster() is called, the cursor must NOT be
+        // invalidated because it doesn't overlap with the new allocation.
+        let mut meta = InMemoryMetadata::new(test_geometry(), 16, 4, 0x10000);
+
+        // Pack 10 compressed entries (5120 bytes used, 60416 remaining)
+        for _ in 0..10 {
+            meta.allocate_compressed(512);
+        }
+
+        // Allocate an uncompressed cluster — at a different address
+        let uncompressed = meta.allocate_cluster();
+        assert_eq!(uncompressed.0, 0x10000 + 65536); // next cluster
+
+        // Next compressed entry should STILL pack into the original cluster
+        // because cursor (0x10000 + 5120) is NOT in the uncompressed range
+        let (offset, new) = meta.allocate_compressed(512);
+        assert!(
+            !new,
+            "cursor in middle of earlier cluster should still be valid"
+        );
+        assert_eq!(offset, 0x10000 + 10 * 512);
+    }
+
+    #[test]
+    fn allocate_compressed_no_overlap_between_ranges() {
+        // Exhaustive: allocate many compressed+uncompressed in alternation,
+        // verify no two allocated ranges overlap.
+        let mut meta = InMemoryMetadata::new(test_geometry(), 16, 4, 0x10000);
+        let mut ranges: Vec<(u64, u64)> = Vec::new(); // (start, end)
+
+        for round in 0..5 {
+            // 130 compressed entries — crosses one cluster boundary
+            for _ in 0..130 {
+                let (offset, _) = meta.allocate_compressed(512);
+                ranges.push((offset, offset + 512));
+            }
+            // 1 uncompressed cluster
+            let uc = meta.allocate_cluster();
+            ranges.push((uc.0, uc.0 + 65536));
+
+            // Verify no overlaps so far
+            let mut sorted = ranges.clone();
+            sorted.sort_by_key(|&(start, _)| start);
+            for w in sorted.windows(2) {
+                let (_, end_a) = w[0];
+                let (start_b, _) = w[1];
+                assert!(
+                    end_a <= start_b,
+                    "round {round}: overlap detected: ..{end_a:#x} vs {start_b:#x}.."
+                );
+            }
+        }
     }
 }
