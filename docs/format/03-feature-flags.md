@@ -1,4 +1,4 @@
-# Feature Flags
+# 3. Feature Flags
 
 QCOW2 version 3 adds three 64-bit fields to the header that signal which
 optional features an image uses. These flags allow implementations to detect
@@ -7,12 +7,12 @@ its data.
 
 Version 2 has no feature flags — all v2 images use the same fixed feature set.
 
-## The three categories
+## 3.1 The three categories
 
 Each category has different rules for how an implementation must handle unknown
 (unrecognized) bits:
 
-### Incompatible features (header bytes 72–79)
+### 3.1.1 Incompatible features (header bytes 72–79)
 
 An implementation **must refuse to open** an image if any unknown incompatible
 bit is set [1]. These features change the on-disk layout in ways that an
@@ -21,12 +21,12 @@ unaware reader would misinterpret.
 Unknown bits are validated in `validate_structural()` against
 `SUPPORTED_INCOMPATIBLE_FEATURES` [1][2].
 
-### Compatible features (header bytes 80–87)
+### 3.1.2 Compatible features (header bytes 80–87)
 
 An implementation **may safely ignore** unknown compatible bits [1]. These
 features add optional metadata that does not affect the core data layout.
 
-### Autoclear features (header bytes 88–95)
+### 3.1.3 Autoclear features (header bytes 88–95)
 
 Unknown autoclear bits are **automatically cleared on first write** by any
 implementation that does not understand them [1]. This signals that the
@@ -35,17 +35,17 @@ associated metadata may now be stale.
 This mechanism is designed for consistency flags: the bit is set when the
 metadata is known to be consistent, and cleared when it might not be.
 
-## Defined bits
+## 3.2 Defined bits
 
-### Incompatible feature bits
+### 3.2.1 Incompatible feature bits
 
 | Bit | Name | Constant | Description |
 |-----|------|----------|-------------|
 | 0 | `DIRTY` | `IncompatibleFeatures::DIRTY` | The image was not closed cleanly. Refcounts may be inconsistent and should be checked before use. |
 | 1 | `CORRUPT` | `IncompatibleFeatures::CORRUPT` | Data structures may be corrupt. The image should only be opened read-only. |
-| 2 | `EXTERNAL_DATA_FILE` | `IncompatibleFeatures::EXTERNAL_DATA_FILE` | Guest data is stored in an external file, not in the QCOW2 file itself. See [External Data File](external-data-file.md). |
+| 2 | `EXTERNAL_DATA_FILE` | `IncompatibleFeatures::EXTERNAL_DATA_FILE` | Guest data is stored in an external file, not in the QCOW2 file itself. See [External Data File](14-external-data-file.md). |
 | 3 | `COMPRESSION_TYPE` | `IncompatibleFeatures::COMPRESSION_TYPE` | The `compression_type` byte at header offset 104 is valid. If this bit is not set, deflate (type 0) is assumed regardless of that byte's value. |
-| 4 | `EXTENDED_L2` | `IncompatibleFeatures::EXTENDED_L2` | L2 entries are 128 bits wide (instead of 64 bits) and carry per-subcluster allocation bitmaps. See [Extended L2](extended-l2.md). |
+| 4 | `EXTENDED_L2` | `IncompatibleFeatures::EXTENDED_L2` | L2 entries are 128 bits wide (instead of 64 bits) and carry per-subcluster allocation bitmaps. See [Extended L2](06-extended-l2.md). |
 
 All five bits are defined in [1] (lines 16–27).
 
@@ -53,7 +53,7 @@ The set of incompatible features that qcow2-lib can handle is defined by
 `SUPPORTED_INCOMPATIBLE_FEATURES` [1] (lines 58–62), which is the union of
 all five bits above.
 
-### Compatible feature bits
+### 3.2.2 Compatible feature bits
 
 | Bit | Name | Constant | Description |
 |-----|------|----------|-------------|
@@ -61,7 +61,7 @@ all five bits above.
 
 Defined in [1] (lines 34–37).
 
-### Autoclear feature bits
+### 3.2.3 Autoclear feature bits
 
 | Bit | Name | Constant | Description |
 |-----|------|----------|-------------|
@@ -71,7 +71,7 @@ Defined in [1] (lines 34–37).
 
 Defined in [1] (lines 44–51).
 
-## On-disk encoding
+## 3.3 On-disk encoding
 
 All three fields are stored as 64-bit big-endian integers [2]. Bit 0 is the
 least-significant bit (value `1`), bit 1 has value `2`, bit 2 has value `4`,
@@ -88,7 +88,7 @@ For the incompatible features field, the five defined bits occupy positions
 0–4. All remaining bits (5–63) are reserved. If any reserved bit is set, a
 reader must refuse to open the image [2].
 
-## Interaction with version 2
+## 3.4 Interaction with version 2
 
 Version 2 headers do not contain feature flag fields. When parsing a v2 image,
 all three flag fields are treated as zero (no features set) [2]. The v2 default

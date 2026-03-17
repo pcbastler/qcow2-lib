@@ -1,6 +1,6 @@
-# QCOW2 Format Reference
+# 1. Overview
 
-## What is QCOW2?
+## 1.1 What is QCOW2?
 
 A virtual hard disk is a file that pretends to be a physical disk drive. A
 virtual machine reads and writes to it exactly as it would to real hardware —
@@ -27,11 +27,11 @@ KVM, libvirt, OpenStack, and other virtualization tools. It adds:
 - **Dirty bitmaps** — the image tracks which regions have changed since a
   reference point, enabling efficient incremental backups.
 
-## How a QCOW2 file is organized
+## 1.2 How a QCOW2 file is organized
 
 A QCOW2 file is divided into fixed-size **clusters**. The cluster size is
-configurable (512 bytes to 2 MB; the default is 64 KB) [1]. Every structure in the
-file — metadata tables, compressed data, uncompressed data — is
+configurable (512 bytes to 2 MB; the default is 64 KB) [1]. Every structure in
+the file — metadata tables, compressed data, uncompressed data — is
 cluster-aligned.
 
 At a high level, the file looks like this:
@@ -62,11 +62,7 @@ offset 0. The L1 table, refcount table, snapshot table, and everything else are
 located via offsets stored in the header. New clusters are appended at the end of
 the file as data is written.
 
-## The two core mechanisms
-
-Understanding QCOW2 requires understanding two things:
-
-### 1. Address translation — "Where is my data?"
+## 1.3 Address translation
 
 A virtual disk has a flat address space: byte 0 through byte *virtual_size - 1*.
 The guest writes to a guest offset, and QCOW2 must map that to a location in
@@ -108,9 +104,9 @@ The L1 table is small (tens to hundreds of entries for typical images). L2
 tables are larger (thousands of entries each) and are allocated on demand — an
 L2 table only exists once a guest write touches that range.
 
-→ Details: [Cluster Addressing](cluster-addressing.md)
+→ Details: Section 5 — [Cluster Addressing](05-cluster-addressing.md)
 
-### 2. Reference counting — "Who is using this cluster?"
+## 1.4 Reference counting
 
 Every cluster in the file has a **reference count** that tracks how many
 metadata entries (L1 entries, L2 entries, snapshot tables) point to it.
@@ -127,9 +123,9 @@ Reference counts are stored in a two-level structure similar to the L1/L2
 tables: a **refcount table** (array of pointers) points to **refcount blocks**
 (arrays of reference counts).
 
-→ Details: [Refcount Table](refcount-table.md)
+→ Details: Section 7 — [Refcount Table](07-refcount-table.md)
 
-## Versions
+## 1.5 Versions
 
 QCOW2 exists in two versions:
 
@@ -145,9 +141,9 @@ subclusters, bitmaps) through standardized feature flags. Encryption is
 signaled separately via the `crypt_method` header field, not through feature
 flags.
 
-→ Details: [Header](header.md), [Feature Flags](feature-flags.md)
+→ Details: Section 2 — [Header](02-header.md), Section 3 — [Feature Flags](03-feature-flags.md)
 
-## qcow2-lib extensions
+## 1.6 qcow2-lib extensions
 
 This documentation describes the QCOW2 format as implemented by qcow2-lib.
 
@@ -157,34 +153,13 @@ the upstream QCOW2 specification. It uses the autoclear mechanism
 understand this bit will clear it on first write, discarding the hash metadata.
 The image itself remains fully usable.
 
-→ Details: [BLAKE3 Hashes](blake3-hashes.md)
+→ Details: Section 13 — [BLAKE3 Hashes](13-blake3-hashes.md)
 
-## All bytes are big-endian
+## 1.7 Byte order
 
 Every multi-byte integer in a QCOW2 file is stored in **big-endian** (network)
 byte order [7]. This applies to the header, L1/L2 entries, refcount tables,
 snapshot headers, bitmap structures — everything. There are no exceptions.
-
-## Sections
-
-Each section below documents one aspect of the format in detail.
-
-| Section | What it covers |
-|---------|---------------|
-| [Header](header.md) | The 72/104-byte structure at offset 0: version, geometry, pointers |
-| [Feature Flags](feature-flags.md) | Incompatible, compatible, and autoclear feature bits |
-| [Header Extensions](header-extensions.md) | Type-length-value chain after the fixed header |
-| [Cluster Addressing](cluster-addressing.md) | Two-level L1 → L2 → data translation |
-| [Extended L2](extended-l2.md) | 128-bit L2 entries with 32 subclusters per cluster |
-| [Refcount Table](refcount-table.md) | Two-level reference count structure |
-| [Cluster Types](cluster-types.md) | Allocated, zero, compressed, and unallocated states |
-| [Compression](compression.md) | Deflate and Zstandard, compressed cluster descriptors |
-| [Encryption](encryption.md) | LUKS1/2, AES-XTS, AES-CBC-ESSIV, key derivation |
-| [Snapshots](snapshots.md) | Snapshot table, COW semantics, L1 table copies |
-| [Bitmaps](bitmaps.md) | Persistent dirty bitmaps for incremental backup |
-| [BLAKE3 Hashes](blake3-hashes.md) | Per-chunk integrity hashes (qcow2-lib extension) |
-| [External Data File](external-data-file.md) | Storing guest data in a separate file |
-| [Backing File](backing-file.md) | Copy-on-write overlay chains |
 
 ## Source References
 

@@ -1,4 +1,4 @@
-# Snapshots
+# 11. Snapshots
 
 QCOW2 stores internal snapshots as a table of snapshot headers. Each snapshot
 captures the full guest address space at a point in time by keeping a private

@@ -1,4 +1,4 @@
-# External Data File
+# 14. External Data File
 
 When the `EXTERNAL_DATA_FILE` incompatible feature flag is set, guest data
 clusters are stored in a separate file instead of the QCOW2 file itself.

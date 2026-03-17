@@ -1,4 +1,4 @@
-# Extended L2 Entries & Subclusters
+# 6. Extended L2 Entries & Subclusters
 
 When the `EXTENDED_L2` incompatible feature flag is set, L2 entries are 128 bits
 wide instead of 64 bits. The extra 64 bits hold two 32-bit subcluster bitmaps

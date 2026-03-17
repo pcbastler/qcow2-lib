@@ -9,7 +9,7 @@ reading this codebase alone. If audit-grade accuracy is required, each item
 should be verified against the upstream QEMU QCOW2 specification
 (`docs/interop/qcow2.txt` in the QEMU repository).
 
-## format/README.md
+## format/01-overview.md
 
 | Line(s) | Claim | Category |
 |---------|-------|----------|
@@ -20,7 +20,7 @@ should be verified against the upstream QEMU QCOW2 specification
 | 107 | "tens to hundreds of entries for typical images" | Unquantified claim |
 | 115–124 | Refcount semantics: 0=free, 1=in-place write, >1=COW | Engine behavior (implied by `COPIED` flag in `constants.rs:68`, but the format layer does not define write semantics) |
 
-## format/header.md
+## format/02-header.md
 
 | Line(s) | Claim | Category |
 |---------|-------|----------|
@@ -34,7 +34,7 @@ should be verified against the upstream QEMU QCOW2 specification
 | 151 | refcount_order=6: "Theoretical maximum" | Editorial |
 | 161 | "For version 2, extensions may or may not be present" | Not explicitly stated in source |
 
-## format/feature-flags.md
+## format/03-feature-flags.md
 
 | Line(s) | Claim | Category |
 |---------|-------|----------|
@@ -48,7 +48,7 @@ should be verified against the upstream QEMU QCOW2 specification
 | 75 | "not defined by the upstream QCOW2 specification" | External knowledge about upstream spec contents |
 | 93 | "All remaining bits (5–63) are reserved" | Format spec terminology (source validates unknown bits but doesn't use the word "reserved") |
 
-## format/header-extensions.md
+## format/04-header-extensions.md
 
 | Line(s) | Claim | Category |
 |---------|-------|----------|
@@ -59,5 +59,5 @@ should be verified against the upstream QEMU QCOW2 specification
 ## Status
 
 - **Last audited**: 2026-03-17
-- **Audited files**: `format/README.md`, `format/header.md`, `format/feature-flags.md`, `format/header-extensions.md`
+- **Audited files**: `format/01-overview.md`, `format/02-header.md`, `format/03-feature-flags.md`, `format/04-header-extensions.md`
 - **Remaining**: All other docs files (still contain TODO placeholders)

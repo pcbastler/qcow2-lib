@@ -1,4 +1,4 @@
-# BLAKE3 Hash Extension
+# 13. BLAKE3 Hash Extension
 
 The BLAKE3 hash extension is a qcow2-lib-specific feature (not part of the QEMU
 spec). It stores a per-chunk cryptographic hash of the guest data, enabling

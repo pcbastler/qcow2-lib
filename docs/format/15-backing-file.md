@@ -1,4 +1,4 @@
-# Backing File
+# 15. Backing File
 
 A QCOW2 image can name a backing file in its header. Any guest cluster that is
 unallocated in the overlay is read from the backing file instead of returning

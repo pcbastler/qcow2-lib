@@ -1,4 +1,4 @@
-# Compression
+# 9. Compression
 
 QCOW2 supports per-cluster compression. Compressed clusters are stored at
 variable size (multiple of 512-byte sectors) and identified by the COMPRESSED

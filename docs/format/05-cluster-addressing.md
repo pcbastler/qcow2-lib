@@ -1,4 +1,4 @@
-# Cluster Addressing (L1 / L2 Tables)
+# 5. Cluster Addressing
 
 QCOW2 maps guest offsets to host file locations using a two-level lookup
 table. This is the core mechanism of the format — every read and write starts
@@ -9,7 +9,7 @@ QCOW2 engine translates each guest offset into one of four outcomes: the data
 is at a specific host offset, it reads as zeros, it is compressed, or it is
 not allocated (fall through to a backing file or return zeros).
 
-## Address decomposition
+## 5.1 Address decomposition
 
 A guest offset is split into three parts:
 
@@ -39,7 +39,7 @@ Where:
 
 This is the single authoritative implementation of the address decomposition [1].
 
-### Concrete examples
+### 5.1.1 Concrete examples
 
 **Standard mode, `cluster_bits = 16` (64 KB clusters)**:
 
@@ -71,7 +71,7 @@ address space per L2 table = 4,096 × 65,536 = 256 MiB
 
 See `ClusterGeometry::l2_entry_shift()` and `l2_entries_per_table()` in [1].
 
-## The lookup algorithm
+## 5.2 The lookup algorithm
 
 The full resolution follows these steps [2]:
 
@@ -98,7 +98,7 @@ The full resolution follows these steps [2]:
  └─────────────────┘     L2Entry::Compressed ──► Compressed
 ```
 
-### Step 1: L1 lookup
+### 5.2.1 L1 lookup
 
 The L1 table is read from the header's `l1_table_offset` [4]. Each entry is a
 64-bit value [3]:
@@ -124,7 +124,7 @@ Bitmask constants defined in [5], `L1Entry` struct in [3].
 If the L1 entry's offset is zero, the lookup short-circuits to
 `ClusterResolution::Unallocated` [2].
 
-### Step 2: Load L2 table
+### 5.2.2 Load L2 table
 
 The L2 table is one cluster of L2 entries at the host offset from the L1
 entry. The table is loaded into a cache (`MetadataCache`) on first access.
@@ -134,7 +134,7 @@ entry. The table is loaded into a cache (`MetadataCache`) on first access.
 
 Entry counts computed by `ClusterGeometry::l2_entries_per_table()` [1].
 
-### Step 3: Read L2 entry
+### 5.2.3 Read L2 entry
 
 Each L2 entry describes the state of one guest cluster. The entry is decoded
 into one of four variants:
@@ -174,10 +174,10 @@ In extended L2 mode, each entry is two 64-bit words. The first word has the
 same layout as above **except bit 0 is always 0** — zero status is tracked in
 the subcluster bitmap instead. The second word is a `SubclusterBitmap`.
 
-See [Extended L2](extended-l2.md) for the bitmap format. Both branches
+See [Extended L2](06-extended-l2.md) for the bitmap format. Both branches
 implemented in `L2Entry::decode_extended()` [6].
 
-### Step 4: Map to ClusterResolution
+### 5.2.4 Map to ClusterResolution
 
 The decoded `L2Entry` maps to a `ClusterResolution` [2]:
 
@@ -189,7 +189,7 @@ The decoded `L2Entry` maps to a `ClusterResolution` [2]:
 | `Standard { host_offset, .. }` | `Allocated` | Data at `host_offset + intra_cluster_offset` |
 | `Compressed(descriptor)` | `Compressed` | Compressed data; descriptor encodes location and size |
 
-## L1 table sizing
+## 5.3 L1 table sizing
 
 The L1 table must have enough entries to cover the virtual disk:
 
@@ -200,7 +200,7 @@ l1_size = ceil(virtual_size / (entries_per_l2 × cluster_size))
 Each L1 entry is 8 bytes (`L1_ENTRY_SIZE`) [5]. The table is stored at
 `l1_table_offset` (header field, must be cluster-aligned) [4].
 
-### Examples
+### 5.3.1 Examples
 
 | Virtual size | Cluster bits | Entries per L2 | L1 entries | L1 table bytes |
 |-------------|-------------|---------------|-----------|---------------|
@@ -211,7 +211,7 @@ Each L1 entry is 8 bytes (`L1_ENTRY_SIZE`) [5]. The table is stored at
 
 Boundary values confirmed by the `split_crosses_l1_boundary` test in [1].
 
-## Refcount table entry format
+## 5.4 Refcount table entry format
 
 For reference, the refcount table uses a similar two-level structure. Its
 entries are also 64-bit big-endian values with the offset in bits 9–63:
@@ -220,7 +220,7 @@ entries are also 64-bit big-endian values with the offset in bits 9–63:
 REFCOUNT_TABLE_OFFSET_MASK = 0xffff_ffff_ffff_fe00  (bits 9..=63)
 ```
 
-See [Refcount Table](refcount-table.md) for details.
+See [Refcount Table](07-refcount-table.md) for details.
 
 ## Source References
 

@@ -1,4 +1,4 @@
-# Cluster Types
+# 8. Cluster Types
 
 An L2 entry encodes not just a host offset but the storage state of a cluster.
 There are four distinct states.

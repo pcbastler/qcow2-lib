@@ -1,4 +1,4 @@
-# Refcount Table
+# 7. Refcount Table
 
 Every host cluster in a QCOW2 image has a reference count maintained in a
 two-level refcount structure. This enables copy-on-write semantics and

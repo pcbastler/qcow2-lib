@@ -1,4 +1,4 @@
-# Encryption
+# 10. Encryption
 
 QCOW2 supports three encryption methods selected by the `crypt_method` header
 field. The LUKS method (method 2) is the current standard; AES-CBC (method 1)

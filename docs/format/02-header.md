@@ -1,11 +1,11 @@
-# QCOW2 Header
+# 2. Header
 
 The header is the first thing in every QCOW2 file. It sits at byte offset 0 and
 tells a reader everything it needs to know before touching any other part of the
 file: what version this is, how large the virtual disk is, where the metadata
 tables are, and which optional features are in use.
 
-## Two versions, one header
+## 2.1 Two versions, one header
 
 QCOW2 version 2 uses a fixed 72-byte header. Version 3 extends it to at least
 104 bytes and adds feature flag fields. A reader can distinguish them by
@@ -15,7 +15,7 @@ Both versions share the same first 72 bytes. Version 3 appends 32 bytes of
 feature flags and a self-describing `header_length` field, which allows future
 versions to extend the header further without breaking existing parsers.
 
-## Reading the header
+## 2.2 Reading the header
 
 The first four bytes are the **magic number**: `0x514649fb` [1]. In ASCII, this
 spells "QFI" followed by `0xfb`. If these bytes don't match, the file is not a
@@ -32,11 +32,11 @@ After confirming the magic, read the `version` field (bytes 4–7). If it's `2`,
 read 72 bytes total. If it's `3`, read at least 104 bytes, then check
 `header_length` to see if there's more.
 
-## Field reference
+## 2.3 Field reference
 
 All fields are big-endian.
 
-### Common fields (v2 and v3)
+### 2.3.1 Common fields (v2 and v3)
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
@@ -56,7 +56,7 @@ All fields are big-endian.
 
 **Total: 72 bytes.** For version 2, the header ends here.
 
-### Version 3 additional fields
+### 2.3.2 Version 3 additional fields
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
@@ -69,7 +69,7 @@ All fields are big-endian.
 
 **Total: at least 104 bytes** (may be larger if `header_length` says so).
 
-### Visual layout
+### 2.3.3 Visual layout
 
 ```
  Offset (hex)
@@ -99,9 +99,9 @@ All fields are big-endian.
      └──────────────────────────┘
 ```
 
-## Key concepts explained
+## 2.4 Key concepts
 
-### cluster_bits and cluster size
+### 2.4.1 cluster_bits and cluster size
 
 The `cluster_bits` field determines the cluster size: **cluster_size = 2^cluster_bits^** [1].
 
@@ -117,7 +117,7 @@ The cluster size affects everything:
 - How much address space each L2 table covers
 - The granularity of allocation (even a 1-byte write allocates a full cluster)
 
-### How l1_size is calculated
+### 2.4.2 How l1_size is calculated
 
 The `l1_size` field is not arbitrary — it is determined by the virtual disk size
 and the cluster geometry:
@@ -138,7 +138,7 @@ l1_size          = ceil(10 GiB / 512 MiB) = 20
 
 The L1 table has 20 entries, occupying 20 × 8 = 160 bytes.
 
-### refcount_order and refcount width
+### 2.4.3 refcount_order and refcount width
 
 Version 2 always uses 16-bit reference counts (`refcount_order` = 4,
 meaning 2⁴ = 16 bits). Version 3 allows wider refcounts:
@@ -153,7 +153,7 @@ meaning 2⁴ = 16 bits). Version 3 allows wider refcounts:
 Wider refcounts use more space per cluster but allow more sharing (more
 snapshots referencing the same cluster without overflow).
 
-## What comes after the header?
+## 2.5 What comes after the header?
 
 Immediately after the header (padded to 8-byte alignment) come the **header
 extensions** — a chain of type-length-value entries that carry optional
@@ -161,9 +161,9 @@ metadata. The chain is terminated by a zero-type entry. For version 2,
 extensions may or may not be present. For version 3, the extension area starts
 at byte `header_length`.
 
-→ Next: [Header Extensions](header-extensions.md)
+→ Next: Section 4 — [Header Extensions](04-header-extensions.md)
 
-## Validation
+## 2.6 Validation
 
 A QCOW2 reader should validate the header before trusting any offsets [1]. Key
 checks:

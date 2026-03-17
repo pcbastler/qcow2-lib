@@ -1,4 +1,4 @@
-# Persistent Dirty Bitmaps
+# 12. Persistent Dirty Bitmaps
 
 The Bitmaps header extension points to a bitmap directory that lists named
 bitmaps. Each bitmap tracks which guest regions have been written since a
