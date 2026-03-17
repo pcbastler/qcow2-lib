@@ -30,7 +30,7 @@ KVM, libvirt, OpenStack, and other virtualization tools. It adds:
 ## How a QCOW2 file is organized
 
 A QCOW2 file is divided into fixed-size **clusters**. The cluster size is
-configurable (512 bytes to 2 MB; the default is 64 KB). Every structure in the
+configurable (512 bytes to 2 MB; the default is 64 KB) [1]. Every structure in the
 file — metadata tables, compressed data, uncompressed data — is
 cluster-aligned.
 
@@ -99,10 +99,10 @@ virtual addresses to physical addresses:
                                └───────────────────────────┘
 ```
 
-- The **L1 table** is an array of pointers. Each entry points to an L2 table.
+- The **L1 table** is an array of pointers. Each entry points to an L2 table [2].
 - Each **L2 table** is an array of pointers. Each entry points to a data cluster
-  (or says "not allocated" or "reads as zero" or "compressed").
-- The **cluster offset** is the byte position within that data cluster.
+  (or says "not allocated" or "reads as zero" or "compressed") [3].
+- The **cluster offset** is the byte position within that data cluster [4].
 
 The L1 table is small (tens to hundreds of entries for typical images). L2
 tables are larger (thousands of entries each) and are allocated on demand — an
@@ -134,10 +134,10 @@ tables: a **refcount table** (array of pointers) points to **refcount blocks**
 QCOW2 exists in two versions:
 
 - **Version 2** — the original format. 72-byte header, fixed 16-bit reference
-  counts, no feature flags. Still widely used and fully supported.
+  counts, no feature flags [5].
 - **Version 3** — extends the header to 104+ bytes. Adds three 64-bit feature
   flag fields, variable-width reference counts, and a header length field that
-  allows future extensions without breaking parsers.
+  allows future extensions without breaking parsers [5].
 
 Both versions share the same core address translation and refcount mechanisms.
 Version 3 adds the ability to signal optional features (compression types,
@@ -153,7 +153,7 @@ This documentation describes the QCOW2 format as implemented by qcow2-lib.
 
 The **BLAKE3 hash extension** is a qcow2-lib-specific feature not defined by
 the upstream QCOW2 specification. It uses the autoclear mechanism
-(`AutoclearFeatures::BLAKE3_HASHES`, bit 2): implementations that do not
+(`AutoclearFeatures::BLAKE3_HASHES`, bit 2) [6]: implementations that do not
 understand this bit will clear it on first write, discarding the hash metadata.
 The image itself remains fully usable.
 
@@ -162,8 +162,8 @@ The image itself remains fully usable.
 ## All bytes are big-endian
 
 Every multi-byte integer in a QCOW2 file is stored in **big-endian** (network)
-byte order. This applies to the header, L1/L2 entries, refcount tables, snapshot
-headers, bitmap structures — everything. There are no exceptions.
+byte order [7]. This applies to the header, L1/L2 entries, refcount tables,
+snapshot headers, bitmap structures — everything. There are no exceptions.
 
 ## Sections
 
@@ -185,3 +185,15 @@ Each section below documents one aspect of the format in detail.
 | [BLAKE3 Hashes](blake3-hashes.md) | Per-chunk integrity hashes (qcow2-lib extension) |
 | [External Data File](external-data-file.md) | Storing guest data in a separate file |
 | [Backing File](backing-file.md) | Copy-on-write overlay chains |
+
+## Source References
+
+| Ref | File | What it contains |
+|-----|------|-----------------|
+| [1] | [crates/qcow2-format/src/constants.rs](../../crates/qcow2-format/src/constants.rs) | Magic numbers, bitmasks, limits, cluster size range, entry sizes |
+| [2] | [crates/qcow2-format/src/l1.rs](../../crates/qcow2-format/src/l1.rs) | L1 table entry and table parsing |
+| [3] | [crates/qcow2-format/src/l2.rs](../../crates/qcow2-format/src/l2.rs) | L2 entry decoding (Unallocated, Zero, Standard, Compressed), subcluster bitmaps |
+| [4] | [crates/qcow2-format/src/types.rs](../../crates/qcow2-format/src/types.rs) | GuestOffset::split(), ClusterGeometry, offset/index newtypes |
+| [5] | [crates/qcow2-format/src/header.rs](../../crates/qcow2-format/src/header.rs) | Header parsing, field offsets, validation |
+| [6] | [crates/qcow2-format/src/feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs) | Incompatible, compatible, autoclear feature bitflags |
+| [7] | [crates/qcow2-format/src/header.rs](../../crates/qcow2-format/src/header.rs) | All fields parsed with `BigEndian::read_*` |

@@ -37,8 +37,7 @@ Where:
 - `l2_entry_shift = 3` for standard mode (8-byte entries), `4` for extended
   L2 (16-byte entries)
 
-Source: `types.rs:259–269` — `GuestOffset::split()`, the single authoritative
-implementation of this formula.
+This is the single authoritative implementation of the address decomposition [1].
 
 ### Concrete examples
 
@@ -59,7 +58,7 @@ address space per L2 table = 8,192 × 65,536 = 512 MiB
 | `0x1FFFFFFF` (512 MiB - 1) | 0 | 8,191 | 65,535 |
 | `0x20000000` (512 MiB) | 1 | 0 | 0 |
 
-Source: `types.rs:292–327` — split tests confirming these values.
+These values are confirmed by the `split` tests in [1].
 
 **Extended L2, `cluster_bits = 16`**:
 
@@ -70,12 +69,11 @@ entries_per_l2  = 1 << 12 = 4,096
 address space per L2 table = 4,096 × 65,536 = 256 MiB
 ```
 
-Source: `types.rs:222–234` — `ClusterGeometry::l2_entry_shift()`,
-`l2_entries_per_table()`.
+See `ClusterGeometry::l2_entry_shift()` and `l2_entries_per_table()` in [1].
 
 ## The lookup algorithm
 
-The full resolution follows these steps:
+The full resolution follows these steps [2]:
 
 ```
  guest_offset
@@ -100,12 +98,10 @@ The full resolution follows these steps:
  └─────────────────┘     L2Entry::Compressed ──► Compressed
 ```
 
-Source: `cluster_mapping.rs:78–130` — `ClusterMapper::resolve()`.
-
 ### Step 1: L1 lookup
 
-The L1 table is read from the header's `l1_table_offset`. Each entry is a
-64-bit value:
+The L1 table is read from the header's `l1_table_offset` [4]. Each entry is a
+64-bit value [3]:
 
 ```
  L1 Entry (64 bits, big-endian)
@@ -123,24 +119,20 @@ The L1 table is read from the header's `l1_table_offset`. Each entry is a
   refcount of the L2 table cluster is exactly one.
 - **Bits 0–8, 56–62**: Reserved (must be zero).
 
-Source: `constants.rs:65–69`, `l1.rs:18–23` — `L1Entry` doc comment and
-bitmask definitions.
+Bitmask constants defined in [5], `L1Entry` struct in [3].
 
 If the L1 entry's offset is zero, the lookup short-circuits to
-`ClusterResolution::Unallocated`.
-
-Source: `cluster_mapping.rs:88–91`.
+`ClusterResolution::Unallocated` [2].
 
 ### Step 2: Load L2 table
 
 The L2 table is one cluster of L2 entries at the host offset from the L1
 entry. The table is loaded into a cache (`MetadataCache`) on first access.
 
-- Standard mode: `cluster_size / 8` entries, each 8 bytes.
-- Extended L2: `cluster_size / 16` entries, each 16 bytes.
+- Standard mode: `cluster_size / 8` entries, each 8 bytes [5].
+- Extended L2: `cluster_size / 16` entries, each 16 bytes [5].
 
-Source: `l2.rs:313–317` — `L2Table` doc comment,
-`types.rs:231–234` — `ClusterGeometry::l2_entries_per_table()`.
+Entry counts computed by `ClusterGeometry::l2_entries_per_table()` [1].
 
 ### Step 3: Read L2 entry
 
@@ -165,9 +157,9 @@ into one of four variants:
 | 0 | `L2_ZERO_FLAG` (`1`) | Cluster reads as zeros (v3 only) |
 | 9–55 | `L2_STANDARD_OFFSET_MASK` (`0x00ff_ffff_ffff_fe00`) | Host cluster offset |
 
-Source: `constants.rs:73–83`.
+Constants defined in [5].
 
-**Decoding logic** (standard mode):
+**Decoding logic** (standard mode) [6]:
 
 | Offset | COMPRESSED | ZERO | Result |
 |--------|-----------|------|--------|
@@ -176,21 +168,18 @@ Source: `constants.rs:73–83`.
 | != 0 | 0 | 0 | `Standard` (allocated, data at host offset) |
 | — | 1 | — | `Compressed` (offset encodes compressed descriptor) |
 
-Source: `l2.rs:244–262` — `L2Entry::decode_extended()` standard mode branch.
-
 **Extended L2 entry (128 bits)**:
 
 In extended L2 mode, each entry is two 64-bit words. The first word has the
 same layout as above **except bit 0 is always 0** — zero status is tracked in
 the subcluster bitmap instead. The second word is a `SubclusterBitmap`.
 
-See [Extended L2](extended-l2.md) for the bitmap format.
-
-Source: `l2.rs:216–263` — extended mode branch.
+See [Extended L2](extended-l2.md) for the bitmap format. Both branches
+implemented in `L2Entry::decode_extended()` [6].
 
 ### Step 4: Map to ClusterResolution
 
-The decoded `L2Entry` maps to a `ClusterResolution`:
+The decoded `L2Entry` maps to a `ClusterResolution` [2]:
 
 | L2Entry | ClusterResolution | Meaning |
 |---------|-------------------|---------|
@@ -200,8 +189,6 @@ The decoded `L2Entry` maps to a `ClusterResolution`:
 | `Standard { host_offset, .. }` | `Allocated` | Data at `host_offset + intra_cluster_offset` |
 | `Compressed(descriptor)` | `Compressed` | Compressed data; descriptor encodes location and size |
 
-Source: `cluster_mapping.rs:97–129`.
-
 ## L1 table sizing
 
 The L1 table must have enough entries to cover the virtual disk:
@@ -210,8 +197,8 @@ The L1 table must have enough entries to cover the virtual disk:
 l1_size = ceil(virtual_size / (entries_per_l2 × cluster_size))
 ```
 
-Each L1 entry is 8 bytes (`L1_ENTRY_SIZE` in `constants.rs:134`). The table
-is stored at `l1_table_offset` (header field, must be cluster-aligned).
+Each L1 entry is 8 bytes (`L1_ENTRY_SIZE`) [5]. The table is stored at
+`l1_table_offset` (header field, must be cluster-aligned) [4].
 
 ### Examples
 
@@ -222,8 +209,7 @@ is stored at `l1_table_offset` (header field, must be cluster-aligned).
 | 1 TiB | 16 | 8,192 | 2,048 | 16,384 |
 | 1 GiB | 12 | 512 | 512 | 4,096 |
 
-Source: `types.rs:319–327` — test `split_crosses_l1_boundary` confirms
-`8192 * 65536 = 0x2000_0000` as the L1 boundary for `cluster_bits = 16`.
+Boundary values confirmed by the `split_crosses_l1_boundary` test in [1].
 
 ## Refcount table entry format
 
@@ -234,6 +220,15 @@ entries are also 64-bit big-endian values with the offset in bits 9–63:
 REFCOUNT_TABLE_OFFSET_MASK = 0xffff_ffff_ffff_fe00  (bits 9..=63)
 ```
 
-Source: `constants.rs:87–88`.
-
 See [Refcount Table](refcount-table.md) for details.
+
+## Source References
+
+| Ref | File | What it contains |
+|-----|------|-----------------|
+| [1] | [crates/qcow2-format/src/types.rs](../../crates/qcow2-format/src/types.rs) | `GuestOffset::split()`, `ClusterGeometry`, `l2_entry_shift()`, `l2_entries_per_table()` |
+| [2] | [crates/qcow2-core/src/engine/cluster_mapping.rs](../../crates/qcow2-core/src/engine/cluster_mapping.rs) | `ClusterMapper::resolve()`, `ClusterResolution` enum, L2 table loading |
+| [3] | [crates/qcow2-format/src/l1.rs](../../crates/qcow2-format/src/l1.rs) | `L1Entry` struct, `L1Table`, offset extraction, COPIED flag |
+| [4] | [crates/qcow2-format/src/header.rs](../../crates/qcow2-format/src/header.rs) | `l1_table_offset`, `l1_table_entries` header fields |
+| [5] | [crates/qcow2-format/src/constants.rs](../../crates/qcow2-format/src/constants.rs) | `L1_OFFSET_MASK`, `L1_COPIED_FLAG`, `L2_*` flags, `L1_ENTRY_SIZE`, `L2_ENTRY_SIZE`, `REFCOUNT_TABLE_OFFSET_MASK` |
+| [6] | [crates/qcow2-format/src/l2.rs](../../crates/qcow2-format/src/l2.rs) | `L2Entry::decode_extended()`, `L2Table`, `SubclusterBitmap` |

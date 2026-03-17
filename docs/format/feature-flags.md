@@ -15,30 +15,25 @@ Each category has different rules for how an implementation must handle unknown
 ### Incompatible features (header bytes 72–79)
 
 An implementation **must refuse to open** an image if any unknown incompatible
-bit is set. These features change the on-disk layout in ways that an unaware
-reader would misinterpret.
+bit is set [1]. These features change the on-disk layout in ways that an
+unaware reader would misinterpret.
 
-Source: `feature_flags.rs` — `IncompatibleFeatures` bitflags, validated in
-`header.rs` `validate_structural()` which rejects unknown bits against
-`SUPPORTED_INCOMPATIBLE_FEATURES`.
+Unknown bits are validated in `validate_structural()` against
+`SUPPORTED_INCOMPATIBLE_FEATURES` [1][2].
 
 ### Compatible features (header bytes 80–87)
 
-An implementation **may safely ignore** unknown compatible bits. These features
-add optional metadata that does not affect the core data layout.
-
-Source: `feature_flags.rs` — `CompatibleFeatures` bitflags.
+An implementation **may safely ignore** unknown compatible bits [1]. These
+features add optional metadata that does not affect the core data layout.
 
 ### Autoclear features (header bytes 88–95)
 
 Unknown autoclear bits are **automatically cleared on first write** by any
-implementation that does not understand them. This signals that the associated
-metadata may now be stale.
+implementation that does not understand them [1]. This signals that the
+associated metadata may now be stale.
 
 This mechanism is designed for consistency flags: the bit is set when the
 metadata is known to be consistent, and cleared when it might not be.
-
-Source: `feature_flags.rs` — `AutoclearFeatures` bitflags.
 
 ## Defined bits
 
@@ -52,11 +47,11 @@ Source: `feature_flags.rs` — `AutoclearFeatures` bitflags.
 | 3 | `COMPRESSION_TYPE` | `IncompatibleFeatures::COMPRESSION_TYPE` | The `compression_type` byte at header offset 104 is valid. If this bit is not set, deflate (type 0) is assumed regardless of that byte's value. |
 | 4 | `EXTENDED_L2` | `IncompatibleFeatures::EXTENDED_L2` | L2 entries are 128 bits wide (instead of 64 bits) and carry per-subcluster allocation bitmaps. See [Extended L2](extended-l2.md). |
 
-Source: `feature_flags.rs:16–27`.
+All five bits are defined in [1] (lines 16–27).
 
 The set of incompatible features that qcow2-lib can handle is defined by
-`SUPPORTED_INCOMPATIBLE_FEATURES` (`feature_flags.rs:58–62`), which is the
-union of all five bits above.
+`SUPPORTED_INCOMPATIBLE_FEATURES` [1] (lines 58–62), which is the union of
+all five bits above.
 
 ### Compatible feature bits
 
@@ -64,7 +59,7 @@ union of all five bits above.
 |-----|------|----------|-------------|
 | 0 | `LAZY_REFCOUNTS` | `CompatibleFeatures::LAZY_REFCOUNTS` | Refcounts may be stale and need a consistency check. Unlike `DIRTY`, this is a deliberate optimization, not an error condition. |
 
-Source: `feature_flags.rs:34–37`.
+Defined in [1] (lines 34–37).
 
 ### Autoclear feature bits
 
@@ -74,11 +69,11 @@ Source: `feature_flags.rs:34–37`.
 | 1 | `RAW_EXTERNAL` | `AutoclearFeatures::RAW_EXTERNAL` | The external data file contains raw data (not QCOW2-formatted). |
 | 2 | `BLAKE3_HASHES` | `AutoclearFeatures::BLAKE3_HASHES` | The BLAKE3 per-chunk hash data is consistent with the image content. This is a qcow2-lib extension — not defined by the upstream QCOW2 specification. |
 
-Source: `feature_flags.rs:44–51`.
+Defined in [1] (lines 44–51).
 
 ## On-disk encoding
 
-All three fields are stored as 64-bit big-endian integers. Bit 0 is the
+All three fields are stored as 64-bit big-endian integers [2]. Bit 0 is the
 least-significant bit (value `1`), bit 1 has value `2`, bit 2 has value `4`,
 and so on.
 
@@ -91,14 +86,18 @@ and so on.
 
 For the incompatible features field, the five defined bits occupy positions
 0–4. All remaining bits (5–63) are reserved. If any reserved bit is set, a
-reader must refuse to open the image.
+reader must refuse to open the image [2].
 
 ## Interaction with version 2
 
 Version 2 headers do not contain feature flag fields. When parsing a v2 image,
-all three flag fields are treated as zero (no features set). The v2 default
-for `refcount_order` is 4 (16-bit refcounts).
+all three flag fields are treated as zero (no features set) [2]. The v2 default
+for `refcount_order` is 4 (16-bit refcounts) [3].
 
-Source: `header.rs` `read_version_fields()` — returns
-`IncompatibleFeatures::empty()`, `CompatibleFeatures::empty()`,
-`AutoclearFeatures::empty()` for version 2.
+## Source References
+
+| Ref | File | What it contains |
+|-----|------|-----------------|
+| [1] | [crates/qcow2-format/src/feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs) | `IncompatibleFeatures`, `CompatibleFeatures`, `AutoclearFeatures` bitflags, `SUPPORTED_INCOMPATIBLE_FEATURES` |
+| [2] | [crates/qcow2-format/src/header.rs](../../crates/qcow2-format/src/header.rs) | `validate_structural()` (rejects unknown incompatible bits), `read_version_fields()` (v2 defaults) |
+| [3] | [crates/qcow2-format/src/constants.rs](../../crates/qcow2-format/src/constants.rs) | `DEFAULT_REFCOUNT_ORDER_V2 = 4` |

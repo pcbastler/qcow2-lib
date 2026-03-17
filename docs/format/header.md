@@ -17,7 +17,7 @@ versions to extend the header further without breaking existing parsers.
 
 ## Reading the header
 
-The first four bytes are the **magic number**: `0x514649fb`. In ASCII, this
+The first four bytes are the **magic number**: `0x514649fb` [1]. In ASCII, this
 spells "QFI" followed by `0xfb`. If these bytes don't match, the file is not a
 QCOW2 image.
 
@@ -44,9 +44,9 @@ All fields are big-endian.
 | 4 | 4 | `version` | `2` or `3`. |
 | 8 | 8 | `backing_file_offset` | Byte offset of the backing file name string within this file. `0` means no backing file. |
 | 16 | 4 | `backing_file_size` | Length of the backing file name in bytes (not null-terminated). |
-| 20 | 4 | `cluster_bits` | Log₂ of the cluster size. For example, `16` means 2¹⁶ = 65,536 bytes = 64 KB. Valid range: 9–21. |
+| 20 | 4 | `cluster_bits` | Log₂ of the cluster size. For example, `16` means 2¹⁶ = 65,536 bytes = 64 KB. Valid range: 9–21 [2]. |
 | 24 | 8 | `size` | Virtual disk size in bytes. This is the size the guest sees. |
-| 32 | 4 | `crypt_method` | `0` = no encryption, `1` = AES-CBC (legacy), `2` = LUKS. |
+| 32 | 4 | `crypt_method` | `0` = no encryption, `1` = AES-CBC (legacy), `2` = LUKS [2]. |
 | 36 | 4 | `l1_size` | Number of entries in the L1 table. |
 | 40 | 8 | `l1_table_offset` | Byte offset of the L1 table. Must be cluster-aligned. |
 | 48 | 8 | `refcount_table_offset` | Byte offset of the refcount table. Must be cluster-aligned. |
@@ -63,9 +63,9 @@ All fields are big-endian.
 | 72 | 8 | `incompatible_features` | Feature bits that a reader **must** understand to open the image. Unknown bits → refuse to open. |
 | 80 | 8 | `compatible_features` | Feature bits that a reader **may** safely ignore. |
 | 88 | 8 | `autoclear_features` | Feature bits that are automatically cleared on first write by any implementation that does not understand them. Used for consistency flags. |
-| 96 | 4 | `refcount_order` | Log₂ of the refcount width in bits. `4` = 2⁴ = 16-bit refcounts (the default and the only option in v2). Maximum: `6` = 64-bit. |
+| 96 | 4 | `refcount_order` | Log₂ of the refcount width in bits. `4` = 2⁴ = 16-bit refcounts (the default and the only option in v2 [2]). Maximum: `6` = 64-bit [2]. |
 | 100 | 4 | `header_length` | Total header size in bytes. At least 104 for v3. Allows future extension: a reader should read `header_length` bytes and ignore any trailing fields it does not understand. |
-| 104 | 1 | `compression_type` | `0` = deflate, `1` = zstd. Only valid if the `COMPRESSION_TYPE` incompatible feature flag is set. Otherwise, deflate is assumed. |
+| 104 | 1 | `compression_type` | `0` = deflate, `1` = zstd [2]. Only valid if the `COMPRESSION_TYPE` incompatible feature flag is set [3]. Otherwise, deflate is assumed. |
 
 **Total: at least 104 bytes** (may be larger if `header_length` says so).
 
@@ -103,7 +103,7 @@ All fields are big-endian.
 
 ### cluster_bits and cluster size
 
-The `cluster_bits` field determines the cluster size: **cluster_size = 2^cluster_bits^**.
+The `cluster_bits` field determines the cluster size: **cluster_size = 2^cluster_bits^** [1].
 
 | `cluster_bits` | Cluster size | Typical use |
 |---------------|-------------|-------------|
@@ -113,7 +113,7 @@ The `cluster_bits` field determines the cluster size: **cluster_size = 2^cluster
 | 21 | 2 MB | Maximum. Large clusters reduce metadata but waste space for small writes. |
 
 The cluster size affects everything:
-- How many entries fit in an L2 table (= cluster_size / 8, or / 16 for extended L2)
+- How many entries fit in an L2 table (= cluster_size / 8, or / 16 for extended L2) [4]
 - How much address space each L2 table covers
 - The granularity of allocation (even a 1-byte write allocates a full cluster)
 
@@ -165,7 +165,7 @@ at byte `header_length`.
 
 ## Validation
 
-A QCOW2 reader should validate the header before trusting any offsets. Key
+A QCOW2 reader should validate the header before trusting any offsets [1]. Key
 checks:
 
 1. **Magic** must be `0x514649fb`.
@@ -179,3 +179,12 @@ checks:
 7. All offsets (L1, refcount, snapshots, backing file) must point within the
    physical file size.
 8. **header_length** must not exceed the cluster size.
+
+## Source References
+
+| Ref | File | What it contains |
+|-----|------|-----------------|
+| [1] | [crates/qcow2-format/src/header.rs](../../crates/qcow2-format/src/header.rs) | Header struct, field offsets (`OFF_*` constants), `read_from()`, `write_to()`, `validate_structural()`, `validate_against_file()` |
+| [2] | [crates/qcow2-format/src/constants.rs](../../crates/qcow2-format/src/constants.rs) | `QCOW2_MAGIC`, `MIN/MAX_CLUSTER_BITS`, `DEFAULT_CLUSTER_BITS`, `CRYPT_*`, `COMPRESSION_*`, `MAX_REFCOUNT_ORDER`, `DEFAULT_REFCOUNT_ORDER_V2` |
+| [3] | [crates/qcow2-format/src/feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs) | `IncompatibleFeatures::COMPRESSION_TYPE` and all other feature flag definitions |
+| [4] | [crates/qcow2-format/src/types.rs](../../crates/qcow2-format/src/types.rs) | `ClusterGeometry::l2_entries_per_table()`, `l2_entry_size()` |
