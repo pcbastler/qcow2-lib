@@ -226,9 +226,17 @@ See [Refcount Table](refcount-table.md) for details.
 
 | Ref | File | What it contains |
 |-----|------|-----------------|
-| [1] | [crates/qcow2-format/src/types.rs](../../crates/qcow2-format/src/types.rs) | `GuestOffset::split()`, `ClusterGeometry`, `l2_entry_shift()`, `l2_entries_per_table()` |
-| [2] | [crates/qcow2-core/src/engine/cluster_mapping.rs](../../crates/qcow2-core/src/engine/cluster_mapping.rs) | `ClusterMapper::resolve()`, `ClusterResolution` enum, L2 table loading |
-| [3] | [crates/qcow2-format/src/l1.rs](../../crates/qcow2-format/src/l1.rs) | `L1Entry` struct, `L1Table`, offset extraction, COPIED flag |
-| [4] | [crates/qcow2-format/src/header.rs](../../crates/qcow2-format/src/header.rs) | `l1_table_offset`, `l1_table_entries` header fields |
-| [5] | [crates/qcow2-format/src/constants.rs](../../crates/qcow2-format/src/constants.rs) | `L1_OFFSET_MASK`, `L1_COPIED_FLAG`, `L2_*` flags, `L1_ENTRY_SIZE`, `L2_ENTRY_SIZE`, `REFCOUNT_TABLE_OFFSET_MASK` |
-| [6] | [crates/qcow2-format/src/l2.rs](../../crates/qcow2-format/src/l2.rs) | `L2Entry::decode_extended()`, `L2Table`, `SubclusterBitmap` |
+| [1] | [types.rs](../../crates/qcow2-format/src/types.rs#L244-L269) | `GuestOffset::split()` — address decomposition formula |
+| | [types.rs](../../crates/qcow2-format/src/types.rs#L207-L240) | `ClusterGeometry`, `l2_entry_shift()`, `l2_entries_per_table()` |
+| | [types.rs](../../crates/qcow2-format/src/types.rs#L292-L350) | `split()` tests confirming concrete examples |
+| [2] | [cluster_mapping.rs](../../crates/qcow2-core/src/engine/cluster_mapping.rs#L24-L53) | `ClusterResolution` enum |
+| | [cluster_mapping.rs](../../crates/qcow2-core/src/engine/cluster_mapping.rs#L78-L130) | `ClusterMapper::resolve()` — full lookup algorithm |
+| [3] | [l1.rs](../../crates/qcow2-format/src/l1.rs#L18-L73) | `L1Entry` struct, `l2_table_offset()`, `is_copied()` |
+| [4] | [header.rs](../../crates/qcow2-format/src/header.rs#L39-L41) | `l1_table_entries`, `l1_table_offset` fields |
+| [5] | [constants.rs](../../crates/qcow2-format/src/constants.rs#L63-L69) | `L1_OFFSET_MASK`, `L1_COPIED_FLAG` |
+| | [constants.rs](../../crates/qcow2-format/src/constants.rs#L71-L83) | `L2_COMPRESSED_FLAG`, `L2_COPIED_FLAG`, `L2_ZERO_FLAG`, `L2_STANDARD_OFFSET_MASK` |
+| | [constants.rs](../../crates/qcow2-format/src/constants.rs#L87-L88) | `REFCOUNT_TABLE_OFFSET_MASK` |
+| | [constants.rs](../../crates/qcow2-format/src/constants.rs#L122-L134) | `L2_ENTRY_SIZE`, `L2_ENTRY_SIZE_EXTENDED`, `L1_ENTRY_SIZE` |
+| [6] | [l2.rs](../../crates/qcow2-format/src/l2.rs#L158-L188) | `L2Entry` enum — four cluster state variants |
+| | [l2.rs](../../crates/qcow2-format/src/l2.rs#L202-L263) | `decode_extended()` — standard and extended mode decoding |
+| | [l2.rs](../../crates/qcow2-format/src/l2.rs#L45-L143) | `SubclusterBitmap` — allocation/zero bitmaps |

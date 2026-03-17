@@ -190,10 +190,10 @@ Each section below documents one aspect of the format in detail.
 
 | Ref | File | What it contains |
 |-----|------|-----------------|
-| [1] | [crates/qcow2-format/src/constants.rs](../../crates/qcow2-format/src/constants.rs) | Magic numbers, bitmasks, limits, cluster size range, entry sizes |
-| [2] | [crates/qcow2-format/src/l1.rs](../../crates/qcow2-format/src/l1.rs) | L1 table entry and table parsing |
-| [3] | [crates/qcow2-format/src/l2.rs](../../crates/qcow2-format/src/l2.rs) | L2 entry decoding (Unallocated, Zero, Standard, Compressed), subcluster bitmaps |
-| [4] | [crates/qcow2-format/src/types.rs](../../crates/qcow2-format/src/types.rs) | GuestOffset::split(), ClusterGeometry, offset/index newtypes |
-| [5] | [crates/qcow2-format/src/header.rs](../../crates/qcow2-format/src/header.rs) | Header parsing, field offsets, validation |
-| [6] | [crates/qcow2-format/src/feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs) | Incompatible, compatible, autoclear feature bitflags |
-| [7] | [crates/qcow2-format/src/header.rs](../../crates/qcow2-format/src/header.rs) | All fields parsed with `BigEndian::read_*` |
+| [1] | [constants.rs](../../crates/qcow2-format/src/constants.rs#L26-L34) | `MIN_CLUSTER_BITS`, `MAX_CLUSTER_BITS`, `DEFAULT_CLUSTER_BITS` |
+| [2] | [l1.rs](../../crates/qcow2-format/src/l1.rs#L18-L73) | `L1Entry` struct, offset extraction, COPIED flag |
+| [3] | [l2.rs](../../crates/qcow2-format/src/l2.rs#L158-L188) | `L2Entry` enum (Unallocated, Zero, Standard, Compressed) |
+| [4] | [types.rs](../../crates/qcow2-format/src/types.rs#L244-L269) | `GuestOffset::split()` — address decomposition |
+| [5] | [header.rs](../../crates/qcow2-format/src/header.rs#L24-L64) | `Header` struct, all field definitions |
+| [6] | [feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs#L44-L51) | `AutoclearFeatures::BLAKE3_HASHES` |
+| [7] | [header.rs](../../crates/qcow2-format/src/header.rs#L11) | `use byteorder::{BigEndian, ByteOrder}` — all fields big-endian |

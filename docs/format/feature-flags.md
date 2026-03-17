@@ -98,6 +98,10 @@ for `refcount_order` is 4 (16-bit refcounts) [3].
 
 | Ref | File | What it contains |
 |-----|------|-----------------|
-| [1] | [crates/qcow2-format/src/feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs) | `IncompatibleFeatures`, `CompatibleFeatures`, `AutoclearFeatures` bitflags, `SUPPORTED_INCOMPATIBLE_FEATURES` |
-| [2] | [crates/qcow2-format/src/header.rs](../../crates/qcow2-format/src/header.rs) | `validate_structural()` (rejects unknown incompatible bits), `read_version_fields()` (v2 defaults) |
-| [3] | [crates/qcow2-format/src/constants.rs](../../crates/qcow2-format/src/constants.rs) | `DEFAULT_REFCOUNT_ORDER_V2 = 4` |
+| [1] | [feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs#L16-L27) | `IncompatibleFeatures` (bits 0–4) |
+| | [feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs#L34-L37) | `CompatibleFeatures` (bit 0) |
+| | [feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs#L44-L51) | `AutoclearFeatures` (bits 0–2) |
+| | [feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs#L58-L62) | `SUPPORTED_INCOMPATIBLE_FEATURES` |
+| [2] | [header.rs](../../crates/qcow2-format/src/header.rs#L370-L377) | `validate_structural()` — rejects unknown incompatible bits |
+| | [header.rs](../../crates/qcow2-format/src/header.rs#L183-L216) | `read_version_fields()` — v2 defaults (empty flags) |
+| [3] | [constants.rs](../../crates/qcow2-format/src/constants.rs#L42) | `DEFAULT_REFCOUNT_ORDER_V2 = 4` |

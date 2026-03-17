@@ -184,7 +184,14 @@ checks:
 
 | Ref | File | What it contains |
 |-----|------|-----------------|
-| [1] | [crates/qcow2-format/src/header.rs](../../crates/qcow2-format/src/header.rs) | Header struct, field offsets (`OFF_*` constants), `read_from()`, `write_to()`, `validate_structural()`, `validate_against_file()` |
-| [2] | [crates/qcow2-format/src/constants.rs](../../crates/qcow2-format/src/constants.rs) | `QCOW2_MAGIC`, `MIN/MAX_CLUSTER_BITS`, `DEFAULT_CLUSTER_BITS`, `CRYPT_*`, `COMPRESSION_*`, `MAX_REFCOUNT_ORDER`, `DEFAULT_REFCOUNT_ORDER_V2` |
-| [3] | [crates/qcow2-format/src/feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs) | `IncompatibleFeatures::COMPRESSION_TYPE` and all other feature flag definitions |
-| [4] | [crates/qcow2-format/src/types.rs](../../crates/qcow2-format/src/types.rs) | `ClusterGeometry::l2_entries_per_table()`, `l2_entry_size()` |
+| [1] | [header.rs](../../crates/qcow2-format/src/header.rs#L24-L64) | `Header` struct with all fields |
+| | [header.rs](../../crates/qcow2-format/src/header.rs#L67-L86) | `OFF_*` byte offset constants |
+| | [header.rs](../../crates/qcow2-format/src/header.rs#L99-L130) | `read_from()` — parsing logic |
+| | [header.rs](../../crates/qcow2-format/src/header.rs#L352-L396) | `validate_structural()` |
+| | [header.rs](../../crates/qcow2-format/src/header.rs#L403-L417) | `validate_against_file()` |
+| [2] | [constants.rs](../../crates/qcow2-format/src/constants.rs#L9) | `QCOW2_MAGIC = 0x514649fb` |
+| | [constants.rs](../../crates/qcow2-format/src/constants.rs#L26-L34) | `MIN_CLUSTER_BITS`, `MAX_CLUSTER_BITS`, `DEFAULT_CLUSTER_BITS` |
+| | [constants.rs](../../crates/qcow2-format/src/constants.rs#L38-L42) | `MAX_REFCOUNT_ORDER`, `DEFAULT_REFCOUNT_ORDER_V2` |
+| | [constants.rs](../../crates/qcow2-format/src/constants.rs#L46-L61) | `CRYPT_*`, `COMPRESSION_*` |
+| [3] | [feature_flags.rs](../../crates/qcow2-format/src/feature_flags.rs#L24) | `IncompatibleFeatures::COMPRESSION_TYPE` |
+| [4] | [types.rs](../../crates/qcow2-format/src/types.rs#L222-L234) | `ClusterGeometry::l2_entry_size()`, `l2_entries_per_table()` |

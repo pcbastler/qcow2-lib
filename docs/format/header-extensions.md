@@ -106,5 +106,12 @@ to an 8-byte boundary with zero bytes [1].
 
 | Ref | File | What it contains |
 |-----|------|-----------------|
-| [1] | [crates/qcow2-format/src/header_extension.rs](../../crates/qcow2-format/src/header_extension.rs) | `HeaderExtension` enum, `read_all()`, `write_all()`, `FeatureNameEntry`, TLV parsing logic |
-| [2] | [crates/qcow2-format/src/constants.rs](../../crates/qcow2-format/src/constants.rs) | `EXT_*` type ID constants, `EXT_BLAKE3_HASHES` |
+| [1] | [header_extension.rs](../../crates/qcow2-format/src/header_extension.rs#L21) | `TLV_HEADER_SIZE = 8` |
+| | [header_extension.rs](../../crates/qcow2-format/src/header_extension.rs#L24-L56) | `HeaderExtension` enum — all known variants |
+| | [header_extension.rs](../../crates/qcow2-format/src/header_extension.rs#L58-L70) | `FeatureNameEntry` struct, `FEATURE_NAME_ENTRY_SIZE = 48` |
+| | [header_extension.rs](../../crates/qcow2-format/src/header_extension.rs#L79-L125) | `read_all()` — TLV parsing loop |
+| | [header_extension.rs](../../crates/qcow2-format/src/header_extension.rs#L129-L148) | `write_all()` — serialization with padding |
+| | [header_extension.rs](../../crates/qcow2-format/src/header_extension.rs#L194-L204) | FullDiskEncryption decoding (16 bytes: offset + length) |
+| | [header_extension.rs](../../crates/qcow2-format/src/header_extension.rs#L210-L213) | Unknown extension — round-trip preservation |
+| [2] | [constants.rs](../../crates/qcow2-format/src/constants.rs#L92-L108) | `EXT_*` type ID constants |
+| | [constants.rs](../../crates/qcow2-format/src/constants.rs#L189) | `EXT_BLAKE3_HASHES = 0x434C_4233` |
