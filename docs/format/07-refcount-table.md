@@ -10,36 +10,66 @@ translation (Section 5), but for cluster ownership instead of guest data.
 
 ## 7.1 Two-level structure
 
+The problem: a QCOW2 image can have millions of clusters, and each one needs
+a refcount. Storing all refcounts in a single flat array would require a huge
+contiguous allocation up front. Instead, QCOW2 splits the refcount storage
+into two levels — exactly like the L1/L2 split for address translation
+(Section 5).
+
+**Level 1 — Refcount Table**: A flat array of 64-bit pointers stored at the
+header's `refcount_table_offset`, occupying `refcount_table_clusters`
+clusters [3]. Each entry either points to a refcount block or is zero
+(meaning: all clusters in that block's range have refcount 0) [1].
+
+**Level 2 — Refcount Blocks**: Each block is one cluster filled with packed
+refcount values. One block covers many clusters — how many depends on the
+cluster size and refcount width (see Section 7.3). Blocks are allocated on
+demand, only when a cluster in their range is first used [2].
+
+The lookup works like this:
+
 ```
- cluster host offset
-        │
-        ▼
- ┌─────────────────┐
- │ compute indices  │
- │ (table, block)   │
- └────────┬─────────┘
-          │
-          ▼
- ┌─────────────────┐     offset == 0
- │ Refcount Table  │ ─────────────────────► refcount = 0
- │ entry [table_i] │
- └────────┬─────────┘
-          │ offset != 0
-          ▼
- ┌─────────────────┐
- │ Refcount Block  │
- │ entry [block_i] │ ──► refcount value
- └─────────────────┘
+ Question: "What is the refcount of the cluster at host offset X?"
+
+ Step 1: Compute which block, and which entry within that block:
+
+    cluster_index = X >> cluster_bits
+    table_index   = cluster_index / entries_per_block
+    block_index   = cluster_index % entries_per_block
+
+ Step 2: Look up the refcount table:
+
+    Refcount Table (at refcount_table_offset)
+    ┌──────────┬──────────┬──────────┬──────────┬─────┐
+    │ entry 0  │ entry 1  │ entry 2  │ entry 3  │ ... │  ← 8 bytes each
+    │ → block  │    0     │ → block  │    0     │     │
+    └────┬─────┴──────────┴────┬─────┴──────────┴─────┘
+         │                     │
+         │  table_index = 0    │  table_index = 2
+         ▼                     ▼
+    ┌──────────────┐     ┌──────────────┐
+    │ Refcount     │     │ Refcount     │
+    │ Block 0      │     │ Block 2      │
+    │              │     │              │
+    │ [0] = 1      │     │ [0] = 0      │
+    │ [1] = 2      │     │ [1] = 1      │
+    │ [2] = 1      │     │ ...          │
+    │ ...          │     │              │
+    └──────────────┘     └──────────────┘
+
+    Entry 1 and 3 are zero → no block allocated →
+    all clusters in those ranges have refcount 0.
+
+ Step 3: Read the refcount from the block:
+
+    refcount = block[block_index]
 ```
 
-- The **refcount table** is a flat array of 64-bit entries. Each entry points
-  to a refcount block, or is zero (unallocated — all clusters in that range
-  have refcount 0) [1].
-- Each **refcount block** is one cluster of packed refcount values. The width
-  of each value depends on `refcount_order` [2].
-
-The refcount table itself is located at `refcount_table_offset` in the header,
-occupying `refcount_table_clusters` clusters [3].
+**Why two levels?** A 1 TiB image with 64 KB clusters has 16,777,216
+clusters. With 16-bit refcounts, a flat array would be 32 MB — allocated
+entirely up front even for a nearly empty image. With the two-level structure,
+only the refcount table (a few KB) and the blocks that are actually needed
+are allocated.
 
 ## 7.2 Refcount table entries
 
