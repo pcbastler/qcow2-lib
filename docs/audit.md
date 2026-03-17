@@ -34,8 +34,30 @@ should be verified against the upstream QEMU QCOW2 specification
 | 151 | refcount_order=6: "Theoretical maximum" | Editorial |
 | 161 | "For version 2, extensions may or may not be present" | Not explicitly stated in source |
 
+## format/feature-flags.md
+
+| Line(s) | Claim | Category |
+|---------|-------|----------|
+| 5–6 | "before they corrupt the image by misinterpreting its data" | Design rationale (source says "MUST NOT be opened" / "may not handle the format correctly", but doesn't mention corruption explicitly) |
+| 28 | "These features add optional metadata that does not affect the core data layout" | Format spec explanation (source says "Unknown bits can be safely ignored" without explaining why) |
+| 37–39 | "This mechanism is designed for consistency flags: the bit is set when the metadata is known to be consistent, and cleared when it might not be" | Editorial design rationale (source says "signaling that the associated metadata may be stale") |
+| 49 | "should be checked before use" | Recommendation not in source (source says "refcounts may be inconsistent" without prescribing action) |
+| 52 | "If this bit is not set, deflate (type 0) is assumed regardless of that byte's value" | Format spec behavior (source comment says "The compression type is not deflate; check header byte 104" — the "regardless" clause is additional) |
+| 65 | "Unlike DIRTY, this is a deliberate optimization, not an error condition" | Editorial comparison (source says "refcounts may be stale and need a consistency check" without contrasting with DIRTY) |
+| 73 | "Cleared by implementations that do not maintain bitmaps" | Format spec behavior (source says "Bitmaps extension data is consistent with the image content" without describing clearing behavior) |
+| 75 | "not defined by the upstream QCOW2 specification" | External knowledge about upstream spec contents |
+| 93 | "All remaining bits (5–63) are reserved" | Format spec terminology (source validates unknown bits but doesn't use the word "reserved") |
+
+## format/header-extensions.md
+
+| Line(s) | Claim | Category |
+|---------|-------|----------|
+| 13–14 | "if any data is present before the first cluster boundary" | Qualifier not in source (source defines `HEADER_V2_LENGTH = 72` but doesn't discuss this boundary condition) |
+| 64 | "not null-terminated" | Implied by `String::from_utf8_lossy(data)` usage, but not explicitly stated in source |
+| 96–98 | "so that tools can display meaningful messages for unknown features (e.g. 'incompatible feature bit 4: extended_l2' instead of just 'unknown bit 4')" | Illustrative example (source says "maps (type, bit) pairs to human-readable names") |
+
 ## Status
 
 - **Last audited**: 2026-03-17
-- **Audited files**: `format/README.md`, `format/header.md`
+- **Audited files**: `format/README.md`, `format/header.md`, `format/feature-flags.md`, `format/header-extensions.md`
 - **Remaining**: All other docs files (still contain TODO placeholders)
