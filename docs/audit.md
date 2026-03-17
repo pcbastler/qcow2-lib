@@ -56,8 +56,15 @@ should be verified against the upstream QEMU QCOW2 specification
 | 64 | "not null-terminated" | Implied by `String::from_utf8_lossy(data)` usage, but not explicitly stated in source |
 | 96–98 | "so that tools can display meaningful messages for unknown features (e.g. 'incompatible feature bit 4: extended_l2' instead of just 'unknown bit 4')" | Illustrative example (source says "maps (type, bit) pairs to human-readable names") |
 
+## format/06-extended-l2.md
+
+| Line(s) | Claim | Category |
+|---------|-------|----------|
+| 13 | "even writing a single byte marks the entire 64 KB as allocated" | Engine behavior, not format spec |
+| 14–16 | "enabling finer-grained tracking without reducing the cluster size" | Design rationale |
+
 ## Status
 
 - **Last audited**: 2026-03-17
-- **Audited files**: `format/01-overview.md`, `format/02-header.md`, `format/03-feature-flags.md`, `format/04-header-extensions.md`
+- **Audited files**: `format/01-overview.md`, `format/02-header.md`, `format/03-feature-flags.md`, `format/04-header-extensions.md`, `format/06-extended-l2.md`
 - **Remaining**: All other docs files (still contain TODO placeholders)
