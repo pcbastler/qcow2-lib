@@ -150,6 +150,10 @@ cargo test --workspace    # 1314 tests
 
 Integration tests use `qemu-img` / `qemu-io` for cross-validation (LUKS encryption, zstd compression, extended L2, external data files) and are skipped automatically if those tools are not installed.
 
+## Development
+
+This project was developed with AI assistance.
+
 ## License
 
 This software is proprietary. See [LICENSE](LICENSE) for details.
