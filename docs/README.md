@@ -45,3 +45,7 @@ Rust library (`qcow2-lib`) usage, API, and internals.
 - [CLI — qcow2-tool](library/cli/README.md)
 - [qcow2-rescue](library/rescue.md)
 - [Testing & Fuzzing](library/testing.md)
+
+## Meta
+
+- [Documentation Audit](audit.md) — claims not directly verifiable from source code
