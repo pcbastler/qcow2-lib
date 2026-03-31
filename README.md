@@ -34,6 +34,12 @@ All crates live under `crates/`. The `IoBackend` trait (Send + Sync, positioned 
 - **BLAKE3 hashes** — Per-cluster content hashes via custom extension
 - **LUKS encryption** — LUKS1/LUKS2, AES-XTS-plain64 and AES-CBC-ESSIV, full QEMU interop
 
+## Requirements
+
+- Rust 1.70+ (MSRV, edition 2021)
+- Optional: `qemu-img` and `qemu-io` for QEMU cross-validation tests (skipped if absent)
+- Optional: Docker for `qcow2-rescue-e2e` tests (privileged container with filesystem tools)
+
 ## Quick start
 
 ```rust
@@ -142,10 +148,17 @@ qcow2-tool hash disk.qcow2
 
 A standalone tool for recovering data from corrupted QCOW2 images that `qemu-img check -r all` cannot repair. See the [qcow2-rescue README](crates/qcow2-rescue/README.md) for details.
 
+## Documentation
+
+The `docs/` directory contains detailed documentation:
+
+- **[Format specification](docs/format/)** — On-disk QCOW2 format with source-level references
+- **[Library guide](docs/library/)** — Architecture, APIs, and CLI usage
+
 ## Testing
 
 ```sh
-cargo test --workspace    # 1314 tests
+cargo test --workspace    # 1742 tests
 ```
 
 Integration tests use `qemu-img` / `qemu-io` for cross-validation (LUKS encryption, zstd compression, extended L2, external data files) and are skipped automatically if those tools are not installed.
