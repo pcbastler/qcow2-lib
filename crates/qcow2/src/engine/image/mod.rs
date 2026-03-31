@@ -171,14 +171,15 @@ impl Qcow2Image {
 
         // Safety: we take ownership of each field exactly once and never use `me` again.
         unsafe {
-            let meta = std::ptr::read(&me.meta);
-            let backend = std::ptr::read(&me.backend);
-            let data_backend = std::ptr::read(&me.data_backend);
-            let backing_chain = std::ptr::read(&me.backing_chain);
-            let backing_image = std::ptr::read(&me.backing_image);
-            let crypt_context = std::ptr::read(&me.crypt_context);
-            let compressor = std::ptr::read(&me.compressor);
-            (meta, backend, data_backend, backing_chain, backing_image, crypt_context, compressor)
+            (
+                std::ptr::read(&me.meta),
+                std::ptr::read(&me.backend),
+                std::ptr::read(&me.data_backend),
+                std::ptr::read(&me.backing_chain),
+                std::ptr::read(&me.backing_image),
+                std::ptr::read(&me.crypt_context),
+                std::ptr::read(&me.compressor),
+            )
         }
     }
 

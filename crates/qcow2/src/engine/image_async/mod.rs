@@ -129,14 +129,17 @@ impl Qcow2ImageAsync {
         let me = std::mem::ManuallyDrop::new(self);
 
         // Safety: we take ownership of each field exactly once and never use `me` again.
-        let meta = unsafe { std::ptr::read(&me.meta) }
-            .into_inner()
-            .expect("mutex poisoned");
-        let backend = unsafe { std::ptr::read(&me.backend) };
-        let data_backend = unsafe { std::ptr::read(&me.data_backend) };
-        let crypt_context = unsafe { std::ptr::read(&me.crypt_context) };
-        let compressor = unsafe { std::ptr::read(&me.compressor) };
-        let backing = unsafe { std::ptr::read(&me.backing) };
+        let (meta, backend, data_backend, crypt_context, compressor, backing) = unsafe {
+            (
+                std::ptr::read(&me.meta),
+                std::ptr::read(&me.backend),
+                std::ptr::read(&me.data_backend),
+                std::ptr::read(&me.crypt_context),
+                std::ptr::read(&me.compressor),
+                std::ptr::read(&me.backing),
+            )
+        };
+        let meta = meta.into_inner().expect("mutex poisoned");
 
         let backing_image = backing.map(|b| Box::new(b.into_image()));
 
