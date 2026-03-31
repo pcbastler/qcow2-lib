@@ -63,11 +63,7 @@ pub fn classify_cluster(buf: &[u8], cluster_size: u64, offset: u64) -> ClusterTy
 
 /// Check if all bytes in the buffer are zero.
 fn is_all_zeros(buf: &[u8]) -> bool {
-    // Check 8 bytes at a time for speed
-    let (prefix, chunks, suffix) = unsafe { buf.align_to::<u64>() };
-    prefix.iter().all(|&b| b == 0)
-        && chunks.iter().all(|&w| w == 0)
-        && suffix.iter().all(|&b| b == 0)
+    buf.iter().all(|&b| b == 0)
 }
 
 /// Try to classify as a QCOW2 header.
