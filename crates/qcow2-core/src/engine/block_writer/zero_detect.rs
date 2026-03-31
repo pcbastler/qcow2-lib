@@ -2,14 +2,10 @@
 
 /// Returns `true` if the entire buffer contains only zero bytes.
 ///
-/// Uses `u64`-aligned comparison for performance on typical cluster sizes.
+/// LLVM auto-vectorises the byte-by-byte check to SIMD on supported targets,
+/// so no manual `align_to` trick is needed.
 pub fn is_all_zeros(data: &[u8]) -> bool {
-    // Safety: align_to splits the slice into prefix/middle/suffix where
-    // middle is u64-aligned. All parts are checked for zeros.
-    let (prefix, middle, suffix) = unsafe { data.align_to::<u64>() };
-    prefix.iter().all(|&b| b == 0)
-        && middle.iter().all(|&w| w == 0)
-        && suffix.iter().all(|&b| b == 0)
+    data.iter().all(|&b| b == 0)
 }
 
 #[cfg(test)]

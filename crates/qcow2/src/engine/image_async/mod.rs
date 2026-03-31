@@ -90,9 +90,6 @@ pub struct Qcow2ImageAsync {
     pub(crate) backing: Option<Box<Qcow2ImageAsync>>,
 }
 
-// SAFETY: IoBackend is Send + Sync, Mutex/RwLock handle thread safety.
-unsafe impl Send for Qcow2ImageAsync {}
-unsafe impl Sync for Qcow2ImageAsync {}
 
 impl Qcow2ImageAsync {
     /// Create a thread-safe image from an existing `Qcow2Image`.
