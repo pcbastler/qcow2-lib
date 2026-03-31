@@ -1,5 +1,12 @@
 # qcow2-lib
 
+> **Disclaimer:** This software is provided "as is", without warranty of any kind, express or
+> implied, including but not limited to the warranties of merchantability, fitness for a particular
+> purpose, correctness, or completeness. This software may contain bugs that can destroy or
+> corrupt data, including virtual disk images, and may lead to complete data loss. Use at your own
+> risk. The author assumes no liability for any damages, including data loss, arising from the use
+> of this software.
+
 A pure-Rust library for reading, writing, and managing QCOW2 virtual disk images.
 
 ## Workspace
