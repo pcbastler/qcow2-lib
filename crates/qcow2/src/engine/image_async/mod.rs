@@ -125,18 +125,41 @@ impl Qcow2ImageAsync {
 
     /// Convert back to a single-threaded `Qcow2Image`.
     pub fn into_image(self) -> Qcow2Image {
-        // Use ManuallyDrop to prevent Drop from running, then extract fields.
+        // Rust does not allow destructuring a struct that implements Drop. Since
+        // Qcow2ImageAsync has a Drop impl (flush dirty metadata), we must suppress
+        // it with ManuallyDrop and move each field out via ptr::read.
+        //
+        // Safe alternatives were evaluated and rejected:
+        // - Option<T> per field: allows safe take(), but every access becomes
+        //   .unwrap() with a runtime panic path that the compiler cannot eliminate.
+        // - Removing Drop + explicit close(): loses the automatic flush guarantee,
+        //   risking silent data loss if the caller forgets to call close().
+        // - Inner struct + Deref: breaks split borrows — the compiler cannot see
+        //   through Deref to borrow disjoint fields simultaneously.
         let me = std::mem::ManuallyDrop::new(self);
 
-        // Safety: we take ownership of each field exactly once and never use `me` again.
-        let meta = unsafe { std::ptr::read(&me.meta) }
-            .into_inner()
-            .expect("mutex poisoned");
-        let backend = unsafe { std::ptr::read(&me.backend) };
-        let data_backend = unsafe { std::ptr::read(&me.data_backend) };
-        let crypt_context = unsafe { std::ptr::read(&me.crypt_context) };
-        let compressor = unsafe { std::ptr::read(&me.compressor) };
-        let backing = unsafe { std::ptr::read(&me.backing) };
+        // Safety: we take ownership of each non-Copy field exactly once via
+        // ptr::read and suppress the destructor with ManuallyDrop, so no
+        // double-free can occur. Copy fields (cluster_bits, extended_l2) need
+        // no extraction as they have no destructor.
+        //
+        // Risk: if a non-Copy field is added to Qcow2ImageAsync but not
+        // extracted here, it will be silently leaked. The compiler will NOT
+        // warn about this. When adding fields to Qcow2ImageAsync, update this
+        // block accordingly.
+        let (meta, l2_locks, backend, data_backend, crypt_context, compressor, backing) = unsafe {
+            (
+                std::ptr::read(&me.meta),
+                std::ptr::read(&me.l2_locks),
+                std::ptr::read(&me.backend),
+                std::ptr::read(&me.data_backend),
+                std::ptr::read(&me.crypt_context),
+                std::ptr::read(&me.compressor),
+                std::ptr::read(&me.backing),
+            )
+        };
+        drop(l2_locks);
+        let meta = meta.into_inner().expect("mutex poisoned");
 
         let backing_image = backing.map(|b| Box::new(b.into_image()));
 

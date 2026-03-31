@@ -166,19 +166,35 @@ impl Qcow2Image {
         Option<crate::engine::encryption::CryptContext>,
         compression::StdCompressor,
     ) {
-        // Prevent Drop from running (which would flush)
+        // Rust does not allow destructuring a struct that implements Drop. Since
+        // Qcow2Image has a Drop impl (flush dirty metadata), we must suppress it
+        // with ManuallyDrop and move each field out via ptr::read.
+        //
+        // Safe alternatives were evaluated and rejected:
+        // - Option<T> per field: allows safe take(), but every access becomes
+        //   .unwrap() with a runtime panic path that the compiler cannot eliminate.
+        // - Removing Drop + explicit close(): loses the automatic flush guarantee,
+        //   risking silent data loss if the caller forgets to call close().
+        // - Inner struct + Deref: breaks split borrows — the compiler cannot see
+        //   through Deref to borrow disjoint fields simultaneously.
         let me = std::mem::ManuallyDrop::new(self);
 
-        // Safety: we take ownership of each field exactly once and never use `me` again.
+        // Safety: we take ownership of each field exactly once via ptr::read and
+        // suppress the destructor with ManuallyDrop, so no double-free can occur.
+        //
+        // Risk: if a non-Copy field is added to Qcow2Image but not extracted here,
+        // it will be silently leaked. The compiler will NOT warn about this.
+        // When adding fields to Qcow2Image, update this block accordingly.
         unsafe {
-            let meta = std::ptr::read(&me.meta);
-            let backend = std::ptr::read(&me.backend);
-            let data_backend = std::ptr::read(&me.data_backend);
-            let backing_chain = std::ptr::read(&me.backing_chain);
-            let backing_image = std::ptr::read(&me.backing_image);
-            let crypt_context = std::ptr::read(&me.crypt_context);
-            let compressor = std::ptr::read(&me.compressor);
-            (meta, backend, data_backend, backing_chain, backing_image, crypt_context, compressor)
+            (
+                std::ptr::read(&me.meta),
+                std::ptr::read(&me.backend),
+                std::ptr::read(&me.data_backend),
+                std::ptr::read(&me.backing_chain),
+                std::ptr::read(&me.backing_image),
+                std::ptr::read(&me.crypt_context),
+                std::ptr::read(&me.compressor),
+            )
         }
     }
 
