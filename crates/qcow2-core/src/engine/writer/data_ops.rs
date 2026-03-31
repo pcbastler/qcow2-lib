@@ -53,8 +53,22 @@ impl<'a> Qcow2Writer<'a> {
             });
         }
 
-        if old_bitmap.is_all_zero() || old_bitmap.is_all_unallocated() {
-            // Fast path: no meaningful subcluster state to preserve.
+        if old_bitmap.is_all_zero() {
+            // Zero cluster: non-written bytes must remain zero, not backing data.
+            let mut cluster_buf = vec![0u8; cluster_size as usize];
+            let start = intra.0 as usize;
+            cluster_buf[start..start + buf.len()].copy_from_slice(buf);
+            self.encrypt_and_write_cluster(new_offset, cluster_buf)?;
+
+            return Ok(L2Entry::Standard {
+                host_offset: new_offset,
+                copied: true,
+                subclusters: SubclusterBitmap::all_allocated(),
+            });
+        }
+
+        if old_bitmap.is_all_unallocated() {
+            // Unallocated cluster: fill from backing image, then overlay write.
             let cluster_buf = self.build_cluster_from_backing(
                 buf, intra, cluster_size, guest_cluster_offset,
             )?;
