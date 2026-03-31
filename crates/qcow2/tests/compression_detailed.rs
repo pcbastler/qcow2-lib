@@ -498,17 +498,15 @@ fn library_reads_qemu_compressed_packed_non_aligned() {
     }
 }
 
-/// Regression test: verify that our decoded compressed_size does not overlap
-/// into the next packed cluster's data.
+/// Verify the intra-sector correction on a byte-granularity packed image.
 ///
-/// QEMU packs compressed clusters at byte granularity, producing non-aligned
-/// host offsets. The correct size formula is:
-///   `csize = nb_csectors * 512 - (host_offset & 511)`
-/// but qcow2-lib omits the `- (host_offset & 511)`, reporting up to 511 bytes
-/// too much. This test reads the raw L2 entries from a QEMU-packed image and
-/// checks that consecutive descriptors don't overlap.
+/// The on-disk sector count is an upper bound — the format cannot encode
+/// the exact compressed byte count. But for non-aligned host offsets, the
+/// correction `- (host_offset % 512)` must be applied so that
+/// `host_offset + compressed_size` lands on a sector boundary. Without the
+/// correction it would overshoot by `host_offset % 512` bytes.
 #[test]
-fn compressed_descriptor_size_no_overlap_with_qemu_packing() {
+fn compressed_descriptor_non_aligned_ends_on_sector_boundary() {
     if !common::has_qemu_io() {
         eprintln!("skipping: qemu-io not available");
         return;
@@ -552,52 +550,42 @@ fn compressed_descriptor_size_no_overlap_with_qemu_packing() {
     for i in 0..num_clusters as usize {
         let raw = u64::from_be_bytes(l2_buf[i * 8..(i + 1) * 8].try_into().unwrap());
         assert!(raw & L2_COMPRESSED_FLAG != 0, "cluster {i} should be compressed");
-        // Strip compressed flag before decoding
         let raw_no_flag = raw & !L2_COMPRESSED_FLAG;
         let desc = CompressedClusterDescriptor::decode(raw_no_flag, cluster_bits);
         descriptors.push((i, desc));
     }
 
-    // Verify: at least some descriptors have non-aligned offsets
-    let non_aligned_count = descriptors.iter()
+    // Precondition: the image must have non-aligned offsets.
+    let non_aligned: Vec<_> = descriptors.iter()
         .filter(|(_, d)| d.host_offset % 512 != 0)
-        .count();
+        .collect();
     assert!(
-        non_aligned_count > 0,
-        "QEMU should produce non-aligned compressed offsets when packing, \
-         but all {} descriptors are aligned — test is not exercising the bug",
+        !non_aligned.is_empty(),
+        "expected non-aligned compressed offsets from byte-granularity packing, \
+         but all {} descriptors are sector-aligned — test precondition not met",
         descriptors.len(),
     );
 
-    // Core check: for consecutive packed descriptors, the reported range
-    // [host_offset, host_offset + compressed_size) must not overlap the
-    // next descriptor's host_offset.
-    let mut overlaps = Vec::new();
-    for pair in descriptors.windows(2) {
-        let (i, curr) = &pair[0];
-        let (_j, next) = &pair[1];
-        let end = curr.host_offset + curr.compressed_size;
-        if end > next.host_offset {
-            overlaps.push((
-                *i,
-                curr.host_offset,
-                curr.compressed_size,
-                end,
-                next.host_offset,
-            ));
+    // Invariant: host_offset + compressed_size must be sector-aligned.
+    // The sector count covers whole sectors from the boundary at/before
+    // host_offset, so the described range always ends on a sector boundary.
+    let mut violations = Vec::new();
+    for &(i, ref desc) in &non_aligned {
+        let end = desc.host_offset + desc.compressed_size;
+        if end % 512 != 0 {
+            violations.push((i, desc.host_offset, desc.compressed_size, end));
         }
     }
 
     assert!(
-        overlaps.is_empty(),
-        "compressed_size overlaps into next cluster's data ({} of {} pairs):\n{}",
-        overlaps.len(),
-        descriptors.len() - 1,
-        overlaps.iter()
+        violations.is_empty(),
+        "host_offset + compressed_size is not sector-aligned for {} descriptors:\n{}",
+        violations.len(),
+        violations.iter()
             .take(5)
-            .map(|(i, off, sz, end, next)| format!(
-                "  cluster {i}: host=0x{off:x} size={sz} end=0x{end:x} > next=0x{next:x} (excess={})",
-                end - next
+            .map(|(i, off, sz, end)| format!(
+                "  cluster {i}: host=0x{off:x} size={sz} end=0x{end:x} (end % 512 = {})",
+                end % 512
             ))
             .collect::<Vec<_>>()
             .join("\n"),

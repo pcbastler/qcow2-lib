@@ -712,9 +712,10 @@ mod tests {
     #[test]
     fn compressed_entry_at_min_cluster_bits() {
         let cluster_bits = 9u32;
+        // Use a sector-aligned offset so compressed_size is a clean sector multiple
         let desc = CompressedClusterDescriptor {
-            host_offset: 0x100,
-            compressed_size: 512, // minimum
+            host_offset: 0x200,
+            compressed_size: 512,
         };
         let raw = L2_COMPRESSED_FLAG | desc.encode(cluster_bits);
         let entry = L2Entry::decode(raw, cluster_bits);
