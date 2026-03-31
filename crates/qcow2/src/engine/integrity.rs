@@ -738,8 +738,7 @@ fn walk_bitmaps(
 
         for i in 0..table.len() {
             let te = table
-                .get(crate::format::types::BitmapIndex(i))
-                .unwrap();
+                .get(crate::format::types::BitmapIndex(i))?;
             if let BitmapTableEntryState::Data(data_offset) = te.state() {
                 add_ref(refs, data_offset.0, cluster_size);
             }
