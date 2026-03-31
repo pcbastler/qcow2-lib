@@ -34,14 +34,23 @@ impl MemoryBackend {
     }
 
     /// Get a copy of the current data (for test assertions).
-    pub fn data(&self) -> Vec<u8> {
-        self.data.read().unwrap().clone()
+    pub fn data(&self) -> Result<Vec<u8>> {
+        let data = self.data.read().map_err(|e| io_error(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("lock poisoned: {e}")),
+            0,
+            "MemoryBackend::data",
+        ))?;
+        Ok(data.clone())
     }
 }
 
 impl IoBackend for MemoryBackend {
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-        let data = self.data.read().unwrap();
+        let data = self.data.read().map_err(|e| io_error(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("lock poisoned: {e}")),
+            offset,
+            "MemoryBackend::read_exact_at",
+        ))?;
         let start = offset as usize;
         let end = match start.checked_add(buf.len()) {
             Some(e) => e,
@@ -67,7 +76,11 @@ impl IoBackend for MemoryBackend {
     }
 
     fn write_all_at(&self, buf: &[u8], offset: u64) -> Result<()> {
-        let mut data = self.data.write().unwrap();
+        let mut data = self.data.write().map_err(|e| io_error(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("lock poisoned: {e}")),
+            offset,
+            "MemoryBackend::write_all_at",
+        ))?;
         let start = offset as usize;
         let end = start.checked_add(buf.len()).ok_or_else(|| {
             io_error(
@@ -91,11 +104,20 @@ impl IoBackend for MemoryBackend {
     }
 
     fn file_size(&self) -> Result<u64> {
-        Ok(self.data.read().unwrap().len() as u64)
+        let data = self.data.read().map_err(|e| io_error(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("lock poisoned: {e}")),
+            0,
+            "MemoryBackend::file_size",
+        ))?;
+        Ok(data.len() as u64)
     }
 
     fn set_len(&self, size: u64) -> Result<()> {
-        let mut data = self.data.write().unwrap();
+        let mut data = self.data.write().map_err(|e| io_error(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("lock poisoned: {e}")),
+            0,
+            "MemoryBackend::set_len",
+        ))?;
         data.resize(size as usize, 0);
         Ok(())
     }
