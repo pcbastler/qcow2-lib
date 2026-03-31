@@ -6,7 +6,8 @@
 mod common;
 
 use qcow2::engine::image::{CreateOptions, Qcow2Image};
-use qcow2::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD};
+use qcow2::format::compressed::CompressedClusterDescriptor;
+use qcow2::format::constants::{COMPRESSION_DEFLATE, COMPRESSION_ZSTD, L2_COMPRESSED_FLAG};
 
 const CLUSTER_SIZE: usize = 65536;
 const CS: u64 = CLUSTER_SIZE as u64;
@@ -439,4 +440,166 @@ fn library_reads_qemu_compressed() {
     let mut buf = vec![0u8; CLUSTER_SIZE];
     image.read_at(&mut buf, 0).unwrap();
     assert!(buf.iter().all(|&b| b == 0xDD));
+}
+
+/// Regression test: QEMU packs compressed clusters at byte granularity,
+/// so host_offset can be non-512-aligned. The actual compressed data size
+/// is `nb_csectors * 512 - (host_offset & 511)` (QEMU formula), but
+/// qcow2-lib was computing `nb_csectors * 512` — up to 511 bytes too much.
+///
+/// This test writes many clusters with different patterns (to get varying
+/// compressed sizes that don't land on sector boundaries), converts with
+/// `qemu-img convert -c`, then reads every cluster back through our library.
+#[test]
+fn library_reads_qemu_compressed_packed_non_aligned() {
+    if !common::has_qemu_io() {
+        eprintln!("skipping: qemu-io not available");
+        return;
+    }
+
+    // Write 32 clusters with distinct patterns to produce varied compressed
+    // sizes — QEMU will pack them at byte granularity, creating non-aligned
+    // host offsets after the first cluster.
+    let num_clusters = 32u64;
+    let source = common::TestImage::create("4M");
+    for i in 0..num_clusters {
+        // Each cluster gets a different repeating 2-byte pattern so the
+        // deflate output varies in size (not all identical).
+        let pattern = (0x10 + i) as u8;
+        source.write_pattern(pattern, i * CS, CLUSTER_SIZE);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let compressed = dir.path().join("qemu_packed.qcow2");
+
+    let output = std::process::Command::new("qemu-img")
+        .args(["convert", "-c", "-f", "qcow2", "-O", "qcow2"])
+        .arg(&source.path)
+        .arg(&compressed)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "qemu-img convert -c failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Read every cluster back through our library and verify contents
+    let mut image = Qcow2Image::open(&compressed).unwrap();
+    let mut buf = vec![0u8; CLUSTER_SIZE];
+    for i in 0..num_clusters {
+        let expected = (0x10 + i) as u8;
+        image.read_at(&mut buf, i * CS).unwrap();
+        assert!(
+            buf.iter().all(|&b| b == expected),
+            "cluster {i}: expected 0x{expected:02x}, got first divergence at byte {}",
+            buf.iter().position(|&b| b != expected).unwrap_or(0),
+        );
+    }
+}
+
+/// Regression test: verify that our decoded compressed_size does not overlap
+/// into the next packed cluster's data.
+///
+/// QEMU packs compressed clusters at byte granularity, producing non-aligned
+/// host offsets. The correct size formula is:
+///   `csize = nb_csectors * 512 - (host_offset & 511)`
+/// but qcow2-lib omits the `- (host_offset & 511)`, reporting up to 511 bytes
+/// too much. This test reads the raw L2 entries from a QEMU-packed image and
+/// checks that consecutive descriptors don't overlap.
+#[test]
+fn compressed_descriptor_size_no_overlap_with_qemu_packing() {
+    if !common::has_qemu_io() {
+        eprintln!("skipping: qemu-io not available");
+        return;
+    }
+
+    let num_clusters = 32u64;
+    let source = common::TestImage::create("4M");
+    for i in 0..num_clusters {
+        let pattern = (0x10 + i) as u8;
+        source.write_pattern(pattern, i * CS, CLUSTER_SIZE);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let compressed_path = dir.path().join("qemu_packed.qcow2");
+
+    let output = std::process::Command::new("qemu-img")
+        .args(["convert", "-c", "-f", "qcow2", "-O", "qcow2"])
+        .arg(&source.path)
+        .arg(&compressed_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let image = Qcow2Image::open(&compressed_path).unwrap();
+    let header = image.header();
+    let cluster_bits = header.cluster_bits;
+    let cluster_size = 1u64 << cluster_bits;
+    let backend = image.backend();
+
+    // Read L1 table to find L2 offset
+    let mut l1_buf = vec![0u8; 8];
+    backend.read_exact_at(&mut l1_buf, header.l1_table_offset.0).unwrap();
+    let l2_offset = u64::from_be_bytes(l1_buf[..8].try_into().unwrap()) & 0x00FF_FFFF_FFFF_FE00;
+
+    // Read the L2 table
+    let mut l2_buf = vec![0u8; cluster_size as usize];
+    backend.read_exact_at(&mut l2_buf, l2_offset).unwrap();
+
+    // Decode all compressed descriptors
+    let mut descriptors = Vec::new();
+    for i in 0..num_clusters as usize {
+        let raw = u64::from_be_bytes(l2_buf[i * 8..(i + 1) * 8].try_into().unwrap());
+        assert!(raw & L2_COMPRESSED_FLAG != 0, "cluster {i} should be compressed");
+        // Strip compressed flag before decoding
+        let raw_no_flag = raw & !L2_COMPRESSED_FLAG;
+        let desc = CompressedClusterDescriptor::decode(raw_no_flag, cluster_bits);
+        descriptors.push((i, desc));
+    }
+
+    // Verify: at least some descriptors have non-aligned offsets
+    let non_aligned_count = descriptors.iter()
+        .filter(|(_, d)| d.host_offset % 512 != 0)
+        .count();
+    assert!(
+        non_aligned_count > 0,
+        "QEMU should produce non-aligned compressed offsets when packing, \
+         but all {} descriptors are aligned — test is not exercising the bug",
+        descriptors.len(),
+    );
+
+    // Core check: for consecutive packed descriptors, the reported range
+    // [host_offset, host_offset + compressed_size) must not overlap the
+    // next descriptor's host_offset.
+    let mut overlaps = Vec::new();
+    for pair in descriptors.windows(2) {
+        let (i, curr) = &pair[0];
+        let (_j, next) = &pair[1];
+        let end = curr.host_offset + curr.compressed_size;
+        if end > next.host_offset {
+            overlaps.push((
+                *i,
+                curr.host_offset,
+                curr.compressed_size,
+                end,
+                next.host_offset,
+            ));
+        }
+    }
+
+    assert!(
+        overlaps.is_empty(),
+        "compressed_size overlaps into next cluster's data ({} of {} pairs):\n{}",
+        overlaps.len(),
+        descriptors.len() - 1,
+        overlaps.iter()
+            .take(5)
+            .map(|(i, off, sz, end, next)| format!(
+                "  cluster {i}: host=0x{off:x} size={sz} end=0x{end:x} > next=0x{next:x} (excess={})",
+                end - next
+            ))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
 }

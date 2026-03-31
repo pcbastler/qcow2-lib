@@ -1948,6 +1948,73 @@ fn partial_write_beyond_backing_size_zeros_rest() {
     }
 }
 
+// ---- Bug: partial write to zero cluster must not read backing data ----
+
+/// Regression test: writing to a zero cluster with a backing file must NOT
+/// pull data from the backing image. The non-written portion of a zero
+/// cluster must remain zero — QEMU treats zeroed clusters as independent
+/// of the backing chain.
+#[test]
+fn partial_write_to_zero_cluster_ignores_backing() {
+    let l2_entry = L2Entry::Zero {
+        preallocated_offset: None,
+        subclusters: SubclusterBitmap::all_zero(),
+    };
+    let mut s = setup_with_l2(Some(&[(0, l2_entry)]));
+    let mut backing = MockBacking::new(VIRTUAL_SIZE, 0xBB);
+
+    let write_data = vec![0xCC; 512];
+    // Partial write: 512 bytes at intra-cluster offset 256
+    Qcow2Writer::new(
+        &mut s.mapper,
+        s.l1_table_offset,
+        &s.backend,
+        &s.backend,
+        &mut s.cache,
+        &mut s.refcount_manager,
+        CLUSTER_BITS,
+        VIRTUAL_SIZE,
+        COMPRESSION_DEFLATE,
+        false,
+        Some(&mut backing),
+        None,
+        &StdCompressor,
+    )
+    .write_at(&write_data, 256)
+    .unwrap();
+
+    // Read back the cluster
+    let l1_entry = s.mapper.l1_entry(L1Index(0)).unwrap();
+    let l2_offset = l1_entry.l2_table_offset().unwrap();
+    let mut l2_buf = vec![0u8; CLUSTER_SIZE];
+    s.backend.read_exact_at(&mut l2_buf, l2_offset.0).unwrap();
+    let l2_table = L2Table::read_from(&l2_buf, GEO_STD).unwrap();
+
+    match l2_table.get(L2Index(0)).unwrap() {
+        L2Entry::Standard { host_offset, .. } => {
+            let mut cluster = vec![0u8; CLUSTER_SIZE];
+            s.backend.read_exact_at(&mut cluster, host_offset.0).unwrap();
+
+            // Before write region: must be zero (NOT 0xBB from backing)
+            assert!(
+                cluster[..256].iter().all(|&b| b == 0),
+                "pre-write area must be zero, not backing data"
+            );
+            // Write region: our data
+            assert!(
+                cluster[256..768].iter().all(|&b| b == 0xCC),
+                "write area must contain our data"
+            );
+            // After write region: must be zero (NOT 0xBB from backing)
+            assert!(
+                cluster[768..].iter().all(|&b| b == 0),
+                "post-write area must be zero, not backing data"
+            );
+        }
+        other => panic!("expected Standard entry, got {other:?}"),
+    }
+}
+
 // ---- Encrypted write tests ----
 
 fn make_writer_encrypted<'a>(

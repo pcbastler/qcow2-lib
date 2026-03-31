@@ -175,6 +175,75 @@ mod tests {
         assert_eq!(original, decoded);
     }
 
+    // ---- QEMU-compatible compressed_size (intra-sector offset subtraction) ----
+
+    #[test]
+    fn decode_non_aligned_offset_subtracts_intra_sector() {
+        // QEMU formula: csize = nb_csectors * 512 - (coffset & 511)
+        // When host_offset is not 512-aligned, the actual compressed data
+        // size is smaller because the first sector is only partially used.
+        //
+        // Example: host_offset=0x1234 (intra-sector offset = 0x34 = 52)
+        //          nb_csectors=3
+        // QEMU:    csize = 3*512 - 52 = 1484
+        // Current: csize = 3*512      = 1536  ← BUG: 52 bytes too much
+        let cluster_bits = 16u32;
+        let sector_bits = cluster_bits - 8; // 8
+        let x = 62 - sector_bits; // 54
+        let offset = 0x1234u64; // intra-sector = 0x34 = 52
+        let nb_sectors = 2u64; // stored value → actual nb_csectors = 3
+        let raw = offset | (nb_sectors << x);
+
+        let desc = CompressedClusterDescriptor::decode(raw, cluster_bits);
+        assert_eq!(desc.host_offset, 0x1234);
+        // QEMU-compatible size: (nb_sectors+1)*512 - (offset & 511)
+        let expected = (nb_sectors + 1) * 512 - (offset & 511);
+        assert_eq!(
+            desc.compressed_size, expected,
+            "compressed_size should subtract intra-sector offset (QEMU compat): \
+             got {}, expected {} (diff={})",
+            desc.compressed_size, expected, desc.compressed_size as i64 - expected as i64,
+        );
+    }
+
+    #[test]
+    fn decode_aligned_offset_unchanged() {
+        // When host_offset IS 512-aligned, (offset & 511) == 0,
+        // so the subtraction changes nothing.
+        let cluster_bits = 16u32;
+        let sector_bits = cluster_bits - 8;
+        let x = 62 - sector_bits;
+        let offset = 0x1000u64; // sector-aligned
+        let nb_sectors = 2u64;
+        let raw = offset | (nb_sectors << x);
+
+        let desc = CompressedClusterDescriptor::decode(raw, cluster_bits);
+        assert_eq!(desc.host_offset, 0x1000);
+        assert_eq!(desc.compressed_size, (nb_sectors + 1) * 512);
+    }
+
+    #[test]
+    fn decode_non_aligned_various_offsets() {
+        // Verify the intra-sector subtraction for a range of non-aligned offsets
+        let cluster_bits = 16u32;
+        let sector_bits = cluster_bits - 8;
+        let x = 62 - sector_bits;
+
+        for intra in [1u64, 100, 255, 511] {
+            let offset = 0x1000 + intra;
+            let nb_sectors = 4u64; // stored → actual = 5
+            let raw = offset | (nb_sectors << x);
+
+            let desc = CompressedClusterDescriptor::decode(raw, cluster_bits);
+            let expected = (nb_sectors + 1) * 512 - intra;
+            assert_eq!(
+                desc.compressed_size, expected,
+                "intra={intra}: got {}, expected {expected}",
+                desc.compressed_size,
+            );
+        }
+    }
+
     #[test]
     fn single_sector_round_trip_all_cluster_bits() {
         // The minimum compressed size (1 sector) should round-trip for every
