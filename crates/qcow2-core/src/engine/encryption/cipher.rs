@@ -28,17 +28,25 @@ pub fn encrypt_sector_xts(key: &[u8], sector_num: u64, data: &mut [u8]) -> Resul
     let tweak = make_xts_tweak(sector_num);
     match key.len() {
         32 => {
+            let xts_err = |e| Error::EncryptionFailed {
+                guest_offset: 0,
+                message: format!("XTS cipher init failed: {e}"),
+            };
             let cipher = Xts128::<Aes128>::new(
-                Aes128::new_from_slice(&key[..16]).unwrap(),
-                Aes128::new_from_slice(&key[16..]).unwrap(),
+                Aes128::new_from_slice(&key[..16]).map_err(xts_err)?,
+                Aes128::new_from_slice(&key[16..]).map_err(xts_err)?,
             );
             cipher.encrypt_sector(data, tweak);
             Ok(())
         }
         64 => {
+            let xts_err = |e| Error::EncryptionFailed {
+                guest_offset: 0,
+                message: format!("XTS cipher init failed: {e}"),
+            };
             let cipher = Xts128::<Aes256>::new(
-                Aes256::new_from_slice(&key[..32]).unwrap(),
-                Aes256::new_from_slice(&key[32..]).unwrap(),
+                Aes256::new_from_slice(&key[..32]).map_err(xts_err)?,
+                Aes256::new_from_slice(&key[32..]).map_err(xts_err)?,
             );
             cipher.encrypt_sector(data, tweak);
             Ok(())
@@ -55,17 +63,25 @@ pub fn decrypt_sector_xts(key: &[u8], sector_num: u64, data: &mut [u8]) -> Resul
     let tweak = make_xts_tweak(sector_num);
     match key.len() {
         32 => {
+            let xts_err = |e| Error::DecryptionFailed {
+                guest_offset: 0,
+                message: format!("XTS cipher init failed: {e}"),
+            };
             let cipher = Xts128::<Aes128>::new(
-                Aes128::new_from_slice(&key[..16]).unwrap(),
-                Aes128::new_from_slice(&key[16..]).unwrap(),
+                Aes128::new_from_slice(&key[..16]).map_err(xts_err)?,
+                Aes128::new_from_slice(&key[16..]).map_err(xts_err)?,
             );
             cipher.decrypt_sector(data, tweak);
             Ok(())
         }
         64 => {
+            let xts_err = |e| Error::DecryptionFailed {
+                guest_offset: 0,
+                message: format!("XTS cipher init failed: {e}"),
+            };
             let cipher = Xts128::<Aes256>::new(
-                Aes256::new_from_slice(&key[..32]).unwrap(),
-                Aes256::new_from_slice(&key[32..]).unwrap(),
+                Aes256::new_from_slice(&key[..32]).map_err(xts_err)?,
+                Aes256::new_from_slice(&key[32..]).map_err(xts_err)?,
             );
             cipher.decrypt_sector(data, tweak);
             Ok(())
