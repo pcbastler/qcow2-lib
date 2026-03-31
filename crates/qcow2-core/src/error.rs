@@ -337,6 +337,9 @@ pub enum Error {
     /// An encrypted image was opened without providing a password.
     NoPasswordProvided,
 
+    /// An encryption operation was attempted on a non-encrypted image.
+    NotEncrypted,
+
     /// Encryption and compression are mutually exclusive in QCOW2.
     EncryptionWithCompression,
 
@@ -502,6 +505,8 @@ impl Error {
             Self::WrongPassword => write!(f, "wrong password: no key slot could be unlocked"),
             Self::NoPasswordProvided =>
                 write!(f, "image is encrypted but no password was provided"),
+            Self::NotEncrypted =>
+                write!(f, "encryption operation attempted on non-encrypted image"),
             Self::EncryptionWithCompression =>
                 write!(f, "encryption and compression are mutually exclusive"),
             Self::LuksKeySlotsFull => write!(f, "all LUKS key slots are full"),
