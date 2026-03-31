@@ -1142,3 +1142,84 @@ fn compressed_interleaved_with_zeros_and_uncompressed() {
         );
     }
 }
+
+// ── 32. Compressed clusters at high guest offsets (Bug 2 variant) ─────
+
+/// Regression test for Bug 2: compressed cluster corruption at high guest
+/// offsets (multi-TiB). The compressed descriptor encoding uses a variable
+/// bit layout that depends on `cluster_bits`. With a 13 TiB virtual size
+/// and `cluster_bits=16`, the L1 table becomes large and clusters written
+/// at 9+ TiB offsets exercise deep L1/L2 paths. The original bug caused
+/// the `compressed_cursor` to overflow, corrupting data at high offsets
+/// while low offsets appeared fine.
+///
+/// This test writes compressed clusters at scattered offsets across the
+/// full 13 TiB address space and verifies read-back integrity.
+#[test]
+fn compressed_clusters_at_high_guest_offsets() {
+    const TIB: u64 = 1024 * 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bug2_high_offset.qcow2");
+
+    let cluster_size = 65536u64; // 64 KiB
+    let virtual_size = 13 * TIB;
+
+    let mut opts = default_options(virtual_size);
+    opts.compress = true;
+    opts.memory_limit = Some(256 * MIB);
+
+    let mut writer = Qcow2BlockWriter::create(&path, opts).unwrap();
+
+    // Write compressible data at offsets spread across the address space,
+    // including the high offsets (9+ TiB) that triggered the original bug.
+    let test_offsets: Vec<(u64, &str)> = vec![
+        (0, "zero"),
+        (100 * MIB, "100MiB"),
+        (1 * TIB + 100 * MIB, "1.1TiB"),
+        (4 * TIB + 500 * MIB, "4.5TiB"),
+        (9 * TIB, "9TiB"),
+        (9 * TIB + 5 * MIB, "9TiB+5MiB"),
+        (12 * TIB + 800 * MIB, "12.8TiB"),
+        (12 * TIB + 900 * MIB, "12.9TiB"),
+    ];
+
+    let mut expected: Vec<(u64, Vec<u8>)> = Vec::new();
+    for &(offset, label) in &test_offsets {
+        let pattern = format!("DATA-AT-{label}-0123456789ABCDEF-");
+        let data: Vec<u8> = pattern
+            .as_bytes()
+            .iter()
+            .copied()
+            .cycle()
+            .take(cluster_size as usize)
+            .collect();
+
+        writer.seek(SeekFrom::Start(offset)).unwrap();
+        writer.write_all(&data).unwrap();
+        expected.push((offset, data));
+    }
+
+    writer.finalize().unwrap();
+
+    // Read back and verify every cluster.
+    let mut img = Qcow2Image::open(&path).unwrap();
+    for (offset, data) in &expected {
+        let mut buf = vec![0u8; cluster_size as usize];
+        img.read_at(&mut buf, *offset).unwrap();
+        assert_eq!(
+            &buf, data,
+            "data mismatch at guest offset {:#x}",
+            offset,
+        );
+    }
+
+    // Verify that unwritten regions read as zeros.
+    let mut zero_buf = vec![0u8; cluster_size as usize];
+    img.read_at(&mut zero_buf, 6 * TIB).unwrap();
+    assert!(
+        zero_buf.iter().all(|&b| b == 0),
+        "unwritten region at 6 TiB should be all zeros"
+    );
+}
