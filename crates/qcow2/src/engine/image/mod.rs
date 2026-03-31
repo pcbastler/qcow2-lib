@@ -169,7 +169,12 @@ impl Qcow2Image {
         // Prevent Drop from running (which would flush)
         let me = std::mem::ManuallyDrop::new(self);
 
-        // Safety: we take ownership of each field exactly once and never use `me` again.
+        // Safety: we take ownership of each field exactly once via ptr::read and
+        // suppress the destructor with ManuallyDrop, so no double-free can occur.
+        //
+        // Risk: if a non-Copy field is added to Qcow2Image but not extracted here,
+        // it will be silently leaked. The compiler will NOT warn about this.
+        // When adding fields to Qcow2Image, update this block accordingly.
         unsafe {
             (
                 std::ptr::read(&me.meta),

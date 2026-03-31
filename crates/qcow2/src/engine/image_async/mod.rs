@@ -128,10 +128,19 @@ impl Qcow2ImageAsync {
         // Use ManuallyDrop to prevent Drop from running, then extract fields.
         let me = std::mem::ManuallyDrop::new(self);
 
-        // Safety: we take ownership of each field exactly once and never use `me` again.
-        let (meta, backend, data_backend, crypt_context, compressor, backing) = unsafe {
+        // Safety: we take ownership of each non-Copy field exactly once via
+        // ptr::read and suppress the destructor with ManuallyDrop, so no
+        // double-free can occur. Copy fields (cluster_bits, extended_l2) need
+        // no extraction as they have no destructor.
+        //
+        // Risk: if a non-Copy field is added to Qcow2ImageAsync but not
+        // extracted here, it will be silently leaked. The compiler will NOT
+        // warn about this. When adding fields to Qcow2ImageAsync, update this
+        // block accordingly.
+        let (meta, l2_locks, backend, data_backend, crypt_context, compressor, backing) = unsafe {
             (
                 std::ptr::read(&me.meta),
+                std::ptr::read(&me.l2_locks),
                 std::ptr::read(&me.backend),
                 std::ptr::read(&me.data_backend),
                 std::ptr::read(&me.crypt_context),
@@ -139,6 +148,7 @@ impl Qcow2ImageAsync {
                 std::ptr::read(&me.backing),
             )
         };
+        drop(l2_locks);
         let meta = meta.into_inner().expect("mutex poisoned");
 
         let backing_image = backing.map(|b| Box::new(b.into_image()));
