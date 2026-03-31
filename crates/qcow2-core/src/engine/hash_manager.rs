@@ -336,7 +336,7 @@ impl<'a> HashManager<'a> {
         let mut mismatches = Vec::new();
 
         for table_idx in 0..table.len() {
-            let entry = table.get(table_idx).unwrap();
+            let Some(entry) = table.get(table_idx) else { continue };
             let data_offset = match entry.data_offset() {
                 Some(off) => off,
                 None => continue,
@@ -653,36 +653,38 @@ impl<'a> HashManager<'a> {
             None => return Ok(()), // Out of range
         };
 
-        let data_offset = if entry.is_empty() {
-            // Allocate a new hash data cluster
-            let new_offset = self
-                .refcount_manager
-                .allocate_cluster(self.backend, self.cache)?;
-            let zeros = vec![0u8; cluster_size as usize];
-            self.backend.write_all_at(&zeros, new_offset.0)?;
-            table.set(table_idx, HashTableEntry::with_offset(new_offset.0));
-            new_offset.0
-        } else {
-            let offset = entry.data_offset().unwrap();
-            // Check refcount for COW
-            let rc = self
-                .refcount_manager
-                .get_refcount(offset, self.backend, self.cache)?;
-            if rc > 1 {
-                // COW: copy to new cluster
+        let data_offset = match entry.data_offset() {
+            None => {
+                // Allocate a new hash data cluster
                 let new_offset = self
                     .refcount_manager
                     .allocate_cluster(self.backend, self.cache)?;
-                let mut old_data = vec![0u8; cluster_size as usize];
-                self.backend.read_exact_at(&mut old_data, offset)?;
-                self.backend.write_all_at(&old_data, new_offset.0)?;
-                self.refcount_manager
-                    .decrement_refcount(offset, self.backend, self.cache)?;
-                self.cache.evict_hash_data(ClusterOffset(offset));
+                let zeros = vec![0u8; cluster_size as usize];
+                self.backend.write_all_at(&zeros, new_offset.0)?;
                 table.set(table_idx, HashTableEntry::with_offset(new_offset.0));
                 new_offset.0
-            } else {
-                offset
+            }
+            Some(offset) => {
+                // Check refcount for COW
+                let rc = self
+                    .refcount_manager
+                    .get_refcount(offset, self.backend, self.cache)?;
+                if rc > 1 {
+                    // COW: copy to new cluster
+                    let new_offset = self
+                        .refcount_manager
+                        .allocate_cluster(self.backend, self.cache)?;
+                    let mut old_data = vec![0u8; cluster_size as usize];
+                    self.backend.read_exact_at(&mut old_data, offset)?;
+                    self.backend.write_all_at(&old_data, new_offset.0)?;
+                    self.refcount_manager
+                        .decrement_refcount(offset, self.backend, self.cache)?;
+                    self.cache.evict_hash_data(ClusterOffset(offset));
+                    table.set(table_idx, HashTableEntry::with_offset(new_offset.0));
+                    new_offset.0
+                } else {
+                    offset
+                }
             }
         };
 
