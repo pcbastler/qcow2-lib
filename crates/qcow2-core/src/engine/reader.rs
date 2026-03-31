@@ -229,14 +229,12 @@ impl<'a> Qcow2Reader<'a> {
     ) -> Result<()> {
         let read_offset = host_offset.0 + intra_cluster_offset.0 as u64;
 
-        if self.crypt_context.is_none() {
+        let Some(crypt) = self.crypt_context else {
             return match self.data_backend.read_exact_at(buf, read_offset) {
                 Ok(()) => Ok(()),
                 Err(e) => self.handle_read_error(buf, guest_offset, e),
             };
-        }
-
-        let crypt = self.crypt_context.unwrap();
+        };
         let cluster_size = 1usize << self.cluster_bits;
         let intra = intra_cluster_offset.0 as usize;
 
@@ -284,11 +282,11 @@ impl<'a> Qcow2Reader<'a> {
 
         // For encrypted images with a host cluster, pre-read and decrypt
         // the entire cluster so subcluster slices come from plaintext.
-        let decrypted_cluster = if self.crypt_context.is_some() {
+        let decrypted_cluster = if let Some(crypt) = self.crypt_context {
             if let Some(host) = host_offset {
                 let mut cluster_buf = vec![0u8; cluster_size as usize];
                 self.data_backend.read_exact_at(&mut cluster_buf, host.0)?;
-                self.crypt_context.unwrap().decrypt_cluster(host.0, &mut cluster_buf)?;
+                crypt.decrypt_cluster(host.0, &mut cluster_buf)?;
                 Some(cluster_buf)
             } else {
                 None

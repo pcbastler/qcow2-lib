@@ -143,14 +143,9 @@ pub fn recover_chain(
     let layer_refs: Vec<(PathBuf, ReconstructedTablesReport)> = layers;
 
     // Check if any layer has encrypted clusters
-    let has_encrypted = layer_refs.iter()
-        .any(|(_, t)| t.mappings.iter().any(|m| m.encrypted));
-
-    let encryption = if has_encrypted {
-        // Use the first layer with encrypted clusters to find the LUKS header
-        let (enc_path, enc_tables) = layer_refs.iter()
-            .find(|(_, t)| t.mappings.iter().any(|m| m.encrypted))
-            .unwrap();
+    let encryption = if let Some((enc_path, enc_tables)) = layer_refs.iter()
+        .find(|(_, t)| t.mappings.iter().any(|m| m.encrypted))
+    {
         setup_encryption(enc_path, cluster_size, &enc_tables.mappings, options)
     } else {
         EncryptionSetup {

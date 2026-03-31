@@ -187,9 +187,8 @@ impl<'a> Qcow2Writer<'a> {
         cluster_size: u64,
         mut bitmap: SubclusterBitmap,
     ) -> Result<L2Entry> {
-        if self.crypt_context.is_some() {
+        if let Some(crypt) = self.crypt_context {
             // Encrypted: must read-decrypt-modify-encrypt-write the full cluster.
-            let crypt = self.crypt_context.unwrap();
             let mut cluster_buf = vec![0u8; cluster_size as usize];
             self.data_backend.read_exact_at(&mut cluster_buf, host_offset.0)?;
             crypt.decrypt_cluster(host_offset.0, &mut cluster_buf)?;
@@ -380,7 +379,9 @@ impl<'a> Qcow2Writer<'a> {
         last_sc: u32,
         old_bitmap: SubclusterBitmap,
     ) -> Result<L2Entry> {
-        let crypt = self.crypt_context.unwrap();
+        let Some(crypt) = self.crypt_context else {
+            return Err(Error::NotEncrypted);
+        };
         let mut cluster_data = vec![0u8; cluster_size as usize];
         self.data_backend.read_exact_at(&mut cluster_data, old_host_offset.0)?;
         crypt.decrypt_cluster(old_host_offset.0, &mut cluster_data)?;
