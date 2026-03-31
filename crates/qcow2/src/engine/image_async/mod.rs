@@ -125,7 +125,17 @@ impl Qcow2ImageAsync {
 
     /// Convert back to a single-threaded `Qcow2Image`.
     pub fn into_image(self) -> Qcow2Image {
-        // Use ManuallyDrop to prevent Drop from running, then extract fields.
+        // Rust does not allow destructuring a struct that implements Drop. Since
+        // Qcow2ImageAsync has a Drop impl (flush dirty metadata), we must suppress
+        // it with ManuallyDrop and move each field out via ptr::read.
+        //
+        // Safe alternatives were evaluated and rejected:
+        // - Option<T> per field: allows safe take(), but every access becomes
+        //   .unwrap() with a runtime panic path that the compiler cannot eliminate.
+        // - Removing Drop + explicit close(): loses the automatic flush guarantee,
+        //   risking silent data loss if the caller forgets to call close().
+        // - Inner struct + Deref: breaks split borrows — the compiler cannot see
+        //   through Deref to borrow disjoint fields simultaneously.
         let me = std::mem::ManuallyDrop::new(self);
 
         // Safety: we take ownership of each non-Copy field exactly once via
