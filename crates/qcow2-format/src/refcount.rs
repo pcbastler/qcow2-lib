@@ -135,7 +135,7 @@ impl RefcountBlock {
                     refcounts.push(BigEndian::read_u64(chunk));
                 }
             }
-            _ => unreachable!("refcount_order validated above"),
+            _ => return Err(Error::ShouldBeUnreachable),
         }
 
         Ok(Self {
@@ -204,7 +204,7 @@ impl RefcountBlock {
                     BigEndian::write_u64(&mut buf[i * 8..], rc);
                 }
             }
-            _ => unreachable!(),
+            _ => return Err(Error::ShouldBeUnreachable),
         }
 
         Ok(())

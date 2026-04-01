@@ -235,6 +235,9 @@ pub enum Error {
         size: u8,
     },
 
+    /// A code path was reached that should be impossible.
+    ShouldBeUnreachable,
+
     /// The hash chunk bits value is out of the valid range.
     InvalidHashChunkBits {
         /// The invalid chunk bits value.
@@ -299,6 +302,8 @@ impl fmt::Display for Error {
                 write!(f, "invalid hash extension: {message}"),
             Self::InvalidHashSize { size } =>
                 write!(f, "invalid hash size {size} (must be 16 or 32)"),
+            Self::ShouldBeUnreachable =>
+                write!(f, "a code path was reached that should be impossible — this is a bug"),
             Self::InvalidHashChunkBits { bits, min, max } =>
                 write!(f, "invalid hash chunk bits {bits} (must be 0 or {min}..={max})"),
         }
