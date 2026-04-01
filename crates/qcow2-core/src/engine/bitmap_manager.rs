@@ -237,11 +237,21 @@ impl<'a> BitmapManager<'a> {
         )
     }
 
-    /// Find a bitmap directory entry by name.
+    /// Find a bitmap directory entry by name (returns index).
     fn find_entry_index(entries: &[BitmapDirectoryEntry], name: &str) -> Result<usize> {
         entries
             .iter()
             .position(|e| e.name == name)
+            .ok_or_else(|| Error::BitmapNotFound {
+                name: name.to_string(),
+            })
+    }
+
+    /// Find a bitmap directory entry by name (returns reference).
+    fn find_entry<'b>(entries: &'b [BitmapDirectoryEntry], name: &str) -> Result<&'b BitmapDirectoryEntry> {
+        entries
+            .iter()
+            .find(|e| e.name == name)
             .ok_or_else(|| Error::BitmapNotFound {
                 name: name.to_string(),
             })
@@ -452,8 +462,7 @@ impl<'a> BitmapManager<'a> {
     /// Query whether a specific guest offset is dirty in the named bitmap.
     pub fn get_dirty(&mut self, name: &str, guest_offset: u64) -> Result<bool> {
         let entries = self.load_directory()?;
-        let idx = Self::find_entry_index(&entries, name)?;
-        let entry = &entries[idx];
+        let entry = Self::find_entry(&entries, name)?;
 
         let (table_idx, byte_off, bit_off) =
             self.bit_address(guest_offset, entry.granularity_bits);
@@ -479,8 +488,7 @@ impl<'a> BitmapManager<'a> {
         len: u64,
     ) -> Result<()> {
         let entries = self.load_directory()?;
-        let idx = Self::find_entry_index(&entries, name)?;
-        let entry = entries[idx].clone();
+        let entry = Self::find_entry(&entries, name)?.clone();
 
         let granularity = entry.granularity();
         let mut table = self.load_bitmap_table(&entry)?;
@@ -552,8 +560,7 @@ impl<'a> BitmapManager<'a> {
     /// Clear all bits in a bitmap (reset to all-clean).
     pub fn clear_bitmap(&mut self, name: &str) -> Result<()> {
         let entries = self.load_directory()?;
-        let idx = Self::find_entry_index(&entries, name)?;
-        let entry = &entries[idx];
+        let entry = Self::find_entry(&entries, name)?;
 
         // Free all data clusters
         let table = self.load_bitmap_table(entry)?;
@@ -584,11 +591,8 @@ impl<'a> BitmapManager<'a> {
     /// Merge source bitmap into destination bitmap (OR operation).
     pub fn merge_bitmaps(&mut self, source: &str, destination: &str) -> Result<()> {
         let entries = self.load_directory()?;
-        let src_idx = Self::find_entry_index(&entries, source)?;
-        let dst_idx = Self::find_entry_index(&entries, destination)?;
-
-        let src_entry = entries[src_idx].clone();
-        let dst_entry = entries[dst_idx].clone();
+        let src_entry = Self::find_entry(&entries, source)?.clone();
+        let dst_entry = Self::find_entry(&entries, destination)?.clone();
 
         if src_entry.granularity_bits != dst_entry.granularity_bits {
             return Err(FormatError::InvalidBitmapExtension {
