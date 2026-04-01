@@ -315,9 +315,13 @@ fn main() {
             });
             let pw = password.as_deref().map(|s| s.as_bytes());
             let enc = if encrypt {
-                let enc_pw = encrypt_password.as_deref().unwrap_or_else(|| {
-                    password.as_deref().expect("--encrypt requires --encrypt-password or --password")
-                });
+                let enc_pw = match encrypt_password.as_deref().or(password.as_deref()) {
+                    Some(pw) => pw,
+                    None => {
+                        eprintln!("Error: --encrypt requires --encrypt-password or --password");
+                        std::process::exit(1);
+                    }
+                };
                 Some(qcow2::engine::image::EncryptionOptions {
                     password: enc_pw.as_bytes().to_vec(),
                     cipher: qcow2::engine::encryption::CipherMode::AesXtsPlain64,
