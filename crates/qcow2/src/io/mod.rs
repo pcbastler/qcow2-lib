@@ -71,6 +71,8 @@ impl IoBackend for MemoryBackend {
                 "MemoryBackend::read_exact_at",
             ));
         }
+        // Safe: bounds validated above (end > data.len() returns UnexpectedEof).
+        // If this check logic changes, ensure start..end stays within data.len().
         buf.copy_from_slice(&data[start..end]);
         Ok(())
     }
@@ -95,6 +97,8 @@ impl IoBackend for MemoryBackend {
         if end > data.len() {
             data.resize(end, 0);
         }
+        // Safe: resize(end, 0) above guarantees end <= data.len().
+        // If this logic changes, ensure start..end stays within data.len().
         data[start..end].copy_from_slice(buf);
         Ok(())
     }

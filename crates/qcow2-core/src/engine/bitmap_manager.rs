@@ -513,7 +513,7 @@ impl<'a> BitmapManager<'a> {
                         .refcount_manager
                         .allocate_cluster(self.backend, self.cache)?;
                     let mut data = vec![0u8; self.cluster_size() as usize];
-                    Self::set_bits_msb(&mut data, bit - entry_first_bit, last_bit.min(entry_last_bit) - entry_first_bit);
+                    Self::set_bits_msb(&mut data, bit - entry_first_bit, last_bit.min(entry_last_bit) - entry_first_bit)?;
                     self.write_data_cluster(data_offset, &data)?;
                     table.set(table_idx, BitmapTableEntry::with_data_offset(data_offset))?;
                     table_dirty = true;
@@ -521,7 +521,7 @@ impl<'a> BitmapManager<'a> {
                 BitmapTableEntryState::Data(data_offset) => {
                     let mut data = self.load_data_cluster(data_offset)?;
                     let before = data.clone();
-                    Self::set_bits_msb(&mut data, bit - entry_first_bit, last_bit.min(entry_last_bit) - entry_first_bit);
+                    Self::set_bits_msb(&mut data, bit - entry_first_bit, last_bit.min(entry_last_bit) - entry_first_bit)?;
                     if data != before {
                         self.write_data_cluster(data_offset, &data)?;
                     }
@@ -539,12 +539,14 @@ impl<'a> BitmapManager<'a> {
     }
 
     /// Set bits [start..=end] in `data` using MSB-first bit ordering.
-    fn set_bits_msb(data: &mut [u8], start: u64, end: u64) {
+    fn set_bits_msb(data: &mut [u8], start: u64, end: u64) -> Result<()> {
         for b in start..=end {
             let byte_idx = (b / 8) as usize;
             let bit_idx = 7 - (b % 8) as u8;
-            data[byte_idx] |= 1 << bit_idx;
+            let byte = data.get_mut(byte_idx).ok_or(Error::ShouldBeUnreachable)?;
+            *byte |= 1 << bit_idx;
         }
+        Ok(())
     }
 
     /// Clear all bits in a bitmap (reset to all-clean).

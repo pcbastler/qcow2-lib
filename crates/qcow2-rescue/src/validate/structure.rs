@@ -48,6 +48,7 @@ pub fn has_structure(data: &[u8]) -> bool {
     }
 
     // Check for runs of identical bytes (>= 8)
+    // Safe: i starts at 1, so i-1 >= 0 and i < data.len() is guaranteed by the range.
     let mut run_len = 1u32;
     for i in 1..data.len() {
         if data[i] == data[i - 1] {
