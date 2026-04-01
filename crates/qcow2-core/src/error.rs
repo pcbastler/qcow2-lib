@@ -160,6 +160,14 @@ pub enum Error {
     /// A code path was reached that should be impossible.
     ShouldBeUnreachable,
 
+    /// An index was out of bounds.
+    IndexOutOfBounds {
+        /// The index that was accessed.
+        index: usize,
+        /// The length of the collection.
+        len: usize,
+    },
+
     /// The refcount table is full and cannot track additional clusters.
     RefcountTableFull,
 
@@ -467,6 +475,7 @@ impl Error {
             Self::CacheInconsistency { offset } => write!(f, "metadata cache inconsistency: entry missing after insertion at offset 0x{offset:x}"),
             Self::LockPoisoned => write!(f, "mutex or RwLock poisoned by a panic in another thread"),
             Self::ShouldBeUnreachable => write!(f, "a code path was reached that should be impossible — this is a bug"),
+            Self::IndexOutOfBounds { index, len } => write!(f, "index out of bounds: index {index} but length is {len}"),
             Self::RefcountTableFull =>
                 write!(f, "refcount table is full (no space for new clusters)"),
             Self::RefcountOverflow { cluster_offset, current, max } =>

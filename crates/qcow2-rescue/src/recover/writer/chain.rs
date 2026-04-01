@@ -53,7 +53,7 @@ pub(crate) fn write_chain(
         // Backing file is the previous layer (if any)
         let backing_file = if layer_idx > 0 {
             Some(output_files.get(layer_idx - 1)
-                .ok_or_else(|| qcow2_core::Error::ShouldBeUnreachable)?
+                .ok_or_else(|| qcow2_core::Error::IndexOutOfBounds { index: layer_idx - 1, len: output_files.len() })?
                 .clone())
         } else {
             None

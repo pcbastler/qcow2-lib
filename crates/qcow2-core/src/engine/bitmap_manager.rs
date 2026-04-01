@@ -419,9 +419,9 @@ impl<'a> BitmapManager<'a> {
     /// Delete a bitmap by name.
     pub fn delete_bitmap(&mut self, name: &str) -> Result<()> {
         let mut entries = self.load_directory()?;
+        
         let idx = Self::find_entry_index(&entries, name)?;
-
-        let entry = &entries[idx];
+        let entry = entries.get(idx).ok_or(Error::IndexOutOfBounds { index: idx, len: entries.len() })?;
 
         // Free bitmap data clusters
         let table = self.load_bitmap_table(entry)?;
@@ -548,10 +548,11 @@ impl<'a> BitmapManager<'a> {
 
     /// Set bits [start..=end] in `data` using MSB-first bit ordering.
     fn set_bits_msb(data: &mut [u8], start: u64, end: u64) -> Result<()> {
+        let data_len = data.len();
         for b in start..=end {
             let byte_idx = (b / 8) as usize;
             let bit_idx = 7 - (b % 8) as u8;
-            let byte = data.get_mut(byte_idx).ok_or(Error::ShouldBeUnreachable)?;
+            let byte = data.get_mut(byte_idx).ok_or(Error::IndexOutOfBounds { index: byte_idx, len: data_len })?;
             *byte |= 1 << bit_idx;
         }
         Ok(())
@@ -684,11 +685,13 @@ impl<'a> BitmapManager<'a> {
     fn update_flag(&mut self, name: &str, flag: u32, set: bool) -> Result<()> {
         let mut entries = self.load_directory()?;
         let idx = Self::find_entry_index(&entries, name)?;
+        let entries_len = entries.len();
+        let entry = entries.get_mut(idx).ok_or(Error::IndexOutOfBounds { index: idx, len: entries_len })?;
 
         if set {
-            entries[idx].flags |= flag;
+            entry.flags |= flag;
         } else {
-            entries[idx].flags &= !flag;
+            entry.flags &= !flag;
         }
 
         // Free old directory clusters

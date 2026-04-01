@@ -106,6 +106,31 @@ Runtime-Schutzmechanismen fehlen:
 
 ---
 
+## Unchecked Index Accesses
+
+Variable array/slice index accesses in production code that could panic on
+out-of-bounds. Use `scripts/find-production-indexing.sh` to regenerate.
+
+- [x] **refcount_manager.rs:409** — `refcount_table[table_index]` without bounds check
+  - Also hardened line 205 (had check before but still used direct index)
+- [x] **image_async/read_write.rs:51,122,212** — `l2_locks[l1_index]` → extracted `l2_read_guard`/`l2_write_guard` helpers with `.get()`
+- [x] **io/mod.rs:74,98** — `data[start..end]` in MemoryBackend (already safe, documented)
+- [x] **bitmap_manager.rs:546** — `data[byte_idx]` in `set_bits_msb` → `.get_mut()` with error
+- [x] **chain.rs:55** — `output_files[layer_idx - 1]` → `.get()` with error
+- [x] **structure.rs:53** — `data[i - 1]` (already safe, documented)
+- [ ] **bitmap_manager.rs** — `entries[idx]` (414, 456, 483, 554, 588, 589, 683, 685), `data[byte_off]` (469)
+- [ ] **reader.rs** — `buf[pos..pos+len]` slice accesses (197, 253, 316, 317, 321, 331, 335, 339, 371, 372)
+- [ ] **writer/data_ops.rs** — `buf[start..]` slice accesses (60, 108, 210, 261, 262, 347, 490), block_writer
+- [ ] **Format-Parsing** — `bytes[pos..]` in snapshot.rs, header_extension.rs, l1.rs, l2.rs, refcount.rs, bitmap.rs, hash.rs
+- [ ] **Encryption** — `data[off..off+N]` in luks_header.rs, af_splitter.rs, mod.rs
+- [ ] **Rescue/Recovery** — `buf[entry_offset+N]` in orphan.rs, classifier.rs, refinement.rs
+- [ ] **integrity.rs** — `regions[i]`/`regions[j]` (347-348), `rt_buf[i*SIZE..]`
+- [ ] **converter.rs** — `buf[pos..pos+chunk]` slice accesses
+- [ ] **image/create.rs** — `header_buf[ext_offset..]`, `rb_buf[i*2..]` etc.
+- [ ] **CLI dump.rs/resize.rs** — `rt_buf[offset..]`, `l1_buf[offset..]`
+
+---
+
 ## Performance
 
 - [ ] **Cache hash table in `Qcow2Image`** — `update_hashes_for_range` loads the
