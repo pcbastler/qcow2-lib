@@ -27,7 +27,7 @@ use crate::format::types::ClusterOffset;
 use crate::io::IoBackend;
 
 /// Controls how the [`RefcountManager`] finds free clusters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AllocationMode {
     /// Always allocate at the end of the file. Simple, fast, but never
     /// reuses freed clusters — the image file only grows.
@@ -35,13 +35,8 @@ pub enum AllocationMode {
     /// Scan refcount blocks for clusters with refcount 0 before falling
     /// back to append. This reuses space freed by snapshot deletes, bitmap
     /// removal, and similar operations.
+    #[default]
     Scanning,
-}
-
-impl Default for AllocationMode {
-    fn default() -> Self {
-        Self::Scanning
-    }
 }
 
 /// Shared state accessible to allocation strategies.

@@ -3,9 +3,10 @@
 use std::path::PathBuf;
 
 /// How to resolve ambiguities (e.g. two L2 candidates for the same L1 index).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum ConflictStrategy {
     /// Pause and ask the user (default).
+    #[default]
     Ask,
     /// Always pick the newer version (by timestamp heuristic).
     Newer,
@@ -13,12 +14,6 @@ pub enum ConflictStrategy {
     Safer,
     /// Save both versions as separate outputs.
     Both,
-}
-
-impl Default for ConflictStrategy {
-    fn default() -> Self {
-        Self::Ask
-    }
 }
 
 /// Output format for the recovered image.
