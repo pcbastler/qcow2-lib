@@ -154,6 +154,9 @@ pub enum Error {
         offset: u64,
     },
 
+    /// A mutex or RwLock was poisoned by a panic in another thread.
+    LockPoisoned,
+
     /// The refcount table is full and cannot track additional clusters.
     RefcountTableFull,
 
@@ -459,6 +462,7 @@ impl Error {
             Self::ReadOnly => write!(f, "image is opened read-only"),
             Self::NoRefcountManager => write!(f, "no refcount manager loaded — image was not opened with write support"),
             Self::CacheInconsistency { offset } => write!(f, "metadata cache inconsistency: entry missing after insertion at offset 0x{offset:x}"),
+            Self::LockPoisoned => write!(f, "mutex or RwLock poisoned by a panic in another thread"),
             Self::RefcountTableFull =>
                 write!(f, "refcount table is full (no space for new clusters)"),
             Self::RefcountOverflow { cluster_offset, current, max } =>

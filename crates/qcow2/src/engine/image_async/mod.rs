@@ -124,7 +124,7 @@ impl Qcow2ImageAsync {
     }
 
     /// Convert back to a single-threaded `Qcow2Image`.
-    pub fn into_image(self) -> Qcow2Image {
+    pub fn into_image(self) -> Result<Qcow2Image> {
         // Rust does not allow destructuring a struct that implements Drop. Since
         // Qcow2ImageAsync has a Drop impl (flush dirty metadata), we must suppress
         // it with ManuallyDrop and move each field out via ptr::read.
@@ -159,11 +159,13 @@ impl Qcow2ImageAsync {
             )
         };
         drop(l2_locks);
-        let meta = meta.into_inner().expect("mutex poisoned");
+        let meta = meta.into_inner().map_err(|_| Error::LockPoisoned)?;
 
-        let backing_image = backing.map(|b| Box::new(b.into_image()));
+        let backing_image = backing.map(|b| -> Result<Box<Qcow2Image>> {
+            Ok(Box::new(b.into_image()?))
+        }).transpose()?;
 
-        Qcow2Image::from_parts(
+        Ok(Qcow2Image::from_parts(
             meta,
             backend,
             data_backend,
@@ -171,7 +173,7 @@ impl Qcow2ImageAsync {
             backing_image,
             crypt_context,
             compressor,
-        )
+        ))
     }
 
     /// Compute L1 index for a guest offset.

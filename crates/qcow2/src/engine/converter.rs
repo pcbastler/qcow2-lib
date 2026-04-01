@@ -250,7 +250,7 @@ pub fn convert_from_raw_parallel(
         .map_err(|_| Error::ConversionFailed {
             message: "failed to unwrap Arc".into(),
         })?
-        .into_image();
+        .into_image()?;
 
     Ok(())
 }

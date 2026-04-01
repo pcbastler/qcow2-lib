@@ -72,7 +72,7 @@ fn into_image_roundtrip() {
     img.flush().unwrap();
 
     // Convert back to Qcow2Image
-    let mut sync_img = img.into_image();
+    let mut sync_img = img.into_image().unwrap();
     let mut buf = vec![0u8; 1024];
     sync_img.read_at(&mut buf, 4096).unwrap();
     assert_eq!(buf, data);
@@ -205,7 +205,7 @@ fn flush_clears_dirty() {
     img.flush().unwrap();
 
     // Convert back and check dirty flag is clear
-    let sync_img = img.into_image();
+    let sync_img = img.into_image().unwrap();
     assert!(!sync_img.is_dirty());
 }
 
@@ -288,7 +288,7 @@ fn create_readonly_async_image(virtual_size: u64) -> Qcow2ImageAsync {
     img.flush().unwrap();
 
     // Extract backend bytes and re-open as read-only
-    let sync_img = img.into_image();
+    let sync_img = img.into_image().unwrap();
     let (_, backend, _, _, _, _, _) = sync_img.into_parts();
     let ro_image = Qcow2Image::from_backend(backend).unwrap();
     Qcow2ImageAsync::from_image(ro_image).unwrap()
