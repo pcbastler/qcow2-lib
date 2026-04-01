@@ -40,6 +40,7 @@ All crates live under `crates/`. The `IoBackend` trait (Send + Sync, positioned 
 - **Persistent dirty bitmaps** — Full bitmap lifecycle and QEMU interop
 - **BLAKE3 hashes** — Per-cluster content hashes via custom extension
 - **LUKS encryption** — LUKS1/LUKS2, AES-XTS-plain64 and AES-CBC-ESSIV, full QEMU interop
+- **No intentional panics** — Production code avoids `unwrap()`, `expect()`, `panic!()`, and similar panic sources in favor of explicit error handling
 
 ## Requirements
 
