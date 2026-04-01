@@ -76,7 +76,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         if new_l1_clusters > old_l1_clusters {
             // L1 table must relocate: allocate new cluster(s), copy, free old
@@ -156,7 +156,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let entries_per_l2 = cluster_size / 8;
 
@@ -267,7 +267,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_ref()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         // Find the last cluster with refcount > 0, scanning backwards
         let mut last_used = 0u64;

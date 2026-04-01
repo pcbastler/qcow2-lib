@@ -56,7 +56,7 @@ impl Qcow2ImageAsync {
             meta_ref.header.cluster_bits,
         )?;
 
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
         let cluster_bits = meta_ref.header.cluster_bits;
         let mut mgr = SnapshotManager::new(
             self.backend.as_ref(),
@@ -88,7 +88,7 @@ impl Qcow2ImageAsync {
             meta_ref.header.cluster_bits,
         )?;
 
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
         let cluster_bits = meta_ref.header.cluster_bits;
         let mut mgr = SnapshotManager::new(
             self.backend.as_ref(),
@@ -116,7 +116,7 @@ impl Qcow2ImageAsync {
             meta_ref.header.cluster_bits,
         )?;
 
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
         let cluster_bits = meta_ref.header.cluster_bits;
         let mut mgr = SnapshotManager::new(
             self.backend.as_ref(),

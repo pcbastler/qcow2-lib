@@ -52,7 +52,7 @@ impl Qcow2ImageAsync {
         let granularity = granularity_bits.unwrap_or(crate::format::constants::BITMAP_DEFAULT_GRANULARITY_BITS);
         let cluster_bits = self.cluster_bits;
         let virtual_size = meta_ref.header.virtual_size;
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -79,7 +79,7 @@ impl Qcow2ImageAsync {
         let meta_ref = &mut *meta;
         let cluster_bits = self.cluster_bits;
         let virtual_size = meta_ref.header.virtual_size;
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -125,7 +125,7 @@ impl Qcow2ImageAsync {
         let meta_ref = &mut *meta;
         let cluster_bits = self.cluster_bits;
         let virtual_size = meta_ref.header.virtual_size;
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -148,7 +148,7 @@ impl Qcow2ImageAsync {
         let meta_ref = &mut *meta;
         let cluster_bits = self.cluster_bits;
         let virtual_size = meta_ref.header.virtual_size;
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -171,7 +171,7 @@ impl Qcow2ImageAsync {
         let meta_ref = &mut *meta;
         let cluster_bits = self.cluster_bits;
         let virtual_size = meta_ref.header.virtual_size;
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -196,7 +196,7 @@ impl Qcow2ImageAsync {
         let meta_ref = &mut *meta;
         let cluster_bits = self.cluster_bits;
         let virtual_size = meta_ref.header.virtual_size;
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),

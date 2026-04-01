@@ -64,7 +64,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut writer = Qcow2Writer::new(
             &mut self.meta.mapper,
@@ -172,7 +172,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut writer = Qcow2Writer::new(
             &mut self.meta.mapper,

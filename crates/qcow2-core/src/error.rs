@@ -145,6 +145,9 @@ pub enum Error {
     /// A write operation was attempted on a read-only image.
     ReadOnly,
 
+    /// A write operation requires a refcount manager, but none was loaded.
+    NoRefcountManager,
+
     /// The refcount table is full and cannot track additional clusters.
     RefcountTableFull,
 
@@ -448,6 +451,7 @@ impl Error {
             Self::OffsetBeyondDiskSize { offset, disk_size } =>
                 write!(f, "offset 0x{offset:x} exceeds virtual disk size 0x{disk_size:x}"),
             Self::ReadOnly => write!(f, "image is opened read-only"),
+            Self::NoRefcountManager => write!(f, "no refcount manager loaded — image was not opened with write support"),
             Self::RefcountTableFull =>
                 write!(f, "refcount table is full (no space for new clusters)"),
             Self::RefcountOverflow { cluster_offset, current, max } =>

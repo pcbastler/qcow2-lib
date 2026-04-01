@@ -110,7 +110,7 @@ impl Qcow2ImageAsync {
         let data_be = self.data_backend.as_deref().unwrap_or(self.backend.as_ref());
         let virtual_size = meta_ref.header.virtual_size;
         let compression_type = meta_ref.header.compression_type;
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
 
         let hs = hash_size.unwrap_or(crate::format::constants::BLAKE3_DEFAULT_HASH_SIZE);
         let hcb = hash_chunk_bits.unwrap_or(0);
@@ -136,7 +136,7 @@ impl Qcow2ImageAsync {
         let data_be = self.data_backend.as_deref().unwrap_or(self.backend.as_ref());
         let virtual_size = meta_ref.header.virtual_size;
         let compression_type = meta_ref.header.compression_type;
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = HashManager::new(
             self.backend.as_ref(), data_be, &mut meta_ref.cache, refcount_manager,
@@ -157,7 +157,7 @@ impl Qcow2ImageAsync {
         let data_be = self.data_backend.as_deref().unwrap_or(self.backend.as_ref());
         let virtual_size = meta_ref.header.virtual_size;
         let compression_type = meta_ref.header.compression_type;
-        let refcount_manager = meta_ref.refcount_manager.as_mut().expect("writable image must have refcount_manager");
+        let refcount_manager = meta_ref.refcount_manager.as_mut().ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = HashManager::new(
             self.backend.as_ref(), data_be, &mut meta_ref.cache, refcount_manager,

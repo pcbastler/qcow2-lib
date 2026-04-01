@@ -144,7 +144,7 @@ impl Qcow2ImageAsync {
         let refcount_manager = meta_ref
             .refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut backing_adapter = self.backing.as_deref().map(AsyncBackingAdapter);
         let mut writer = Qcow2Writer::new(
@@ -237,7 +237,7 @@ impl Qcow2ImageAsync {
         let refcount_manager = meta_ref
             .refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut backing_adapter = self.backing.as_deref().map(AsyncBackingAdapter);
         let mut writer = Qcow2Writer::new(

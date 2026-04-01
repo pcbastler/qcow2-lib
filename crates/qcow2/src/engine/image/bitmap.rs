@@ -62,7 +62,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -93,7 +93,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -121,7 +121,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -151,7 +151,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -176,7 +176,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -201,7 +201,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -226,7 +226,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
@@ -251,7 +251,7 @@ impl Qcow2Image {
         let refcount_manager = self
             .meta.refcount_manager
             .as_mut()
-            .expect("writable image must have refcount_manager");
+            .ok_or(Error::NoRefcountManager)?;
 
         let mut mgr = BitmapManager::new(
             self.backend.as_ref(),
