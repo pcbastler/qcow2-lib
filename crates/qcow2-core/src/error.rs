@@ -148,6 +148,12 @@ pub enum Error {
     /// A write operation requires a refcount manager, but none was loaded.
     NoRefcountManager,
 
+    /// A metadata cache entry was not found immediately after insertion.
+    CacheInconsistency {
+        /// The offset of the missing cache entry.
+        offset: u64,
+    },
+
     /// The refcount table is full and cannot track additional clusters.
     RefcountTableFull,
 
@@ -452,6 +458,7 @@ impl Error {
                 write!(f, "offset 0x{offset:x} exceeds virtual disk size 0x{disk_size:x}"),
             Self::ReadOnly => write!(f, "image is opened read-only"),
             Self::NoRefcountManager => write!(f, "no refcount manager loaded — image was not opened with write support"),
+            Self::CacheInconsistency { offset } => write!(f, "metadata cache inconsistency: entry missing after insertion at offset 0x{offset:x}"),
             Self::RefcountTableFull =>
                 write!(f, "refcount table is full (no space for new clusters)"),
             Self::RefcountOverflow { cluster_offset, current, max } =>

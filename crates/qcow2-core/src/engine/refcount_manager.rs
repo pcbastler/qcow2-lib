@@ -214,7 +214,8 @@ impl RefcountManager {
 
         // Cache miss: load into cache, then read from cache reference
         self.load_refcount_block_into_cache(block_offset, backend, cache)?;
-        let block = cache.get_refcount_block(block_offset).expect("just inserted");
+        let block = cache.get_refcount_block(block_offset)
+            .ok_or(Error::CacheInconsistency { offset: block_offset.0 })?;
         Ok(block.get(block_index)?)
     }
 
@@ -430,7 +431,7 @@ impl RefcountManager {
         if cache.is_write_back() {
             // Modify in-place in cache (now guaranteed present)
             let entry = cache.get_refcount_entry_mut(block_offset)
-                .expect("just loaded into cache");
+                .ok_or(Error::CacheInconsistency { offset: block_offset.0 })?;
             entry.value.set(block_index, value)?;
             entry.dirty = true;
             // Handle pending evictions
@@ -438,7 +439,7 @@ impl RefcountManager {
         } else {
             // WriteThrough: clone, modify, write to disk
             let mut block = cache.get_refcount_block(block_offset)
-                .expect("just loaded into cache").clone();
+                .ok_or(Error::CacheInconsistency { offset: block_offset.0 })?.clone();
             block.set(block_index, value)?;
             self.write_refcount_block(block_offset, &block, backend, cache)?;
         }

@@ -346,7 +346,8 @@ impl<'a> Qcow2Writer<'a> {
             return table.get(index).map_err(Into::into);
         }
         self.load_l2_table_into_cache(l2_offset)?;
-        let table = self.cache.get_l2_table(l2_offset).expect("just inserted");
+        let table = self.cache.get_l2_table(l2_offset)
+            .ok_or(Error::CacheInconsistency { offset: l2_offset.0 })?;
         table.get(index).map_err(Into::into)
     }
 
