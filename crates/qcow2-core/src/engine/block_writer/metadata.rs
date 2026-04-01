@@ -171,11 +171,13 @@ impl InMemoryMetadata {
     }
 
     /// Materialize the sparse L2 entries for a given L1 index into a full L2Table.
+    #[allow(clippy::clone_on_copy)]
     pub fn materialize_l2_table(&self, l1_index: u32) -> L2Table {
         let mut table = L2Table::new_empty(self.geometry);
         for (&(l1, l2), entry) in &self.l2_entries {
             if l1 == l1_index {
-                // L2Table::set won't fail for valid indices
+                // Intentional .clone() instead of *entry for robustness:
+                // if L2Entry ever loses Copy, this still compiles.
                 let _ = table.set(L2Index(l2), entry.clone());
             }
         }
