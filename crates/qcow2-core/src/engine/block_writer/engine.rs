@@ -45,6 +45,8 @@ pub struct BlockWriterEngine {
     /// Number of clusters reserved for the LUKS header.
     pub(super) luks_clusters: u64,
     /// Host offset where data clusters begin.
+    /// Reserved for future validation (e.g. ensuring writes don't overlap header area).
+    #[allow(dead_code)]
     pub(super) data_start_offset: u64,
     /// Computed blake3 hashes: hash_chunk_index → hash bytes.
     pub(super) hashes: BTreeMap<u64, Vec<u8>>,

@@ -90,8 +90,6 @@ pub struct BlockBuffer {
     cluster_size: u64,
     /// Block size = 2 × cluster_size.
     block_size: u64,
-    /// Cluster geometry.
-    geometry: ClusterGeometry,
     /// Current memory usage in bytes (number of allocated cluster buffers × cluster_size).
     memory_used: u64,
     /// Maximum allowed memory usage.
@@ -108,7 +106,6 @@ impl BlockBuffer {
             blocks: BTreeMap::new(),
             cluster_size,
             block_size: 2 * cluster_size,
-            geometry,
             memory_used: 0,
             memory_limit,
             order_counter: 0,

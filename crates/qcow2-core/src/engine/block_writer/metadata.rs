@@ -100,6 +100,8 @@ impl InMemoryMetadata {
     }
 
     /// Get an L2 entry from the sparse map.
+    /// Reserved for future use (e.g. deduplication, pre-write validation).
+    #[allow(dead_code)]
     pub fn get_l2_entry(&self, l1_index: L1Index, l2_index: L2Index) -> Option<&L2Entry> {
         self.l2_entries.get(&(l1_index.0, l2_index.0))
     }
@@ -108,12 +110,6 @@ impl InMemoryMetadata {
     pub fn increment_refcount(&mut self, cluster_offset: u64) {
         let cluster_index = cluster_offset / self.cluster_size;
         *self.refcounts.entry(cluster_index).or_insert(0) += 1;
-    }
-
-    /// Set the refcount for a cluster to a specific value.
-    pub fn set_refcount(&mut self, cluster_offset: u64, value: u64) {
-        let cluster_index = cluster_offset / self.cluster_size;
-        self.refcounts.insert(cluster_index, value);
     }
 
     /// Allocate space for a compressed cluster with packing.
@@ -165,11 +161,6 @@ impl InMemoryMetadata {
     /// Refcount order.
     pub fn refcount_order(&self) -> u32 {
         self.refcount_order
-    }
-
-    /// Cluster geometry.
-    pub fn geometry(&self) -> ClusterGeometry {
-        self.geometry
     }
 
     /// Collect all unique L1 indices that have at least one L2 entry.
