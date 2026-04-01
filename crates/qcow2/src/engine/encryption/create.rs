@@ -1,6 +1,6 @@
 //! LUKS header creation for new encrypted QCOW2 images.
 
-use rand::RngCore;
+use rand::Rng;
 
 use super::af_splitter::{self, AfHash};
 use super::key_derivation::{self, Kdf, KdfHash};
@@ -24,11 +24,11 @@ pub fn create_luks1_header(
     key_bytes: u32,
     iterations: Option<u32>,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // Generate random master key
     let mut master_key = vec![0u8; key_bytes as usize];
-    rng.fill_bytes(&mut master_key);
+    rng.fill(master_key.as_mut_slice());
 
     // Generate header parameters
     let (cipher_name, cipher_mode_str) = cipher_mode_strings(cipher_mode);
@@ -38,7 +38,7 @@ pub fn create_luks1_header(
 
     // Compute mk-digest: PBKDF2(master_key, mk_digest_salt, mk_digest_iter)
     let mut mk_digest_salt = [0u8; 32];
-    rng.fill_bytes(&mut mk_digest_salt);
+    rng.fill(&mut mk_digest_salt);
     let mk_digest_iter = iterations.unwrap_or(DEFAULT_PBKDF2_ITERATIONS);
 
     let mk_digest_kdf = Kdf::Pbkdf2 {
@@ -56,7 +56,7 @@ pub fn create_luks1_header(
     // Key slot 0 setup
     let slot_iterations = iterations.unwrap_or(DEFAULT_PBKDF2_ITERATIONS);
     let mut slot_salt = [0u8; 32];
-    rng.fill_bytes(&mut slot_salt);
+    rng.fill(&mut slot_salt);
 
     // Key material for slot 0 starts at sector 8 (after 4096 bytes = 8 * 512)
     let key_material_offset = 8u32; // in 512-byte sectors

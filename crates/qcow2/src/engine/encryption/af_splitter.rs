@@ -6,7 +6,7 @@
 pub use qcow2_core::engine::encryption::af_splitter::{af_merge, AfHash};
 
 use qcow2_core::error::Result;
-use rand::RngCore;
+use rand::Rng;
 
 /// AF split: split a key into `stripes` stripes for storage.
 ///
@@ -19,7 +19,7 @@ pub fn af_split(key: &[u8], stripes: u32, hash: AfHash) -> Result<Vec<u8>> {
 
     // Fill stripes 0..stripes-2 with random data
     let random_len = key_len * (stripes as usize - 1);
-    rand::thread_rng().fill_bytes(&mut material[..random_len]);
+    rand::rng().fill(&mut material[..random_len]);
 
     // Compute running diffuse-XOR for stripes 0..stripes-2
     let mut d = material[..key_len].to_vec();
