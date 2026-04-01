@@ -198,11 +198,7 @@ impl RefcountManager {
     ) -> Result<u64> {
         let (table_index, block_index) = self.cluster_to_refcount_index(cluster_offset);
 
-        if table_index >= self.state.refcount_table.len() {
-            return Ok(0);
-        }
-
-        let block_offset = match self.state.refcount_table[table_index].block_offset() {
+        let block_offset = match self.state.refcount_table.get(table_index).and_then(|e| e.block_offset()) {
             Some(offset) => offset,
             None => return Ok(0),
         };
@@ -406,8 +402,8 @@ impl RefcountManager {
     ) -> Result<()> {
         let (table_index, block_index) = self.cluster_to_refcount_index(cluster_offset);
 
-        let block_offset = self.state.refcount_table[table_index]
-            .block_offset()
+        let block_offset = self.state.refcount_table.get(table_index)
+            .and_then(|e| e.block_offset())
             .ok_or(Error::WriteFailed {
                 guest_offset: cluster_offset,
                 message: format!(

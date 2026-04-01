@@ -1,5 +1,7 @@
 //! Read, write, flush, and compressed write operations on `Qcow2ImageAsync`.
 
+use std::sync::{RwLockReadGuard, RwLockWriteGuard};
+
 use crate::engine::compression;
 use crate::engine::reader::Qcow2Reader;
 use crate::engine::writer::Qcow2Writer;
@@ -47,11 +49,7 @@ impl Qcow2ImageAsync {
         let l1_index = self.l1_index_for(guest_offset);
 
         // Hold L2 read lock during the entire read (prevents use-after-free)
-        let _l2_guard = if l1_index < self.l2_locks.len() {
-            Some(self.l2_locks[l1_index].read().map_err(|_| poisoned_err())?)
-        } else {
-            None
-        };
+        let _l2_guard = self.l2_read_guard(l1_index)?;
 
         // Lock meta to resolve cluster mapping + perform I/O
         let mut meta = self.meta.lock().map_err(|_| poisoned_err())?;
@@ -118,11 +116,7 @@ impl Qcow2ImageAsync {
         let l1_index = self.l1_index_for(guest_offset);
 
         // Hold L2 write lock (exclusive) for the entire write
-        let _l2_guard = if l1_index < self.l2_locks.len() {
-            Some(self.l2_locks[l1_index].write().map_err(|_| poisoned_err())?)
-        } else {
-            None
-        };
+        let _l2_guard = self.l2_write_guard(l1_index)?;
 
         // Lock meta for the entire write operation
         let mut meta = self.meta.lock().map_err(|_| poisoned_err())?;
@@ -208,11 +202,7 @@ impl Qcow2ImageAsync {
         let l1_index = self.l1_index_for(guest_offset);
 
         // Hold L2 write lock (exclusive) for the entire write
-        let _l2_guard = if l1_index < self.l2_locks.len() {
-            Some(self.l2_locks[l1_index].write().map_err(|_| poisoned_err())?)
-        } else {
-            None
-        };
+        let _l2_guard = self.l2_write_guard(l1_index)?;
 
         // Lock meta for the entire compressed write operation
         let mut meta = self.meta.lock().map_err(|_| poisoned_err())?;
@@ -283,5 +273,19 @@ impl Qcow2ImageAsync {
         }
 
         Ok(())
+    }
+
+    fn l2_read_guard(&self, l1_index: usize) -> Result<Option<RwLockReadGuard<'_, ()>>> {
+        match self.l2_locks.get(l1_index) {
+            Some(lock) => Ok(Some(lock.read().map_err(|_| poisoned_err())?)),
+            None => Ok(None),
+        }
+    }
+
+    fn l2_write_guard(&self, l1_index: usize) -> Result<Option<RwLockWriteGuard<'_, ()>>> {
+        match self.l2_locks.get(l1_index) {
+            Some(lock) => Ok(Some(lock.write().map_err(|_| poisoned_err())?)),
+            None => Ok(None),
+        }
     }
 }
