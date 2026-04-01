@@ -200,7 +200,6 @@ impl<'a> Qcow2Reader<'a> {
                     Err(e) => {
                         // The Compressor trait doesn't carry guest_offset context,
                         // so patch it into DecompressionFailed errors before reporting.
-                        let e: Error = e.into();
                         let e = match e {
                             Error::DecompressionFailed { kind, message, .. } => {
                                 Error::DecompressionFailed { kind, message, guest_offset }
