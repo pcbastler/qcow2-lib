@@ -24,26 +24,21 @@ impl Qcow2ImageAsync {
         let ext = meta.extensions.iter().find_map(|e| match e {
             HeaderExtension::Blake3Hashes(ext) => Some(ext),
             _ => None,
-        });
-        match ext {
-            Some(ext) => {
-                let resolved_bits = if ext.hash_chunk_bits == 0 {
-                    crate::format::constants::BLAKE3_DEFAULT_HASH_CHUNK_BITS
-                } else {
-                    ext.hash_chunk_bits
-                };
-                Ok(Some(HashInfo {
-                    hash_size: ext.hash_size,
-                    hash_table_entries: ext.hash_table_entries,
-                    consistent: meta
-                        .header
-                        .autoclear_features
-                        .contains(AutoclearFeatures::BLAKE3_HASHES),
-                    hash_chunk_bits: resolved_bits,
-                }))
-            }
-            None => unreachable!(),
-        }
+        }).ok_or(Error::ShouldBeUnreachable)?;
+        let resolved_bits = if ext.hash_chunk_bits == 0 {
+            crate::format::constants::BLAKE3_DEFAULT_HASH_CHUNK_BITS
+        } else {
+            ext.hash_chunk_bits
+        };
+        Ok(Some(HashInfo {
+            hash_size: ext.hash_size,
+            hash_table_entries: ext.hash_table_entries,
+            consistent: meta
+                .header
+                .autoclear_features
+                .contains(AutoclearFeatures::BLAKE3_HASHES),
+            hash_chunk_bits: resolved_bits,
+        }))
     }
 
     /// Get the stored hash for a specific hash chunk index.

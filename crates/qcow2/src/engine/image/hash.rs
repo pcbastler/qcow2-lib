@@ -257,30 +257,26 @@ impl Qcow2Image {
 
     /// Get summary info about the hash extension.
     pub fn hash_info(&self) -> Option<HashInfo> {
-        hash_manager::detect_hashes(&self.meta.extensions).then(|| {
-            let ext = self.meta.extensions.iter().find_map(|e| match e {
-                HeaderExtension::Blake3Hashes(ext) => Some(ext),
-                _ => None,
-            });
-            match ext {
-                Some(ext) => {
-                    let resolved_bits = if ext.hash_chunk_bits == 0 {
-                        crate::format::constants::BLAKE3_DEFAULT_HASH_CHUNK_BITS
-                    } else {
-                        ext.hash_chunk_bits
-                    };
-                    HashInfo {
-                        hash_size: ext.hash_size,
-                        hash_table_entries: ext.hash_table_entries,
-                        consistent: self
-                            .meta.header
-                            .autoclear_features
-                            .contains(AutoclearFeatures::BLAKE3_HASHES),
-                        hash_chunk_bits: resolved_bits,
-                    }
-                }
-                None => unreachable!(),
-            }
+        if !hash_manager::detect_hashes(&self.meta.extensions) {
+            return None;
+        }
+        let ext = self.meta.extensions.iter().find_map(|e| match e {
+            HeaderExtension::Blake3Hashes(ext) => Some(ext),
+            _ => None,
+        })?;
+        let resolved_bits = if ext.hash_chunk_bits == 0 {
+            crate::format::constants::BLAKE3_DEFAULT_HASH_CHUNK_BITS
+        } else {
+            ext.hash_chunk_bits
+        };
+        Some(HashInfo {
+            hash_size: ext.hash_size,
+            hash_table_entries: ext.hash_table_entries,
+            consistent: self
+                .meta.header
+                .autoclear_features
+                .contains(AutoclearFeatures::BLAKE3_HASHES),
+            hash_chunk_bits: resolved_bits,
         })
     }
 

@@ -157,6 +157,9 @@ pub enum Error {
     /// A mutex or RwLock was poisoned by a panic in another thread.
     LockPoisoned,
 
+    /// A code path was reached that should be impossible.
+    ShouldBeUnreachable,
+
     /// The refcount table is full and cannot track additional clusters.
     RefcountTableFull,
 
@@ -442,7 +445,7 @@ impl fmt::Display for Error {
 impl Error {
     fn fmt_engine_error(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Format(_) | Self::Io { .. } => unreachable!(),
+            Self::Format(_) | Self::Io { .. } => write!(f, "unexpected error variant in fmt_engine_error"),
             Self::L2TableMisaligned { offset } =>
                 write!(f, "L2 table at offset 0x{offset:x} is not cluster-aligned"),
             Self::DecompressionFailed { kind, message, guest_offset } =>
@@ -463,6 +466,7 @@ impl Error {
             Self::NoRefcountManager => write!(f, "no refcount manager loaded — image was not opened with write support"),
             Self::CacheInconsistency { offset } => write!(f, "metadata cache inconsistency: entry missing after insertion at offset 0x{offset:x}"),
             Self::LockPoisoned => write!(f, "mutex or RwLock poisoned by a panic in another thread"),
+            Self::ShouldBeUnreachable => write!(f, "a code path was reached that should be impossible — this is a bug"),
             Self::RefcountTableFull =>
                 write!(f, "refcount table is full (no space for new clusters)"),
             Self::RefcountOverflow { cluster_offset, current, max } =>
@@ -540,7 +544,7 @@ impl Error {
                 write!(f, "block writer memory limit exceeded: {current} bytes used, limit is {limit} bytes"),
             Self::BlockWriterFinalized =>
                 write!(f, "block writer has already been finalized; no further writes are allowed"),
-            _ => unreachable!(),
+            _ => write!(f, "unexpected error variant in fmt_extended_error"),
         }
     }
 }
