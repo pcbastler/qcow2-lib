@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use qcow2::engine::image::Qcow2Image;
-use qcow2::engine::integrity::RepairMode;
+use qcow2::engine::integrity::{IntegrityReport, RepairMode};
 use qcow2::error::Result;
 
 /// Run the check subcommand.
@@ -21,22 +21,7 @@ pub fn run(path: &Path, repair: bool) -> Result<()> {
         let post_report = image.check_integrity()?;
 
         if !report.is_clean() {
-            println!();
-            println!("Repair summary:");
-            println!(
-                "  Mismatches fixed: {}",
-                report.mismatches.len()
-            );
-            println!("  Leaks fixed:      {}", report.leaks.len());
-
-            if post_report.is_clean() {
-                println!("  Status:           all issues repaired");
-            } else {
-                println!(
-                    "  Status:           {} issues remain after repair",
-                    post_report.total_errors()
-                );
-            }
+            print_repair_summary(&report, &post_report);
         }
 
         report
@@ -57,52 +42,21 @@ pub fn run(path: &Path, repair: bool) -> Result<()> {
     if report.is_clean() {
         println!("No errors found.");
     } else {
-        if !report.mismatches.is_empty() {
-            println!(
-                "Errors: {} clusters with refcount mismatches",
-                report.mismatches.len()
-            );
-            for m in report.mismatches.iter().take(10) {
-                eprintln!(
-                    "  cluster {}: expected refcount {}, stored {}",
-                    m.cluster_index, m.expected, m.stored
-                );
-            }
-            if report.mismatches.len() > 10 {
-                eprintln!("  ... and {} more", report.mismatches.len() - 10);
-            }
-        }
-        if !report.leaks.is_empty() {
-            println!(
-                "Leaked: {} clusters (non-zero refcount, no references)",
-                report.leaks.len()
-            );
-            for l in report.leaks.iter().take(10) {
-                eprintln!(
-                    "  cluster {}: stored refcount {}",
-                    l.cluster_index, l.stored_refcount
-                );
-            }
-            if report.leaks.len() > 10 {
-                eprintln!("  ... and {} more", report.leaks.len() - 10);
-            }
-        }
-
-        if !report.overlaps.is_empty() {
-            println!(
-                "Overlaps: {} metadata regions overlap",
-                report.overlaps.len()
-            );
-            for o in report.overlaps.iter().take(10) {
-                eprintln!(
-                    "  cluster {}: {} overlaps {}",
-                    o.cluster_index, o.region_a, o.region_b
-                );
-            }
-            if report.overlaps.len() > 10 {
-                eprintln!("  ... and {} more", report.overlaps.len() - 10);
-            }
-        }
+        print_issues(
+            "Errors: clusters with refcount mismatches",
+            &report.mismatches,
+            |m| format!("cluster {}: expected refcount {}, stored {}", m.cluster_index, m.expected, m.stored),
+        );
+        print_issues(
+            "Leaked: clusters (non-zero refcount, no references)",
+            &report.leaks,
+            |l| format!("cluster {}: stored refcount {}", l.cluster_index, l.stored_refcount),
+        );
+        print_issues(
+            "Overlaps: metadata regions overlap",
+            &report.overlaps,
+            |o| format!("cluster {}: {} overlaps {}", o.cluster_index, o.region_a, o.region_b),
+        );
 
         if !repair {
             println!();
@@ -111,4 +65,32 @@ pub fn run(path: &Path, repair: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_repair_summary(report: &IntegrityReport, post_report: &IntegrityReport) {
+    println!();
+    println!("Repair summary:");
+    println!("  Mismatches fixed: {}", report.mismatches.len());
+    println!("  Leaks fixed:      {}", report.leaks.len());
+    if post_report.is_clean() {
+        println!("  Status:           all issues repaired");
+    } else {
+        println!(
+            "  Status:           {} issues remain after repair",
+            post_report.total_errors()
+        );
+    }
+}
+
+fn print_issues<T>(title: &str, items: &[T], fmt: impl Fn(&T) -> String) {
+    if items.is_empty() {
+        return;
+    }
+    println!("{}: {}", title, items.len());
+    for item in items.iter().take(10) {
+        eprintln!("  {}", fmt(item));
+    }
+    if items.len() > 10 {
+        eprintln!("  ... and {} more", items.len() - 10);
+    }
 }

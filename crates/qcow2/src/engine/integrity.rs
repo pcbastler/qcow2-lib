@@ -274,8 +274,17 @@ fn detect_metadata_overlaps(
     backend: &dyn IoBackend,
     header: &Header,
 ) -> Result<Vec<MetadataOverlap>> {
+    let mut regions = collect_metadata_regions(backend, header)?;
+    regions.sort_by_key(|&(_, start, _)| start);
+    Ok(find_overlaps(&regions))
+}
+
+/// Collect all metadata regions as (name, start_cluster, end_cluster_exclusive) tuples.
+fn collect_metadata_regions(
+    backend: &dyn IoBackend,
+    header: &Header,
+) -> Result<Vec<(&'static str, u64, u64)>> {
     let cluster_size = header.cluster_size();
-    // Collect (name, start_cluster_idx, end_cluster_idx_exclusive) tuples
     let mut regions: Vec<(&'static str, u64, u64)> = Vec::new();
 
     // Header cluster
@@ -315,7 +324,6 @@ fn detect_metadata_overlaps(
     // Snapshot table
     if header.snapshot_count > 0 && header.snapshots_offset.0 > 0 {
         let snap_start = header.snapshots_offset.0 / cluster_size;
-        // Estimate snapshot table size (at least 1 cluster)
         regions.push(("snapshot table", snap_start, snap_start + 1));
     }
 
@@ -338,32 +346,32 @@ fn detect_metadata_overlaps(
         }
     }
 
-    // Sort by start cluster and detect overlaps
-    regions.sort_by_key(|&(_, start, _)| start);
+    Ok(regions)
+}
 
+/// Find overlapping regions in a sorted list of (name, start, end) tuples.
+fn find_overlaps(regions: &[(&'static str, u64, u64)]) -> Vec<MetadataOverlap> {
     let mut overlaps = Vec::new();
     for i in 0..regions.len() {
         for j in (i + 1)..regions.len() {
-            let (name_a, start_a, end_a) = regions[i];
+            let (_name_a, _start_a, end_a) = regions[i];
             let (name_b, start_b, end_b) = regions[j];
             // Since sorted by start, start_b >= start_a
             if start_b >= end_a {
-                break; // No more overlaps possible for region i
+                break;
             }
-            // Overlap: report each overlapping cluster
             let overlap_start = start_b;
             let overlap_end = end_a.min(end_b);
             for cluster_index in overlap_start..overlap_end {
                 overlaps.push(MetadataOverlap {
                     cluster_index,
-                    region_a: name_a,
+                    region_a: _name_a,
                     region_b: name_b,
                 });
             }
         }
     }
-
-    Ok(overlaps)
+    overlaps
 }
 
 /// Check integrity: build reference map and compare with stored refcounts.

@@ -131,84 +131,108 @@ impl<'a> Qcow2Reader<'a> {
                 host_offset,
                 intra_cluster_offset,
                 subclusters,
-            } => {
-                if subclusters.is_all_allocated() {
-                    self.read_allocated(buf, guest_offset, host_offset, intra_cluster_offset)
-                } else {
-                    self.read_subclustered(buf, guest_offset, Some(host_offset), intra_cluster_offset, subclusters)
-                }
-            }
+            } => self.read_allocated_chunk(buf, guest_offset, host_offset, intra_cluster_offset, subclusters),
             ClusterResolution::Zero {
                 bitmap,
                 intra_cluster_offset,
-            } => {
-                if bitmap.is_all_zero() {
-                    // Fast path: all subclusters zero → fill
-                    buf.fill(0);
-                    Ok(())
-                } else {
-                    self.read_subclustered(buf, guest_offset, None, intra_cluster_offset, bitmap)
-                }
-            }
+            } => self.read_zero_chunk(buf, guest_offset, intra_cluster_offset, bitmap),
             ClusterResolution::Unallocated => {
                 self.read_from_backing_or_zero(buf, guest_offset)
             }
             ClusterResolution::Compressed {
                 descriptor,
                 intra_cluster_offset,
-            } => {
-                let cluster_size = 1usize << self.cluster_bits;
-                let file_size = self.backend.file_size()?;
+            } => self.read_compressed_chunk(buf, guest_offset, descriptor, intra_cluster_offset),
+        }
+    }
 
-                // Validate compressed data offset is within file
-                if descriptor.host_offset >= file_size {
-                    return self.handle_read_error(
-                        buf,
-                        guest_offset,
-                        FormatError::MetadataOffsetBeyondEof {
-                            offset: descriptor.host_offset,
-                            size: descriptor.compressed_size,
-                            file_size,
-                            context: "compressed cluster data",
-                        },
-                    );
-                }
+    /// Read from an allocated cluster, dispatching to subclustered reads if needed.
+    fn read_allocated_chunk(
+        &mut self,
+        buf: &mut [u8],
+        guest_offset: u64,
+        host_offset: ClusterOffset,
+        intra_cluster_offset: IntraClusterOffset,
+        subclusters: SubclusterBitmap,
+    ) -> Result<()> {
+        if subclusters.is_all_allocated() {
+            self.read_allocated(buf, guest_offset, host_offset, intra_cluster_offset)
+        } else {
+            self.read_subclustered(buf, guest_offset, Some(host_offset), intra_cluster_offset, subclusters)
+        }
+    }
 
-                // The compressed_size from the descriptor is the maximum number
-                // of sectors the data can span, but may extend past EOF for the
-                // last compressed cluster in the file. Clamp to available data.
-                let available = file_size.saturating_sub(descriptor.host_offset);
-                let read_size = (descriptor.compressed_size as usize).min(available as usize);
-                let mut compressed_data = vec![0u8; read_size];
-                if let Err(e) = self
-                    .backend
-                    .read_exact_at(&mut compressed_data, descriptor.host_offset)
-                {
-                    return self.handle_read_error(buf, guest_offset, e);
-                }
-                let mut decompressed = vec![0u8; cluster_size];
-                match self.compressor.decompress(
-                    &compressed_data,
-                    &mut decompressed,
-                    self.compression_type,
-                ) {
-                    Ok(_) => {
-                        let intra = intra_cluster_offset.0 as usize;
-                        buf.copy_from_slice(&decompressed[intra..intra + buf.len()]);
-                        Ok(())
+    /// Read from a zero cluster, using fast-fill or subclustered dispatch.
+    fn read_zero_chunk(
+        &mut self,
+        buf: &mut [u8],
+        guest_offset: u64,
+        intra_cluster_offset: IntraClusterOffset,
+        bitmap: SubclusterBitmap,
+    ) -> Result<()> {
+        if bitmap.is_all_zero() {
+            buf.fill(0);
+            Ok(())
+        } else {
+            self.read_subclustered(buf, guest_offset, None, intra_cluster_offset, bitmap)
+        }
+    }
+
+    /// Read from a compressed cluster: validate, decompress, and copy the requested slice.
+    fn read_compressed_chunk(
+        &mut self,
+        buf: &mut [u8],
+        guest_offset: u64,
+        descriptor: crate::format::compressed::CompressedClusterDescriptor,
+        intra_cluster_offset: IntraClusterOffset,
+    ) -> Result<()> {
+        let cluster_size = 1usize << self.cluster_bits;
+        let file_size = self.backend.file_size()?;
+
+        if descriptor.host_offset >= file_size {
+            return self.handle_read_error(
+                buf,
+                guest_offset,
+                FormatError::MetadataOffsetBeyondEof {
+                    offset: descriptor.host_offset,
+                    size: descriptor.compressed_size,
+                    file_size,
+                    context: "compressed cluster data",
+                },
+            );
+        }
+
+        // Clamp read to available data (last compressed cluster may extend past EOF).
+        let available = file_size.saturating_sub(descriptor.host_offset);
+        let read_size = (descriptor.compressed_size as usize).min(available as usize);
+        let mut compressed_data = vec![0u8; read_size];
+        if let Err(e) = self
+            .backend
+            .read_exact_at(&mut compressed_data, descriptor.host_offset)
+        {
+            return self.handle_read_error(buf, guest_offset, e);
+        }
+
+        let mut decompressed = vec![0u8; cluster_size];
+        match self.compressor.decompress(
+            &compressed_data,
+            &mut decompressed,
+            self.compression_type,
+        ) {
+            Ok(_) => {
+                let intra = intra_cluster_offset.0 as usize;
+                buf.copy_from_slice(&decompressed[intra..intra + buf.len()]);
+                Ok(())
+            }
+            Err(e) => {
+                // Patch guest_offset into DecompressionFailed errors.
+                let e = match e {
+                    Error::DecompressionFailed { kind, message, .. } => {
+                        Error::DecompressionFailed { kind, message, guest_offset }
                     }
-                    Err(e) => {
-                        // The Compressor trait doesn't carry guest_offset context,
-                        // so patch it into DecompressionFailed errors before reporting.
-                        let e = match e {
-                            Error::DecompressionFailed { kind, message, .. } => {
-                                Error::DecompressionFailed { kind, message, guest_offset }
-                            }
-                            other => other,
-                        };
-                        self.handle_read_error(buf, guest_offset, e)
-                    }
-                }
+                    other => other,
+                };
+                self.handle_read_error(buf, guest_offset, e)
             }
         }
     }
