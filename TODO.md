@@ -1,13 +1,13 @@
 # TODO
 
-## Bugs (kritisch)
+## Bugs (critical)
 
-### ~~Bug 1: Normal Writer — L1-Tabelle überschreibt Refcount-Strukturen~~ (FIXED)
+### ~~Bug 1: Normal Writer — L1 Table Overwrites Refcount Structures~~ (FIXED)
 
-**Datei:** `crates/qcow2/src/engine/image/create.rs:330-334`
+**File:** `crates/qcow2/src/engine/image/create.rs:330-334`
 
-**Root Cause:** Das Disk-Layout in `create_on_backend()` ist hardcoded auf genau
-1 Cluster für die L1-Tabelle:
+**Root Cause:** The disk layout in `create_on_backend()` is hardcoded to exactly
+1 cluster for the L1 table:
 
 ```rust
 let l1_offset = cluster_size;          // Cluster 1
@@ -16,21 +16,22 @@ let rb_offset = 3 * cluster_size;      // Cluster 3
 let initial_clusters = 4u64;
 ```
 
-Für Images >4 TiB (bei 64 KiB Clustern) braucht die L1-Tabelle aber mehr als
-1 Cluster. Beispiel 13 TiB: 26.624 L1-Einträge × 8 Bytes = 212.992 Bytes =
-3,25 Cluster. Die L1-Tabelle wächst in den Bereich der Refcount-Tabelle
-(Cluster 2) und des Refcount-Blocks (Cluster 3) hinein.
+For images >4 TiB (with 64 KiB clusters) the L1 table needs more than
+1 cluster. Example 13 TiB: 26,624 L1 entries × 8 bytes = 212,992 bytes =
+3.25 clusters. The L1 table grows into the refcount table region
+(cluster 2) and the refcount block (cluster 3).
 
-**Schwellenwerte** (cluster_bits=16, non-extended L2):
-- Bis 4 TiB: L1 passt in 1 Cluster (8192 Einträge) → OK
-- Ab 4 TiB: L1-Index 8192+ überschreibt Refcount-Tabelle (Cluster 2)
-- Ab 8 TiB: L1-Index 16384+ überschreibt Refcount-Block (Cluster 3)
+**Thresholds** (cluster_bits=16, non-extended L2):
+- Up to 4 TiB: L1 fits in 1 cluster (8192 entries) → OK
+- From 4 TiB: L1 index 8192+ overwrites refcount table (cluster 2)
+- From 8 TiB: L1 index 16384+ overwrites refcount block (cluster 3)
 
-**Beweis:** QEMU meldet `L1 entry with reserved bits set: 1000100010001`.
-Der Wert `0x0001_0001_0001_0001` entspricht exakt vier 16-Bit-Refcount-Einträgen
-(Wert 1, Big-Endian) — der Refcount-Block wird als L1-Entry fehlinterpretiert.
+**Proof:** QEMU reports `L1 entry with reserved bits set: 1000100010001`.
+The value `0x0001_0001_0001_0001` corresponds exactly to four 16-bit refcount
+entries (value 1, big-endian) — the refcount block is misinterpreted as an
+L1 entry.
 
-**Betrifft auch:** `create_overlay_on_backend()` (gleiche Datei, gleiches Layout).
+**Also affects:** `create_overlay_on_backend()` (same file, same layout).
 
 **Fix:**
 ```rust
@@ -43,66 +44,66 @@ let initial_clusters = 3 + l1_clusters;
 
 ---
 
-### ~~Bug 2: BlockWriter — Compressed Cluster Corruption bei hohen Offsets~~ (FIXED)
+### ~~Bug 2: BlockWriter — Compressed Cluster Corruption at High Offsets~~ (FIXED)
 
-**Root Cause:** `allocate_compressed()` in `InMemoryMetadata` hatte einen
-Cursor-Overflow-Bug beim Compressed-Cluster-Packing. Wenn komprimierte Einträge
-einen Host-Cluster exakt füllten (128 × 512 = 65536 = cluster_size), rückte der
-`compressed_cursor` auf `next_host_offset` vor. Die Modulo-Prüfung
-`cursor % cluster_size == 0` sah das als freien Platz — nachfolgende Writes
-gingen in nicht-allokierten Speicher. Beim Finalize wurden Metadaten (L2-Tabellen)
-über die komprimierten Daten geschrieben.
+**Root Cause:** `allocate_compressed()` in `InMemoryMetadata` had a
+cursor overflow bug in compressed cluster packing. When compressed entries
+filled a host cluster exactly (128 × 512 = 65536 = cluster_size), the
+`compressed_cursor` advanced to `next_host_offset`. The modulo check
+`cursor % cluster_size == 0` treated this as free space — subsequent writes
+went into unallocated memory. During finalize, metadata (L2 tables) was
+written over the compressed data.
 
-**Drei Unter-Bugs:**
-1. Cursor-Overflow ohne Interleaving → Fix: `compressed_cluster_end` Feld trackt
-   exakt das Ende des aktuellen Packing-Clusters
-2. Cursor nicht invalidiert wenn `allocate_cluster()` den Cursor-Bereich allokiert
-   → Fix: Invalidierung in `allocate_cluster()` und `allocate_n_clusters()`
-3. Reader-Fehlermeldung zeigte `guest_offset: 0x0` statt des echten Offsets
-   → Fix: `DecompressionFailed` Error im Reader mit korrektem guest_offset patchen
+**Three sub-bugs:**
+1. Cursor overflow without interleaving → Fix: `compressed_cluster_end` field
+   tracks the exact end of the current packing cluster
+2. Cursor not invalidated when `allocate_cluster()` allocates into the cursor
+   region → Fix: invalidation in `allocate_cluster()` and `allocate_n_clusters()`
+3. Reader error message showed `guest_offset: 0x0` instead of the actual offset
+   → Fix: patch `DecompressionFailed` error in reader with correct guest_offset
 
-**Dateien:**
-- `crates/qcow2-core/src/engine/block_writer/metadata.rs` (Fixes 1+2, 6 Unit-Tests)
-- `crates/qcow2-core/src/engine/reader.rs` (Fix 3)
-- `crates/qcow2/tests/block_writer.rs` (2 End-to-End-Regressionstests)
+**Files:**
+- `crates/qcow2-core/src/engine/block_writer/metadata.rs` (fixes 1+2, 6 unit tests)
+- `crates/qcow2-core/src/engine/reader.rs` (fix 3)
+- `crates/qcow2/tests/block_writer.rs` (2 end-to-end regression tests)
 
 ---
 
-## Metadaten-Überschreibungsschutz
+## Metadata Overwrite Protection
 
-Aktuell existieren nur `debug_assert!`-basierte Checks (in Release komplett weg)
-und eine nachträgliche Overlap-Detection im Integrity Checker. Folgende
-Runtime-Schutzmechanismen fehlen:
+Currently only `debug_assert!`-based checks exist (completely absent in release
+builds) and a post-hoc overlap detection in the integrity checker. The following
+runtime protection mechanisms are missing:
 
-- [ ] **`debug_assert!` → Runtime-Check in `write_l1_entry()`** — Der bestehende
+- [ ] **`debug_assert!` → runtime check in `write_l1_entry()`** — The existing
   `debug_assert!(index.0 < self.mapper.l1_table().len())` in
-  `crates/qcow2-core/src/engine/writer/mod.rs:291` sollte ein echter
-  `Error`-Return werden. Ein L1-Index-Overflow ist ein fataler Logikfehler, der
-  sofort abgefangen werden muss — auch in Release. Kosten: 1 Vergleich pro
-  L1-Write (vernachlässigbar).
+  `crates/qcow2-core/src/engine/writer/mod.rs:291` should become an actual
+  `Error` return. An L1 index overflow is a fatal logic error that must be
+  caught immediately — even in release builds. Cost: 1 comparison per
+  L1 write (negligible).
 
-- [ ] **`debug_assert_layout_no_overlap()` → Runtime-Check** — Die Funktion in
-  `crates/qcow2/src/engine/image/create.rs:95` verwendet `debug_assert!`. Da sie
-  nur bei Image-Erstellung (einmalig) aufgerufen wird, kann sie ohne
-  Performance-Einbußen zu einem echten `Error`-Return werden.
+- [ ] **`debug_assert_layout_no_overlap()` → runtime check** — The function in
+  `crates/qcow2/src/engine/image/create.rs:95` uses `debug_assert!`. Since it
+  is only called during image creation (once), it can become an actual
+  `Error` return with no performance impact.
 
-- [ ] **`allocate_cluster()` Metadaten-Kollisionsprüfung** —
+- [ ] **`allocate_cluster()` metadata collision check** —
   `RefcountManager::allocate_cluster()` in
-  `crates/qcow2-core/src/engine/refcount_manager.rs:121` prüft nicht, ob der
-  allokierte Offset mit bestehenden Metadaten-Regionen (Header, L1-Table,
-  Refcount-Table) kollidiert. Fix: Der RefcountManager kennt die Header-Offsets
-  bereits — ein Check `new_offset < data_start` bei Append-Mode wäre kostenlos.
+  `crates/qcow2-core/src/engine/refcount_manager.rs:121` does not check whether
+  the allocated offset collides with existing metadata regions (header, L1 table,
+  refcount table). Fix: the RefcountManager already knows the header offsets — a
+  check `new_offset < data_start` in append mode would be free.
 
-- [ ] **`write_l2_entry()` Offset-Validierung** — Schreibt an
-  `l2_table_offset + index * entry_size` ohne zu prüfen, ob der Ziel-Offset
-  tatsächlich ein allokierter L2-Cluster ist. Ein korrupter L1-Eintrag könnte
-  einen L2-Write in beliebige Metadaten-Bereiche umleiten.
+- [ ] **`write_l2_entry()` offset validation** — Writes to
+  `l2_table_offset + index * entry_size` without verifying that the target offset
+  is actually an allocated L2 cluster. A corrupt L1 entry could redirect an
+  L2 write into arbitrary metadata regions.
 
-- [ ] **Zentrales Metadaten-Region-Registry** — Aktuell weiß kein Codepfad zur
-  Laufzeit, welche Byte-Bereiche zu welchen Strukturen gehören. Ein leichtgewichtiges
-  Registry (sortierte Liste von `(start, end, kind)`) im `Qcow2Image` würde
-  ermöglichen, jeden Write gegen bekannte Metadaten-Regionen zu validieren. Overhead:
-  einmalig bei `open()` aufbauen, O(log n) Lookup pro Allokation.
+- [ ] **Central metadata region registry** — Currently no code path knows at
+  runtime which byte ranges belong to which structures. A lightweight registry
+  (sorted list of `(start, end, kind)`) in `Qcow2Image` would allow validating
+  every write against known metadata regions. Overhead: built once during
+  `open()`, O(log n) lookup per allocation.
 
 ---
 
@@ -121,7 +122,7 @@ out-of-bounds. Use `scripts/find-production-indexing.sh` to regenerate.
 - [ ] **bitmap_manager.rs** — `entries[idx]` (414, 456, 483, 554, 588, 589, 683, 685), `data[byte_off]` (469)
 - [ ] **reader.rs** — `buf[pos..pos+len]` slice accesses (197, 253, 316, 317, 321, 331, 335, 339, 371, 372)
 - [ ] **writer/data_ops.rs** — `buf[start..]` slice accesses (60, 108, 210, 261, 262, 347, 490), block_writer
-- [ ] **Format-Parsing** — `bytes[pos..]` in snapshot.rs, header_extension.rs, l1.rs, l2.rs, refcount.rs, bitmap.rs, hash.rs
+- [ ] **Format parsing** — `bytes[pos..]` in snapshot.rs, header_extension.rs, l1.rs, l2.rs, refcount.rs, bitmap.rs, hash.rs
 - [ ] **Encryption** — `data[off..off+N]` in luks_header.rs, af_splitter.rs, mod.rs
 - [ ] **Rescue/Recovery** — `buf[entry_offset+N]` in orphan.rs, classifier.rs, refinement.rs
 - [ ] **integrity.rs** — `regions[i]`/`regions[j]` (347-348), `rt_buf[i*SIZE..]`
