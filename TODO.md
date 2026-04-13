@@ -139,6 +139,20 @@ out-of-bounds. Use `scripts/find-production-indexing.sh` to regenerate.
   small writes this is an I/O read per write. Fix: store `Option<HashTable>` in
   `Qcow2Image`, lazy-load on first hash write, invalidate on flush/snapshot ops.
 
+## Async Concurrency
+
+- [ ] **Investigate: Meta mutex potentially held too long in `Qcow2ImageAsync`** —
+  `read_chunk` and `write_chunk` in
+  `crates/qcow2/src/engine/image_async/read_write.rs:55,122` appear to hold the
+  global `Mutex<ImageMeta>` for the entire operation including data I/O. If
+  confirmed, all reads and writes would be globally serialized, rendering the
+  per-L2 `RwLock`s ineffective — the documented parallelism (doc-comment table
+  in `mod.rs`) would not match the implementation. Needs verification: whether
+  the meta mutex is actually held across data I/O, and if so, whether it can be
+  shortened to cluster resolution only.
+
+---
+
 ## API Design
 
 - [ ] **`write_at` with empty buffer** — Currently a silent no-op (POSIX
