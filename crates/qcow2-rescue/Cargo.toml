@@ -1,10 +1,12 @@
 [package]
 name = "qcow2-rescue"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
 description = "Recovery tool for corrupted QCOW2 images"
-license-file = "../../LICENSE"
-rust-version = "1.70"
 
 [dependencies]
 qcow2-format = { path = "../qcow2-format" }

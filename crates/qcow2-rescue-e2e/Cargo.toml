@@ -1,10 +1,12 @@
 [package]
 name = "qcow2-rescue-e2e"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
 description = "End-to-end tests for qcow2-rescue with real filesystems"
-license-file = "../../LICENSE"
-rust-version = "1.70"
 publish = false
 
 [[bin]]

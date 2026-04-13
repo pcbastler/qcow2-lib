@@ -10,6 +10,15 @@ members = [
 resolver = "2"
 exclude = ["fuzz"]
 
+[workspace.package]
+authors = ["Sebastian <sebastian@az-mail.org>"]
+edition = "2021"
+rust-version = "1.70"
+license-file = "LICENSE"
+repository = "https://github.com/pcbastler/qcow2-lib"
+keywords = ["qcow2", "disk-image", "virtual-machine", "storage"]
+categories = ["filesystem", "encoding", "no-std"]
+
 [workspace.lints.clippy]
 cognitive_complexity = "warn"
 too_many_lines = "warn"
