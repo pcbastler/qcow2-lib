@@ -158,6 +158,20 @@ qcow2-tool hash disk.qcow2
 
 A standalone tool for recovering data from corrupted QCOW2 images that `qemu-img check -r all` cannot repair. See the [qcow2-rescue README](crates/qcow2-rescue/README.md) for details.
 
+## Differences from QEMU
+
+This implementation extends the QCOW2 format in several ways that go beyond what QEMU supports. Standard QCOW2 features (deflate compression, extended L2, dirty bitmaps, external data files, LUKS1 encryption) are fully QEMU-interoperable.
+
+| Feature | Status | QEMU interop |
+|---------|--------|--------------|
+| LUKS2 encryption | Supported alongside LUKS1 | QEMU only supports LUKS1 — LUKS2 images cannot be opened by QEMU |
+| BLAKE3 hashes | Custom header extension (`0x434C4233`) for per-cluster integrity | Unknown extension to QEMU — autoclear bit ensures graceful degradation |
+| Zstd compression | Full support (`compression_type=1`) | Requires QEMU 5.0+; older versions refuse the incompatible flag |
+
+**LUKS2:** Adds JSON-based metadata, per-keyslot KDF selection (PBKDF2 or Argon2id), and flexible keyslot parameters. If QEMU adds LUKS2 support in the future, the on-disk format may differ.
+
+**BLAKE3:** Extension type `CLB3` stores per-chunk BLAKE3 hashes (128-bit truncated or full 256-bit) in a two-level table structure. The autoclear bit (`0x04`) is cleared by tools that don't maintain hashes, so QEMU can safely read and write images with stale hash data.
+
 ## Documentation
 
 The `docs/` directory contains detailed documentation:
