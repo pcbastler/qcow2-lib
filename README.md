@@ -1,5 +1,7 @@
 # qcow2-lib
 
+> ⚠️ **Note:** This project is under active development. APIs may change without notice.
+
 > **Disclaimer:** This software is provided "as is", without warranty of any kind, express or
 > implied, including but not limited to the warranties of merchantability, fitness for a particular
 > purpose, correctness, or completeness. This software may contain bugs that can destroy or
