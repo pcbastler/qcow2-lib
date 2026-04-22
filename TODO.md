@@ -153,6 +153,29 @@ out-of-bounds. Use `scripts/find-production-indexing.sh` to regenerate.
 
 ---
 
+## LUKS2 Compatibility
+
+- [ ] **Custom incompatible extension for LUKS2** — `qemu-img` qcow2 does not
+  support LUKS2. We currently write `LUKS2` into the LUKS header version field
+  of the standard crypto header extension. If QEMU later adds LUKS2 support
+  with a different on-disk layout, our existing images would be incompatible.
+
+  **Plan:**
+  1. Define our own incompatible qcow2 header extension specifically for LUKS2
+     (distinct magic from the standard crypto extension).
+  2. On write/create: if LUKS2 is selected, emit the custom extension instead
+     of repurposing the LUKS1 crypto extension.
+  3. On open: detect LUKS2 images using the old layout (version field = 2 in
+     the standard crypto extension) and convert them to the new extension
+     (opportunistic migration on write, or explicit during open).
+
+  **Outcome:** later, when QEMU implements LUKS2:
+  - If their format matches ours → declare compatibility, optionally read both.
+  - If incompatible → users need a one-time update tool, but no newly created
+    images after the migration produce version conflicts with QEMU's LUKS2.
+
+---
+
 ## API Design
 
 - [ ] **`write_at` with empty buffer** — Currently a silent no-op (POSIX
